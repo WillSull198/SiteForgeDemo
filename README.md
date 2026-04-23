@@ -4,6 +4,11 @@ SiteForge is a React + Vite construction operations demo that links field activi
 
 ## Latest Repair Pass
 
+- Final hardening pass added a WCAG-focused contrast override layer for the white/black redesign so cards, tables, inputs, badges, modals, notifications, timelines, and empty states remain readable on light backgrounds.
+- Role permissions are now centralised in `src/services/permissions.js`; PM ClientFlow and Problems workflows now use explicit capabilities for view/create/send/resolve/escalate/generate-contract actions.
+- ClientFlow route deep links now select the requested approval, PMs can send approvals, mark approvals approved/declined, and generate contract packs from approved approvals.
+- Problems now show PM/Contract Admin/Director scoped site data instead of only the active site, with working status/priority filters and permission-gated create/resolve/escalate actions.
+- Approval source creation now correctly generates and stores a client portal token/link, fixing broken portal URLs on newly created draft approvals.
 - The internal product shell has been restyled into a clean white/black professional theme with amber action accents, brighter tables, readable cards, and polished modal/input/button states.
 - A generic IndexedDB CRUD service (`src/services/db.js`) now supports modular persistence for files, photos, plans, settings, audit records, and future per-module slices.
 - Shared photo upload now works across diary, problems, variations, QA, and safety records, with browser-side compression, thumbnail previews, drag-and-drop, IndexedDB persistence, and lightbox viewing.

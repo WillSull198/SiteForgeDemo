@@ -4,6 +4,7 @@ import { Icons } from "../components/icons";
 import DataTable from "../components/DataTable";
 import { Badge, Button, Card, MetricGrid, Modal, RestrictedPanel, Tabs } from "../components/ui";
 import { useSiteForge } from "../services/siteforgeStore";
+import { can } from "../services/permissions";
 
 const copyJson = async (payload) => {
   if (!payload) return;
@@ -26,7 +27,7 @@ const downloadJson = (name, payload) => {
 export default function IntegrationsPage() {
   const { state, actions } = useSiteForge();
   const role = state.session.role;
-  const canView = role === "Contract Admin" || role === "Director";
+  const canView = can(role, "integrations.view");
   const [tab, setTab] = useState("teams");
   const [payloadPreview, setPayloadPreview] = useState(null);
 

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useSiteForge } from "../services/siteforgeStore";
+import { can } from "../services/permissions";
 import DataTable from "../components/DataTable";
 import { Badge, Button, Card, MetricGrid, RestrictedPanel, Tabs } from "../components/ui";
 import { Icons } from "../components/icons";
@@ -8,7 +9,8 @@ export default function PresencePage() {
   const { state, actions } = useSiteForge();
   const role = state.session.role;
   const siteId = state.session.siteId;
-  const canView = role === "Supervisor" || role === "Project Manager" || role === "Director";
+  const canView = can(role, "presence.view");
+  const canResolve = can(role, "presence.resolve_anomaly");
   const [tab, setTab] = useState("overview");
 
   const records = useMemo(
@@ -104,11 +106,13 @@ export default function PresencePage() {
                   label: "Verify",
                   tone: "bt-g",
                   onClick: (record) => actions.resolvePresence(record.id, "verify", "Verified by supervisor review."),
+                  when: () => canResolve,
                 },
                 {
                   label: "Hold",
                   tone: "bt-r",
                   onClick: (record) => actions.resolvePresence(record.id, "hold", "Hold for payroll review."),
+                  when: () => canResolve,
                 },
               ]}
               bulkActions={[
@@ -173,9 +177,11 @@ export default function PresencePage() {
                 </div>
                 <div className="fx" style={{ gap: 6 }}>
                   <Badge tone="critical">{record.confidence}%</Badge>
-                  <Button small tone="bt-g" onClick={() => actions.resolvePresence(record.id, "verify", "Verified from anomaly dashboard.")}>
-                    Resolve
-                  </Button>
+                  {canResolve ? (
+                    <Button small tone="bt-g" onClick={() => actions.resolvePresence(record.id, "verify", "Verified from anomaly dashboard.")}>
+                      Resolve
+                    </Button>
+                  ) : null}
                 </div>
               </div>
             ))}

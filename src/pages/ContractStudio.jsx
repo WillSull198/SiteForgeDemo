@@ -3,6 +3,7 @@ import ContractViewer from "../components/ContractViewer";
 import FileDropZone from "../components/FileDropZone";
 import { useSiteForge } from "../services/siteforgeStore";
 import { exportElementToPdf } from "../services/pdfService";
+import { can } from "../services/permissions";
 import { Icons } from "../components/icons";
 import { Badge, Button, Card, Modal, Tabs } from "../components/ui";
 
@@ -34,8 +35,8 @@ export default function ContractStudio() {
   const selectedSite = state.sites.find((site) => site.id === selectedContract?.siteId) || null;
   const selectedClient = state.clients.find((client) => client.id === selectedApproval?.clientId) || null;
 
-  const canAdmin = role === "Contract Admin";
-  const canBuilderReview = role === "Project Manager" || role === "Supervisor";
+  const canAdmin = can(role, "contracts.edit_draft");
+  const canBuilderReview = can(role, "contracts.sign_builder");
 
   const clauseSuggestions = useMemo(() => {
     if (!selectedTemplate) return [];

@@ -11,6 +11,7 @@ import PDFViewer from "../components/PDFViewer";
 import { exportCsv, exportElementToPdf } from "../services/pdfService";
 import { previewPdf } from "../services/documentIntelligence";
 import { useSiteForge } from "../services/siteforgeStore";
+import { can } from "../services/permissions";
 import { Icons } from "../components/icons";
 import {
   Badge,
@@ -574,24 +575,65 @@ function TasksPage() {
 
 function ProblemsPage() {
   const { state, actions, derived } = useSiteForge();
+  const role = state.session.role;
   const siteId = state.session.siteId;
-  const [selectedId, setSelectedId] = useState(state.problems.find((problem) => problem.siteId === siteId)?.id || null);
+  const routeEntityId = state.session.route?.entityId;
+  const accessibleSiteIds = new Set(derived.accessibleSites.map((site) => site.id));
+  const [selectedId, setSelectedId] = useState(routeEntityId || state.problems.find((problem) => problem.siteId === siteId)?.id || null);
   const [open, setOpen] = useState(false);
+  const [statusFilter, setStatusFilter] = useSessionState("sf-problems-status", "all");
+  const [priorityFilter, setPriorityFilter] = useSessionState("sf-problems-priority", "all");
   const [reply, setReply] = useState("");
   const [form, setForm] = useState({ title: "", description: "", priority: "medium", costImpact: "", timeImpact: "", photos: [] });
-  const problems = state.problems.filter((problem) => problem.siteId === siteId);
+  const canView = can(role, "problems.view");
+  const canCreateProblem = can(role, "problems.create");
+  const canResolveProblem = can(role, "problems.resolve");
+  const canEscalateProblem = can(role, "problems.escalate");
+  const scopedProblems = state.problems.filter((problem) => {
+    if (role === "Director" || role === "Contract Admin" || role === "Project Manager") {
+      return accessibleSiteIds.has(problem.siteId);
+    }
+    return problem.siteId === siteId;
+  });
+  const problems = scopedProblems.filter((problem) => {
+    const statusOk = statusFilter === "all" || problem.status === statusFilter;
+    const priorityOk = priorityFilter === "all" || problem.priority === priorityFilter;
+    return statusOk && priorityOk;
+  });
   const selected = problems.find((problem) => problem.id === selectedId) || problems[0];
+
+  useEffect(() => {
+    if (routeEntityId) {
+      setSelectedId(routeEntityId);
+    }
+  }, [routeEntityId]);
+
+  if (!canView) {
+    return <RestrictedPanel title="Problems" body="Your current role cannot view site problems." />;
+  }
 
   return (
     <div className="oy fin">
       <div className="fb mb8">
-        <div className="fx" style={{ gap: 6 }}>
+        <div className="fx" style={{ gap: 6, flexWrap: "wrap" }}>
           <Badge tone="critical">{problems.filter((problem) => problem.priority === "critical").length} critical</Badge>
           <Badge tone="medium">{problems.filter((problem) => problem.status === "open").length} open</Badge>
+          <select className="role-select" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+            {["all", "open", "in-progress", "resolved", "closed"].map((status) => (
+              <option key={status} value={status}>{status === "all" ? "All status" : status}</option>
+            ))}
+          </select>
+          <select className="role-select" value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value)}>
+            {["all", "critical", "high", "medium", "low"].map((priority) => (
+              <option key={priority} value={priority}>{priority === "all" ? "All priority" : priority}</option>
+            ))}
+          </select>
         </div>
-        <Button tone="bt-p" icon={Icons.plus} onClick={() => setOpen(true)}>
-          Report Problem
-        </Button>
+        {canCreateProblem ? (
+          <Button tone="bt-p" icon={Icons.plus} onClick={() => setOpen(true)}>
+            Report Problem
+          </Button>
+        ) : null}
       </div>
       <div className="g32">
         <Card title="Problems" icon={Icons.alert}>
@@ -621,12 +663,14 @@ function ProblemsPage() {
                   { label: `${selected.timeImpact}d`, tone: "medium" },
                 ]}
                 actions={[
-                  {
-                    label: "Raise Approval",
-                    tone: "bt-p",
-                    icon: Icons.link,
-                    onClick: () => actions.createApprovalFromSource({ sourceType: "problem", sourceId: selected.id, approvalType: "Variation", handUp: state.session.role === "Supervisor" }),
-                  },
+                  canEscalateProblem
+                    ? {
+                        label: "Raise Approval",
+                        tone: "bt-p",
+                        icon: Icons.link,
+                        onClick: () => actions.createApprovalFromSource({ sourceType: "problem", sourceId: selected.id, approvalType: "Variation", handUp: role === "Supervisor" }),
+                      }
+                    : null,
                   {
                     label: "Suggest RFI",
                     icon: Icons.help,
@@ -640,12 +684,14 @@ function ProblemsPage() {
                       });
                     },
                   },
-                  {
-                    label: selected.status === "resolved" ? "Reopen" : "Resolve",
-                    tone: selected.status === "resolved" ? "" : "bt-g",
-                    onClick: () => actions.setProblemStatus(selected.id, selected.status === "resolved" ? "open" : "resolved"),
-                  },
-                ]}
+                  canResolveProblem
+                    ? {
+                        label: selected.status === "resolved" ? "Reopen" : "Resolve",
+                        tone: selected.status === "resolved" ? "" : "bt-g",
+                        onClick: () => actions.setProblemStatus(selected.id, selected.status === "resolved" ? "open" : "resolved"),
+                      }
+                    : null,
+                ].filter(Boolean)}
               />
               <div className="mt">
                 {selected.thread.map((entry) => (
@@ -1135,6 +1181,7 @@ function RfisPage() {
 function VariationsPage() {
   const { state, actions } = useSiteForge();
   const siteId = state.session.siteId;
+  const role = state.session.role;
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ title: "", description: "", reason: "", value: "", days: "", trade: "General", priority: "medium", templateId: "", photos: [] });
   const variations = state.variations.filter((variation) => variation.siteId === siteId);
@@ -1180,7 +1227,7 @@ function VariationsPage() {
                     <Badge tone={variation.status === "signed" ? "passed" : variation.status === "submitted" ? "medium" : "high"}>{variation.status}</Badge>
                   </td>
                   <td>
-                    {variation.status === "submitted" && state.session.role !== "Supervisor" ? (
+                    {variation.status === "submitted" && can(role, "clientflow.send") ? (
                       <Button small tone="bt-p" onClick={() => actions.sendVariationToClient(variation.id, variation.templateId)}>
                         Send to Client
                       </Button>

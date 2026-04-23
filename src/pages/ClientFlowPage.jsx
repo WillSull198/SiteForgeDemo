@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import AIBlock from "../components/AIBlock";
 import DataTable from "../components/DataTable";
 import { useSiteForge } from "../services/siteforgeStore";
+import { can } from "../services/permissions";
 import { Icons, renderIcon } from "../components/icons";
 import {
   Badge,
@@ -47,12 +48,16 @@ export default function ClientFlowPage() {
   const { state, actions, derived } = useSiteForge();
   const role = state.session.role;
   const siteId = state.session.siteId;
+  const routeEntityId = state.session.route?.entityId;
   const currentNow = Date.parse((state.demo.simulatedNow || "").replace(" ", "T")) || Date.now();
-  const canSend = role === "Project Manager" || role === "Contract Admin";
-  const canReview = role !== "Subcontractor";
+  const canView = can(role, "clientflow.view");
+  const canCreateApproval = can(role, "clientflow.create");
+  const canSend = can(role, "clientflow.send");
+  const canApprove = can(role, "clientflow.approve");
+  const canGenerateContract = can(role, "clientflow.generate_contract");
   const [tab, setTab] = useState("dashboard");
   const [createOpen, setCreateOpen] = useState(false);
-  const [selectedId, setSelectedId] = useState(derived.currentApproval?.id || state.approvals[0]?.id || null);
+  const [selectedId, setSelectedId] = useState(routeEntityId || derived.currentApproval?.id || state.approvals[0]?.id || null);
   const [message, setMessage] = useState("");
   const [form, setForm] = useState(defaultForm);
 
@@ -74,6 +79,16 @@ export default function ClientFlowPage() {
       setSelectedId(selected.id);
     }
   }, [selected?.id]);
+
+  useEffect(() => {
+    if (routeEntityId) {
+      setSelectedId(routeEntityId);
+      const routed = state.approvals.find((approval) => approval.id === routeEntityId);
+      if (routed?.siteId && routed.siteId !== siteId && role !== "Director") {
+        actions.setSite(routed.siteId);
+      }
+    }
+  }, [actions, role, routeEntityId, siteId, state.approvals]);
 
   const sourceOptions = useMemo(() => {
     const collections = {
@@ -109,7 +124,7 @@ export default function ClientFlowPage() {
   }, [siteApprovals]);
 
   const createApproval = () => {
-    if (!form.sourceId) return;
+    if (!form.sourceId || !canCreateApproval) return;
     actions.createApprovalFromSource({
       sourceType: form.sourceType,
       sourceId: form.sourceId,
@@ -137,7 +152,7 @@ export default function ClientFlowPage() {
     }));
   }, [currentNow, siteApprovals]);
 
-  if (!canReview) {
+  if (!canView) {
     return <div className="restricted">This role cannot access the internal ClientFlow workspace.</div>;
   }
 
@@ -156,9 +171,13 @@ export default function ClientFlowPage() {
             { value: "analytics", label: "Analytics" },
           ]}
         />
-        <Button tone="bt-p" icon={Icons.plus} onClick={() => setCreateOpen(true)}>
-          New Approval
-        </Button>
+        {canCreateApproval ? (
+          <Button tone="bt-p" icon={Icons.plus} onClick={() => setCreateOpen(true)}>
+            New Approval
+          </Button>
+        ) : (
+          <Badge tone="medium">Draft hand-up only</Badge>
+        )}
       </div>
 
       {tab === "dashboard" ? (
@@ -252,6 +271,21 @@ export default function ClientFlowPage() {
                       <Button small tone="bt-p" icon={Icons.send} onClick={() => actions.sendApproval(selected.id)}>
                         Send to Client
                       </Button>
+                    ) : null}
+                    {selected.status === "approved" && canGenerateContract ? (
+                      <Button small tone="bt-p" icon={Icons.file} onClick={() => actions.generateContractFromApproval(selected.id)}>
+                        Generate Contract Pack
+                      </Button>
+                    ) : null}
+                    {["awaiting-client", "question", "changes-requested"].includes(selected.status) && canApprove ? (
+                      <>
+                        <Button small tone="bt-g" icon={Icons.check} onClick={() => actions.markApprovalInternal(selected.id, "approved", "Marked approved internally after client confirmation.")}>
+                          Mark Approved
+                        </Button>
+                        <Button small tone="bt-r" icon={Icons.x} onClick={() => actions.markApprovalInternal(selected.id, "declined", "Marked declined internally.")}>
+                          Mark Declined
+                        </Button>
+                      </>
                     ) : null}
                     {selected.status === "awaiting-client" ? (
                       <Button small icon={Icons.shuffle} onClick={() => actions.sendDirectorEscalation(selected.siteId, selected.title)}>

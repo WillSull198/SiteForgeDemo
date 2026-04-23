@@ -895,6 +895,64 @@ function materialiseContractTemplate(contractPack, approval, state) {
   contractPack.templateId = template.id;
 }
 
+function createContractPackForApproval(next, approval, helpers, { autoRelease = false } = {}) {
+  if (!approval || approval.contractPackId) {
+    return next.contractPacks.find((pack) => pack.docId === approval?.contractPackId) || null;
+  }
+  const site = next.sites.find((siteItem) => siteItem.id === approval.siteId);
+  const client = next.clients.find((clientItem) => clientItem.id === approval.clientId);
+  const contractPack = generateDraft({
+    approval,
+    client,
+    site,
+    builder: next.company || next.settings?.company || APP_CONFIG.builder,
+    templates: next.contractTemplates,
+  });
+  materialiseContractTemplate(contractPack, approval, next);
+  next.contractPacks.unshift(contractPack);
+  approval.contractPackId = contractPack.docId;
+
+  if (autoRelease) {
+    contractPack.status = "contract-awaiting-client";
+    contractPack.signatures.builder = {
+      name: next.company?.name || APP_CONFIG.builder.name,
+      role: "Builder",
+      signedAt: nowStamp(),
+      ip: "browser",
+    };
+    contractPack.auditLog.unshift({
+      id: randomId("cpa"),
+      action: "builder signature fast-tracked",
+      by: "System",
+      at: nowStamp(),
+      details: "Variation approval was released for client e-signature after approval.",
+    });
+    approval.status = "contract-awaiting-client";
+    helpers.appendTimeline(approval, {
+      type: "contract-awaiting-client",
+      actor: "System",
+      role: "System",
+      text: "Contract pack auto-generated, builder signature recorded, and released for client e-signature.",
+    });
+  } else {
+    contractPack.status = "contract-drafted";
+    approval.status = "contract-drafted";
+    helpers.appendTimeline(approval, {
+      type: "contract-drafted",
+      actor: "System",
+      role: "System",
+      text: "Contract pack generated and sent to Contract Studio review.",
+    });
+  }
+
+  helpers.projectLog(
+    approval.siteId,
+    `Contract pack drafted - ${approval.title}`,
+    `Contract draft ${contractPack.docId} generated automatically from client approval.`,
+  );
+  return contractPack;
+}
+
 function runTimedAutomationSweep(next, helpers) {
   const runtime = getRuntimeNow();
   const runtimeStamp = nowStamp();
@@ -1572,7 +1630,7 @@ export function SiteForgeProvider({ children }) {
             recipients:
               problem.priority === "critical"
                 ? [...getRecipientsForRoles(next, ["Project Manager", "Director"]), ...getRecipientsForRoles(next, ["Supervisor"])]
-                : getRecipientsForRoles(next, ["Supervisor"]),
+                : [...getRecipientsForRoles(next, ["Supervisor"]), ...getRecipientsForRoles(next, ["Project Manager"])],
             route: { kind: "internal", siteId: problem.siteId, page: "probs", entityId: problem.id },
           });
         });
@@ -1633,8 +1691,9 @@ export function SiteForgeProvider({ children }) {
             timeline: [],
             messageThread: [],
             contractPackId: null,
+            portalToken,
+            portalUrl: `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${portalToken}`,
           };
-          approval.portalUrl = `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${approval.portalToken}`;
           helpers.appendTimeline(approval, {
             type: "created",
             actor: actorName(helpers.actor),
@@ -1785,54 +1844,7 @@ export function SiteForgeProvider({ children }) {
             });
             updateSentiment(next, approval.clientId, 8);
             if (!approval.contractPackId) {
-              const site = next.sites.find((siteItem) => siteItem.id === approval.siteId);
-              const client = next.clients.find((clientItem) => clientItem.id === approval.clientId);
-              const contractPack = generateDraft({
-                approval,
-                client,
-                site,
-                builder: next.company || next.settings?.company || APP_CONFIG.builder,
-                templates: next.contractTemplates,
-              });
-              materialiseContractTemplate(contractPack, approval, next);
-              next.contractPacks.unshift(contractPack);
-              approval.contractPackId = contractPack.docId;
-              if (approval.autoReleaseToClient) {
-                contractPack.status = "contract-awaiting-client";
-                contractPack.signatures.builder = {
-                  name: next.company?.name || APP_CONFIG.builder.name,
-                  role: "Builder",
-                  signedAt: nowStamp(),
-                  ip: "browser",
-                };
-                contractPack.auditLog.unshift({
-                  id: randomId("cpa"),
-                  action: "builder signature fast-tracked",
-                  by: "System",
-                  at: nowStamp(),
-                  details: "Variation approval was released for client e-signature after approval.",
-                });
-                approval.status = "contract-awaiting-client";
-                helpers.appendTimeline(approval, {
-                  type: "contract-awaiting-client",
-                  actor: "System",
-                  role: "System",
-                  text: "Contract pack auto-generated, builder signature recorded, and released for client e-signature.",
-                });
-              } else {
-                approval.status = "contract-drafted";
-                helpers.appendTimeline(approval, {
-                  type: "contract-drafted",
-                  actor: "System",
-                  role: "System",
-                  text: "Contract pack auto-generated and sent to Contract Admin review queue.",
-                });
-              }
-              helpers.projectLog(
-                approval.siteId,
-                `Contract pack drafted - ${approval.title}`,
-                `Contract draft ${contractPack.docId} generated automatically from client approval.`,
-              );
+              const contractPack = createContractPackForApproval(next, approval, helpers, { autoRelease: approval.autoReleaseToClient });
               helpers.emit({
                 eventType: approval.autoReleaseToClient ? "contract.builder-signed" : "contract.drafted",
                 title: approval.autoReleaseToClient ? `Contract ready for client signature - ${approval.title}` : `Contract drafted - ${approval.title}`,
@@ -1932,6 +1944,85 @@ export function SiteForgeProvider({ children }) {
             });
             updateSentiment(next, approval.clientId, -2);
           }
+        });
+      },
+      markApprovalInternal(approvalId, status, note = "") {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval || !["approved", "declined"].includes(status)) return;
+          const before = { status: approval.status };
+          approval.status = status;
+          approval.messageThread = approval.messageThread || [];
+          approval.messageThread.push({
+            id: randomId("apm"),
+            by: actorName(helpers.actor),
+            role: helpers.actor.role,
+            at: nowStamp(),
+            body: note || `Approval marked ${status} internally.`,
+          });
+          helpers.appendTimeline(approval, {
+            type: status,
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            text: note || `Approval marked ${status} internally.`,
+          });
+          helpers.addAudit({
+            action: `approval.${status}.internal`,
+            entityType: "approval",
+            entityId: approval.id,
+            before,
+            after: { status: approval.status },
+            siteId: approval.siteId,
+          });
+          helpers.emit({
+            eventType: status === "approved" ? "approval.approved" : "approval.declined",
+            title: `Approval ${status} - ${approval.title}`,
+            body: note || `Approval marked ${status} internally.`,
+            siteId: approval.siteId,
+            entityType: "approval",
+            entityId: approval.id,
+            recipients: getRecipientsForRoles(next, ["Supervisor", "Project Manager", "Contract Admin"]),
+            route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+          });
+          if (status === "approved" && !approval.contractPackId) {
+            const pack = createContractPackForApproval(next, approval, helpers, { autoRelease: false });
+            helpers.emit({
+              eventType: "contract.drafted",
+              title: `Contract drafted - ${approval.title}`,
+              body: `Draft ${pack.docId} is ready for Contract Studio review.`,
+              siteId: approval.siteId,
+              entityType: "contractPack",
+              entityId: pack.docId,
+              recipients: getRecipientsForRoles(next, ["Contract Admin", "Project Manager"]),
+              route: { kind: "internal", siteId: approval.siteId, page: "contracts", entityId: pack.docId },
+            });
+          }
+        });
+      },
+      generateContractFromApproval(approvalId) {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval) return;
+          const before = { status: approval.status, contractPackId: approval.contractPackId };
+          const pack = createContractPackForApproval(next, approval, helpers, { autoRelease: false });
+          helpers.addAudit({
+            action: "contract.generate_from_approval",
+            entityType: "approval",
+            entityId: approval.id,
+            before,
+            after: { status: approval.status, contractPackId: pack?.docId },
+            siteId: approval.siteId,
+          });
+          helpers.emit({
+            eventType: "contract.drafted",
+            title: `Contract generated - ${approval.title}`,
+            body: `Draft ${pack?.docId || approval.contractPackId} is ready for Contract Studio review.`,
+            siteId: approval.siteId,
+            entityType: "contractPack",
+            entityId: pack?.docId || approval.contractPackId,
+            recipients: getRecipientsForRoles(next, ["Contract Admin", "Project Manager"]),
+            route: { kind: "internal", siteId: approval.siteId, page: "contracts", entityId: pack?.docId || approval.contractPackId },
+          });
         });
       },
       addApprovalMessage(approvalId, message, external = false) {

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Icons, renderIcon } from "./icons";
 import { exportElementToPdf } from "../services/pdfService";
+import { can } from "../services/permissions";
 import { Button } from "./ui";
 
 const downloadContract = async (contractPack) => {
@@ -66,7 +67,7 @@ export default function ContractViewer({
               Download PDF
             </Button>
           ) : null}
-          {role === "Contract Admin" ? (
+          {can(role, "contracts.archive") ? (
             <Button small icon={Icons.box} onClick={() => onArchive?.(contractPack.docId)}>
               Archive
             </Button>
@@ -124,7 +125,7 @@ export default function ContractViewer({
                     <input type="checkbox" checked={builderAck} onChange={(event) => setBuilderAck(event.target.checked)} />
                     I acknowledge this contract is ready to release.
                   </label>
-                  {(role === "Project Manager" || role === "Supervisor") && contractPack.status === "builder-signature-pending" ? (
+                  {can(role, "contracts.sign_builder") && contractPack.status === "builder-signature-pending" ? (
                     <Button
                       small
                       tone="bt-p"
