@@ -1,3 +1,6 @@
+/* SiteForge audit: Template selection now honours the explicit template chosen
+   during the approval workflow before falling back to type defaults. */
+
 import { APP_CONFIG } from "../data/seedData";
 
 const randomId = (prefix) => `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
@@ -72,6 +75,10 @@ export function pickTemplate(templates = [], approvalType) {
   return templates.find((template) => template.type === approvalType) || templates[0] || null;
 }
 
+export function pickTemplateForApproval(templates = [], approval = {}) {
+  return templates.find((template) => template.id === approval.templateId) || pickTemplate(templates, approval.type);
+}
+
 export function generateDraft({
   approval,
   client,
@@ -79,7 +86,7 @@ export function generateDraft({
   builder = APP_CONFIG.builder,
   templates = [],
 }) {
-  const template = pickTemplate(templates, approval.type);
+  const template = pickTemplateForApproval(templates, approval);
   const now = nowStamp();
   const costWords = `${numberToWords(approval.costImpact || 0)} dollars`;
   const mergeData = {

@@ -1,4 +1,9 @@
-import { useMemo } from "react";
+/* SiteForge audit: Expanded the assistant from static suggestions into a working
+   AI chat drawer that can call the configured Claude service and falls back to
+   SiteForge's local drafting intelligence during demos. */
+
+import { useMemo, useState } from "react";
+import { askSiteForgeAi } from "../services/aiService";
 import { useSiteForge } from "../services/siteforgeStore";
 import { Icons, renderIcon } from "./icons";
 import { Button, Badge } from "./ui";
@@ -71,7 +76,23 @@ function buildSuggestions(state, derived, actions) {
 
 export default function AIAssistantDrawer({ open, onClose }) {
   const { state, derived, actions } = useSiteForge();
+  const [message, setMessage] = useState("");
+  const [chat, setChat] = useState([]);
+  const [loading, setLoading] = useState(false);
   const suggestions = useMemo(() => buildSuggestions(state, derived, actions), [actions, derived, state]);
+  const projectContext = useMemo(() => {
+    const siteId = state.session.siteId;
+    const site = state.sites.find((entry) => entry.id === siteId);
+    return {
+      site,
+      company: state.company,
+      contractType: site?.contractType || site?.type,
+      openProblems: state.problems.filter((entry) => entry.siteId === siteId && ["open", "under-review"].includes(entry.status)).slice(0, 5),
+      pendingVariations: state.variations.filter((entry) => entry.siteId === siteId && !["signed", "archived"].includes(entry.status)).slice(0, 5),
+      diary: state.diary.filter((entry) => entry.siteId === siteId).slice(0, 5),
+      activeApprovals: state.approvals.filter((entry) => entry.siteId === siteId && !["signed", "archived", "declined"].includes(entry.status)).slice(0, 5),
+    };
+  }, [state]);
 
   if (!open) return null;
 
@@ -105,8 +126,43 @@ export default function AIAssistantDrawer({ open, onClose }) {
             </div>
           ))}
         </div>
+        <div className="ai-chat-panel">
+          <div className="xs ct3 mb4">Ask SiteForge AI</div>
+          <div className="ai-chat-log">
+            {chat.map((entry) => (
+              <div className={`ai-chat-msg ${entry.role}`} key={entry.id}>
+                <div className="xs ct3">{entry.role === "user" ? "You" : `SiteForge AI · ${entry.source}`}</div>
+                <div className="sm">{entry.text}</div>
+              </div>
+            ))}
+            {!chat.length ? <div className="xs ct3">Try: “Draft a client variation summary for the footing water ingress.”</div> : null}
+          </div>
+          <div className="ai-chat-input">
+            <textarea value={message} onChange={(event) => setMessage(event.target.value)} />
+            <Button
+              small
+              tone="bt-p"
+              disabled={loading}
+              onClick={async () => {
+                if (!message.trim()) return;
+                const outgoing = { id: `u-${Date.now()}`, role: "user", text: message };
+                setChat((current) => [...current, outgoing]);
+                setMessage("");
+                setLoading(true);
+                const result = await askSiteForgeAi({
+                  userMessage: outgoing.text,
+                  projectContext,
+                  apiKey: state.settings?.integrations?.anthropicApiKey,
+                });
+                setChat((current) => [...current, { id: `a-${Date.now()}`, role: "assistant", text: result.text, source: result.source }]);
+                setLoading(false);
+              }}
+            >
+              {loading ? "Thinking..." : "Ask"}
+            </Button>
+          </div>
+        </div>
       </div>
     </div>
   );
 }
-

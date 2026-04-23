@@ -1,4 +1,9 @@
-import { useEffect, useState } from "react";
+/* SiteForge audit: Upgraded persistence from localStorage-only to an IndexedDB
+   primary store with localStorage fallback. This preserves existing browser demo
+   state while allowing the v6 workflow data set to grow safely. */
+
+import { useEffect, useRef, useState } from "react";
+import { loadPersistedAppState, persistAppState } from "../services/dbService";
 
 function mergeWithDefaults(savedValue, defaultValue) {
   if (Array.isArray(defaultValue)) {
@@ -20,8 +25,13 @@ function mergeWithDefaults(savedValue, defaultValue) {
 }
 
 export function usePersistentState(key, initialValue) {
+  const resolvedInitialValueRef = useRef(null);
+  if (resolvedInitialValueRef.current === null) {
+    resolvedInitialValueRef.current = typeof initialValue === "function" ? initialValue() : initialValue;
+  }
+  const [hydrated, setHydrated] = useState(false);
   const [value, setValue] = useState(() => {
-    const resolvedInitialValue = typeof initialValue === "function" ? initialValue() : initialValue;
+    const resolvedInitialValue = resolvedInitialValueRef.current;
 
     try {
       const raw = window.localStorage.getItem(key);
@@ -47,12 +57,50 @@ export function usePersistentState(key, initialValue) {
   });
 
   useEffect(() => {
+    let cancelled = false;
+    const resolvedInitialValue = resolvedInitialValueRef.current;
+
+    loadPersistedAppState(key)
+      .then((saved) => {
+        if (cancelled || !saved) return;
+        if (
+          resolvedInitialValue &&
+          typeof resolvedInitialValue === "object" &&
+          "version" in resolvedInitialValue &&
+          saved &&
+          typeof saved === "object" &&
+          saved.version !== resolvedInitialValue.version
+        ) {
+          return;
+        }
+        setValue(mergeWithDefaults(saved, resolvedInitialValue));
+      })
+      .catch(() => {
+        // Safari private mode and locked-down browsers can reject IndexedDB.
+        // The localStorage bootstrap above remains the fallback in that case.
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setHydrated(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [key]);
+
+  useEffect(() => {
+    if (!hydrated) return;
     try {
       window.localStorage.setItem(key, JSON.stringify(value));
     } catch (error) {
       console.warn(`Failed to persist state for ${key}`, error);
     }
-  }, [key, value]);
+    persistAppState(key, value).catch(() => {
+      // LocalStorage remains the fallback if IndexedDB is unavailable.
+    });
+  }, [hydrated, key, value]);
 
   return [value, setValue];
 }

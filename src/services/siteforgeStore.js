@@ -1,3 +1,8 @@
+/* SiteForge audit: Repaired core workflow wiring for this pass. Project creation,
+   company/settings persistence, diary-to-variation conversion, template selection,
+   document annotations, and approval contract generation now create durable state,
+   audit entries, notifications, and linked records instead of isolated UI changes. */
+
 import React, { createContext, createElement, useCallback, useContext, useEffect, useMemo, useRef } from "react";
 import { APP_CONFIG, createInitialData, migrateLegacyState } from "../data/seedData";
 import { usePersistentState } from "../hooks/usePersistentState";
@@ -699,15 +704,16 @@ function applyBudgetImpact(state, approval, contractPack) {
   const value = Number(approval.costImpact || variation?.value || 0);
 
   if (site) {
-    site.committed += value;
+    site.committed = Number(site.committed || 0) + value;
     site.marginAtRisk = Math.max(0, site.marginAtRisk - Math.round(value * 0.35));
   }
   if (budget) {
+    budget.summary = budget.summary || { contractValue: site?.contractValue || 0, spent: 0, committed: 0, contingencyUsed: 0, forecastMargin: site?.forecastMargin || 0 };
     budget.summary.committed += value;
     const candidate = budget.items.find((item) => item.category.toLowerCase().includes((variation?.trade || "").toLowerCase())) || budget.items[budget.items.length - 1];
     if (candidate) {
-      candidate.committed += value;
-      candidate.forecast += value;
+      candidate.committed = Number(candidate.committed || 0) + value;
+      candidate.forecast = Number(candidate.forecast || candidate.budget || 0) + value;
     }
   }
 
@@ -826,7 +832,7 @@ function pushToast(state, toast) {
 function getApprovalMergeData(state, approval) {
   const site = state.sites.find((entry) => entry.id === approval.siteId) || state.sites[0];
   const client = state.clients.find((entry) => entry.id === approval.clientId) || state.clients[0];
-  const builder = APP_CONFIG.builder;
+  const builder = state.company || state.settings?.company || APP_CONFIG.builder;
   const cost = Number(approval.costImpact || 0);
   const costWords = new Intl.NumberFormat("en-AU", {
     style: "currency",
@@ -862,7 +868,7 @@ function getApprovalMergeData(state, approval) {
 }
 
 function materialiseContractTemplate(contractPack, approval, state) {
-  const template = state.contractTemplates.find((entry) => entry.id === contractPack.templateId || entry.type === approval.type) || state.contractTemplates[0];
+  const template = state.contractTemplates.find((entry) => entry.id === approval.templateId || entry.id === contractPack.templateId || entry.type === approval.type) || state.contractTemplates[0];
   if (!template?.sourceContent) {
     return;
   }
@@ -1204,6 +1210,136 @@ export function SiteForgeProvider({ children }) {
       },
       setSite(siteId) {
         navigate({ kind: "internal", siteId, page: state.session.route.page || "dash", entityId: null });
+      },
+      createProject(payload) {
+        const siteId = randomId("s");
+        const clientId = randomId("c");
+        const clientName = `${payload.clientFirstName || ""} ${payload.clientLastName || ""}`.trim();
+        const companyName = payload.clientCompany || clientName || "New Client";
+        const contractValue = Number(payload.contractValue || 0);
+
+        mutate((next, helpers) => {
+          const client = {
+            id: clientId,
+            name: companyName,
+            primaryContact: clientName,
+            email: payload.clientEmail,
+            phone: payload.clientPhone || "",
+            siteId,
+            brand: payload.projectName,
+            preferredChannel: "Email + Portal",
+            notificationPreferences: { email: true, sms: false, teams: false, portal: true },
+          };
+          const site = {
+            id: siteId,
+            code: payload.projectName
+              .split(/\s+/)
+              .map((part) => part[0])
+              .join("")
+              .slice(0, 3)
+              .toUpperCase()
+              .padEnd(3, "X"),
+            name: payload.projectName,
+            clientId,
+            superintendentId: "u_sup_1",
+            pmId: "u_pm_1",
+            caId: "u_ca_1",
+            region: payload.region || "Brisbane",
+            type: payload.contractType || "HIA",
+            address: payload.siteAddress,
+            status: (payload.status || "Active").toLowerCase().replace(/\s+/g, "-"),
+            progress: 0,
+            contractValue,
+            spent: 0,
+            committed: 0,
+            forecastMargin: 18,
+            marginAtRisk: 0,
+            crewToday: 0,
+            weather: "Forecast pending",
+            nextMilestone: "Project setup",
+            estimatedCompletion: payload.expectedCompletionDate || "",
+            currentPhase: "Pre-construction",
+            risk: "green",
+            heroPhotoLabel: `${payload.projectName} site photo`,
+            contractType: payload.contractType || "HIA",
+            startDate: payload.startDate || formatDate(),
+            supervisorName: payload.supervisorAssigned || "Dave Mitchell",
+          };
+
+          next.clients.unshift(client);
+          next.sites.unshift(site);
+          next.siteBudgets.unshift({
+            siteId,
+            summary: { contractValue, spent: 0, committed: 0, contingencyUsed: 0, forecastMargin: 18 },
+            items: [
+              { id: randomId("bud"), category: "Preliminaries", budget: Math.round(contractValue * 0.08), spent: 0, committed: 0, forecast: Math.round(contractValue * 0.08) },
+              { id: randomId("bud"), category: "Structure", budget: Math.round(contractValue * 0.34), spent: 0, committed: 0, forecast: Math.round(contractValue * 0.34) },
+              { id: randomId("bud"), category: "Services", budget: Math.round(contractValue * 0.18), spent: 0, committed: 0, forecast: Math.round(contractValue * 0.18) },
+              { id: randomId("bud"), category: "Finishes", budget: Math.round(contractValue * 0.25), spent: 0, committed: 0, forecast: Math.round(contractValue * 0.25) },
+              { id: randomId("bud"), category: "Contingency", budget: Math.round(contractValue * 0.05), spent: 0, committed: 0, forecast: Math.round(contractValue * 0.05) },
+            ],
+          });
+          next.schedules.unshift({
+            siteId,
+            baselineCompletion: payload.expectedCompletionDate || "",
+            currentCompletion: payload.expectedCompletionDate || "",
+            nextMilestone: "Project setup",
+            phases: [
+              { id: randomId("sch"), label: "Pre-construction", startDay: 0, duration: 12, progress: 0, color: "#06B6D4" },
+              { id: randomId("sch"), label: "Construction", startDay: 12, duration: 58, progress: 0, color: "#F59E0B" },
+              { id: randomId("sch"), label: "Handover", startDay: 70, duration: 10, progress: 0, color: "#10B981" },
+            ],
+            impacts: [],
+          });
+          next.projectLogs.unshift({
+            id: randomId("log"),
+            siteId,
+            at: nowStamp(),
+            title: "Project created",
+            body: `${payload.projectName} was created with ${payload.contractType || "HIA"} contract defaults.`,
+          });
+          next.session.siteId = siteId;
+          next.session.route = { kind: "internal", siteId, page: "dash", entityId: null };
+          helpers.addAudit({
+            action: "project.create",
+            entityType: "site",
+            entityId: siteId,
+            before: null,
+            after: { name: site.name, clientId, contractValue },
+            siteId,
+          });
+          helpers.emit({
+            eventType: "project.created",
+            title: `Project created - ${site.name}`,
+            body: `${client.primaryContact} now has a SiteForge project workspace.`,
+            siteId,
+            entityType: "site",
+            entityId: siteId,
+            recipients: getRecipientsForRoles(next, ["Supervisor", "Project Manager", "Contract Admin"]),
+            route: { kind: "internal", siteId, page: "dash", entityId: null },
+          });
+        });
+
+        window.location.hash = buildHash({ kind: "internal", siteId, page: "dash", entityId: null });
+        return siteId;
+      },
+      updateSettings(section, patch) {
+        mutate((next, helpers) => {
+          const before = { ...(next.settings?.[section] || {}) };
+          next.settings = next.settings || {};
+          next.settings[section] = { ...(next.settings[section] || {}), ...patch };
+          if (section === "company") {
+            next.company = { ...(next.company || APP_CONFIG.builder), ...patch };
+          }
+          helpers.addAudit({
+            action: `settings.${section}.update`,
+            entityType: "settings",
+            entityId: section,
+            before,
+            after: next.settings[section],
+            siteId: next.session.siteId,
+          });
+        });
       },
       setPeriod(period) {
         mutate((next) => {
@@ -1628,32 +1764,59 @@ export function SiteForgeProvider({ children }) {
                 approval,
                 client,
                 site,
+                builder: next.company || next.settings?.company || APP_CONFIG.builder,
                 templates: next.contractTemplates,
               });
               materialiseContractTemplate(contractPack, approval, next);
               next.contractPacks.unshift(contractPack);
               approval.contractPackId = contractPack.docId;
-              approval.status = "contract-drafted";
-              helpers.appendTimeline(approval, {
-                type: "contract-drafted",
-                actor: "System",
-                role: "System",
-                text: "Contract pack auto-generated and sent to Contract Admin review queue.",
-              });
+              if (approval.autoReleaseToClient) {
+                contractPack.status = "contract-awaiting-client";
+                contractPack.signatures.builder = {
+                  name: next.company?.name || APP_CONFIG.builder.name,
+                  role: "Builder",
+                  signedAt: nowStamp(),
+                  ip: "browser",
+                };
+                contractPack.auditLog.unshift({
+                  id: randomId("cpa"),
+                  action: "builder signature fast-tracked",
+                  by: "System",
+                  at: nowStamp(),
+                  details: "Variation approval was released for client e-signature after approval.",
+                });
+                approval.status = "contract-awaiting-client";
+                helpers.appendTimeline(approval, {
+                  type: "contract-awaiting-client",
+                  actor: "System",
+                  role: "System",
+                  text: "Contract pack auto-generated, builder signature recorded, and released for client e-signature.",
+                });
+              } else {
+                approval.status = "contract-drafted";
+                helpers.appendTimeline(approval, {
+                  type: "contract-drafted",
+                  actor: "System",
+                  role: "System",
+                  text: "Contract pack auto-generated and sent to Contract Admin review queue.",
+                });
+              }
               helpers.projectLog(
                 approval.siteId,
                 `Contract pack drafted - ${approval.title}`,
                 `Contract draft ${contractPack.docId} generated automatically from client approval.`,
               );
               helpers.emit({
-                eventType: "contract.drafted",
-                title: `Contract drafted - ${approval.title}`,
-                body: `Draft ${contractPack.docId} is ready for Contract Admin review.`,
+                eventType: approval.autoReleaseToClient ? "contract.builder-signed" : "contract.drafted",
+                title: approval.autoReleaseToClient ? `Contract ready for client signature - ${approval.title}` : `Contract drafted - ${approval.title}`,
+                body: approval.autoReleaseToClient ? `Draft ${contractPack.docId} is ready for client e-signature.` : `Draft ${contractPack.docId} is ready for Contract Admin review.`,
                 siteId: approval.siteId,
                 entityType: "contractPack",
                 entityId: contractPack.docId,
-                recipients: getRecipientsForRoles(next, ["Contract Admin", "Project Manager"]),
-                route: { kind: "internal", siteId: approval.siteId, page: "contracts", entityId: contractPack.docId },
+                recipients: approval.autoReleaseToClient ? getRecipientsForClient(next, approval.clientId) : getRecipientsForRoles(next, ["Contract Admin", "Project Manager"]),
+                route: approval.autoReleaseToClient
+                  ? { kind: "client", clientId: approval.clientId, page: "documents", entityId: contractPack.docId }
+                  : { kind: "internal", siteId: approval.siteId, page: "contracts", entityId: contractPack.docId },
               });
             }
           } else if (actionType === "decline") {
@@ -1968,6 +2131,34 @@ export function SiteForgeProvider({ children }) {
           if (approval) {
             helpers.applyBudgetImpact(approval, contractPack);
             helpers.applyScheduleImpact(approval);
+            if (!next.documents.some((document) => document.contractPackId === contractPack.docId)) {
+              next.documents.unshift({
+                id: randomId("doc"),
+                siteId: approval.siteId,
+                title: `${contractPack.docId.toUpperCase()} executed contract pack`,
+                drawingNumber: contractPack.docId.toUpperCase(),
+                rev: "Executed",
+                date: formatDate(),
+                category: "Contract Pack",
+                clientVisible: true,
+                tags: ["contract", "executed", approval.type],
+                linkedTaskIds: [],
+                revisionHistory: [{ rev: "Executed", date: formatDate(), by: name || client?.primaryContact || "Client" }],
+                archived: false,
+                fileId: null,
+                contractPackId: contractPack.docId,
+                impactAnalysis: {
+                  summary: `Fully executed ${approval.type.toLowerCase()} contract archived from ClientFlow.`,
+                  affectedTasks: [],
+                  affectedRfis: [],
+                  affectedTrades: [],
+                  affectedZones: [],
+                  notes: [`Signed by ${name || client?.primaryContact || "Client"} at ${contractPack.signatures.client?.signedAt}.`],
+                  acknowledgementsRequired: [],
+                  acknowledgedBy: [],
+                },
+              });
+            }
             helpers.projectLog(
               approval.siteId,
               `Contract executed - ${approval.title}`,
@@ -2077,6 +2268,9 @@ export function SiteForgeProvider({ children }) {
             priority: payload.priority || "medium",
             value: Number(payload.value || 0),
             days: Number(payload.days || 0),
+            description: payload.description || payload.title,
+            reason: payload.reason || "Field event changed the original scope or commercial basis.",
+            templateId: payload.templateId || next.settings?.contractDefaults?.standardVariationTemplate || null,
             trade: payload.trade || helpers.actor.trade || "General",
             createdBy: helpers.actor.id,
             clientApprovalId: null,
@@ -2094,10 +2288,11 @@ export function SiteForgeProvider({ children }) {
           });
         });
       },
-      sendVariationToClient(variationId) {
+      sendVariationToClient(variationId, templateId = null) {
         mutate((next, helpers) => {
           const variation = next.variations.find((item) => item.id === variationId);
           if (!variation) return;
+          const selectedTemplateId = templateId || variation.templateId || next.settings?.contractDefaults?.standardVariationTemplate || null;
           const sourceType = variation.sourceType === "rfi" ? "rfi" : "variation";
           const approval = {
             id: randomId("ap"),
@@ -2105,11 +2300,13 @@ export function SiteForgeProvider({ children }) {
             clientId: next.sites.find((site) => site.id === variation.siteId)?.clientId,
             type: "Variation",
             title: `Approve ${variation.title.toLowerCase()}`,
-            summary: `${variation.title} requires commercial approval before the builder can proceed cleanly.`,
-            reason: "The linked field or consultant event has now changed the commercial basis of the work.",
+            summary: variation.description || `${variation.title} requires commercial approval before the builder can proceed cleanly.`,
+            reason: variation.reason || "The linked field or consultant event has now changed the commercial basis of the work.",
             recommendation: "Approve now so the variation can be formalised without additional delay.",
             status: "awaiting-client",
             priority: variation.priority,
+            templateId: selectedTemplateId,
+            autoReleaseToClient: true,
             sourceType,
             sourceId: variation.sourceId || variation.id,
             createdBy: helpers.actor.id,
@@ -2133,7 +2330,17 @@ export function SiteForgeProvider({ children }) {
             text: "Variation sent to client from variation register.",
           });
           variation.clientApprovalId = approval.id;
+          variation.status = "sent";
+          variation.templateId = selectedTemplateId;
           next.approvals.unshift(approval);
+          helpers.addAudit({
+            action: "variation.sent_to_client",
+            entityType: "variation",
+            entityId: variation.id,
+            before: { status: "submitted" },
+            after: { status: variation.status, approvalId: approval.id, templateId: selectedTemplateId },
+            siteId: variation.siteId,
+          });
           helpers.emit({
             eventType: "approval.created",
             title: `Variation sent to client - ${variation.title}`,
@@ -2372,6 +2579,52 @@ export function SiteForgeProvider({ children }) {
           });
           next.approvals.unshift(approval);
           upsertLinkedRecord(diary, buildLink("approval", approval, diary.siteId));
+        });
+      },
+      createVariationFromDiary(diaryId, payload) {
+        mutate((next, helpers) => {
+          const diary = next.diary.find((entry) => entry.id === diaryId);
+          if (!diary) return;
+          const variation = {
+            id: randomId("var"),
+            siteId: diary.siteId,
+            number: `VO-${String(next.variations.length + 1).padStart(3, "0")}`,
+            title: payload.title || `Variation from diary - ${diary.date}`,
+            sourceType: "diary",
+            sourceId: diary.id,
+            status: "submitted",
+            priority: payload.priority || "medium",
+            value: Number(payload.value || 0),
+            days: Number(payload.days || 0),
+            description: payload.description || diary.summary,
+            reason: payload.reason || diary.delays || "Diary event changed the recoverable scope or programme basis.",
+            templateId: payload.templateId || next.settings?.contractDefaults?.standardVariationTemplate || null,
+            trade: payload.trade || "General",
+            createdBy: helpers.actor.id,
+            clientApprovalId: null,
+            contractPackId: null,
+            linkedRecords: [buildLink("diary", diary, diary.siteId)],
+          };
+          next.variations.unshift(variation);
+          upsertLinkedRecord(diary, buildLink("variation", variation, diary.siteId));
+          helpers.addAudit({
+            action: "diary.convert_to_variation",
+            entityType: "variation",
+            entityId: variation.id,
+            before: null,
+            after: { diaryId: diary.id, value: variation.value, days: variation.days, templateId: variation.templateId },
+            siteId: diary.siteId,
+          });
+          helpers.emit({
+            eventType: "variation.created",
+            title: `Variation draft created - ${variation.number}`,
+            body: `${variation.title} is ready for PM review and client issue.`,
+            siteId: diary.siteId,
+            entityType: "variation",
+            entityId: variation.id,
+            recipients: getRecipientsForRoles(next, ["Project Manager"]),
+            route: { kind: "internal", siteId: diary.siteId, page: "vos", entityId: variation.id },
+          });
         });
       },
       addSafetyRecord(payload) {
@@ -3532,6 +3785,28 @@ export function SiteForgeProvider({ children }) {
             siteId,
           });
           return normaliseState(next);
+        });
+      },
+      addDocumentAnnotation(documentId, payload) {
+        mutate((next, helpers) => {
+          const document = next.documents.find((entry) => entry.id === documentId);
+          if (!document) return;
+          const annotation = {
+            id: randomId("ann"),
+            by: actorName(helpers.actor),
+            at: nowStamp(),
+            locationRef: payload.locationRef || "General",
+            note: payload.note,
+          };
+          document.annotations = [annotation, ...(document.annotations || [])];
+          helpers.addAudit({
+            action: "document.annotation.create",
+            entityType: "document",
+            entityId: document.id,
+            before: null,
+            after: annotation,
+            siteId: document.siteId,
+          });
         });
       },
       async uploadPassportFiles(passportId, fileList) {

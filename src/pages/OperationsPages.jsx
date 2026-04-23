@@ -1,8 +1,13 @@
+/* SiteForge audit: Repaired live operations workflows for project creation,
+   diary-to-variation conversion, variation template selection, document preview,
+   plan search, annotations, and settings persistence. */
+
 import { useEffect, useMemo, useState } from "react";
 import { flagBudgetAnomaly, suggestRFI } from "../services/aiDraftService";
 import DataTable from "../components/DataTable";
 import FileDropZone from "../components/FileDropZone";
 import { exportCsv, exportElementToPdf } from "../services/pdfService";
+import { previewPdf } from "../services/documentIntelligence";
 import { useSiteForge } from "../services/siteforgeStore";
 import { Icons } from "../components/icons";
 import {
@@ -73,6 +78,22 @@ function SearchFilterBar({ storageKey, placeholder = "Search...", statusOptions 
 
 function PortfolioPage() {
   const { state, actions } = useSiteForge();
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState("");
+  const [form, setForm] = useState({
+    projectName: "",
+    clientFirstName: "",
+    clientLastName: "",
+    clientEmail: "",
+    clientPhone: "",
+    siteAddress: "",
+    contractValue: "",
+    contractType: "HIA",
+    startDate: "",
+    expectedCompletionDate: "",
+    supervisorAssigned: "Dave Mitchell",
+    status: "Active",
+  });
   const metrics = [
     { label: "Active Sites", value: state.sites.filter((site) => site.status === "active").length, color: "g" },
     { label: "Contract Value", value: `$${(state.sites.reduce((sum, site) => sum + site.contractValue, 0) / 1e6).toFixed(1)}M`, color: "a" },
@@ -82,6 +103,15 @@ function PortfolioPage() {
 
   return (
     <div className="oy fin">
+      <div className="fb mb8">
+        <div>
+          <div className="b md">Portfolio</div>
+          <div className="xs ct3">Create projects, switch sites, and see commercial risk at a glance.</div>
+        </div>
+        <Button tone="bt-p" icon={Icons.plus} onClick={() => setOpen(true)}>
+          New Project
+        </Button>
+      </div>
       <MetricGrid columns={4} items={metrics} />
       <div className="g2">
         {state.sites.map((site) => (
@@ -115,6 +145,111 @@ function PortfolioPage() {
           </button>
         ))}
       </div>
+      <Modal open={open} close={() => setOpen(false)} title="Create New Project" wide>
+        {error ? <div className="form-error mb8">{error}</div> : null}
+        <div className="ff">
+          <label>Project name</label>
+          <input value={form.projectName} onChange={(event) => setForm((current) => ({ ...current, projectName: event.target.value }))} />
+        </div>
+        <div className="g2">
+          <div className="ff">
+            <label>Client first name</label>
+            <input value={form.clientFirstName} onChange={(event) => setForm((current) => ({ ...current, clientFirstName: event.target.value }))} />
+          </div>
+          <div className="ff">
+            <label>Client last name</label>
+            <input value={form.clientLastName} onChange={(event) => setForm((current) => ({ ...current, clientLastName: event.target.value }))} />
+          </div>
+        </div>
+        <div className="g2">
+          <div className="ff">
+            <label>Client email</label>
+            <input type="email" value={form.clientEmail} onChange={(event) => setForm((current) => ({ ...current, clientEmail: event.target.value }))} />
+          </div>
+          <div className="ff">
+            <label>Client phone</label>
+            <input value={form.clientPhone} onChange={(event) => setForm((current) => ({ ...current, clientPhone: event.target.value }))} />
+          </div>
+        </div>
+        <div className="ff">
+          <label>Site address</label>
+          <input value={form.siteAddress} onChange={(event) => setForm((current) => ({ ...current, siteAddress: event.target.value }))} />
+        </div>
+        <div className="g2">
+          <div className="ff">
+            <label>Contract value (AUD)</label>
+            <input type="number" min="1" value={form.contractValue} onChange={(event) => setForm((current) => ({ ...current, contractValue: event.target.value }))} />
+          </div>
+          <div className="ff">
+            <label>Contract type</label>
+            <select value={form.contractType} onChange={(event) => setForm((current) => ({ ...current, contractType: event.target.value }))}>
+              {["HIA", "AS4000", "AS2124", "MBA", "Custom"].map((type) => (
+                <option key={type}>{type}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="g2">
+          <div className="ff">
+            <label>Start date</label>
+            <input type="date" value={form.startDate} onChange={(event) => setForm((current) => ({ ...current, startDate: event.target.value }))} />
+          </div>
+          <div className="ff">
+            <label>Expected completion</label>
+            <input type="date" value={form.expectedCompletionDate} onChange={(event) => setForm((current) => ({ ...current, expectedCompletionDate: event.target.value }))} />
+          </div>
+        </div>
+        <div className="g2">
+          <div className="ff">
+            <label>Supervisor assigned</label>
+            <input value={form.supervisorAssigned} onChange={(event) => setForm((current) => ({ ...current, supervisorAssigned: event.target.value }))} />
+          </div>
+          <div className="ff">
+            <label>Status</label>
+            <select value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value }))}>
+              {["Active", "On Hold", "Completed"].map((status) => (
+                <option key={status}>{status}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="fa">
+          <Button onClick={() => setOpen(false)}>Cancel</Button>
+          <Button
+            tone="bt-p"
+            onClick={() => {
+              const required = [form.projectName, form.clientFirstName, form.clientLastName, form.clientEmail, form.siteAddress, form.contractValue];
+              if (required.some((value) => !String(value || "").trim())) {
+                setError("Fill the required project, client, address and contract value fields before saving.");
+                return;
+              }
+              if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.clientEmail)) {
+                setError("Enter a valid client email so portal notifications can be sent.");
+                return;
+              }
+              actions.createProject(form);
+              setOpen(false);
+              setError("");
+              setForm({
+                projectName: "",
+                clientFirstName: "",
+                clientLastName: "",
+                clientEmail: "",
+                clientPhone: "",
+                siteAddress: "",
+                contractValue: "",
+                contractType: "HIA",
+                startDate: "",
+                expectedCompletionDate: "",
+                supervisorAssigned: "Dave Mitchell",
+                status: "Active",
+              });
+            }}
+          >
+            Create Project
+          </Button>
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -985,8 +1120,9 @@ function VariationsPage() {
   const { state, actions } = useSiteForge();
   const siteId = state.session.siteId;
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ title: "", value: "", days: "", trade: "General", priority: "medium" });
+  const [form, setForm] = useState({ title: "", description: "", reason: "", value: "", days: "", trade: "General", priority: "medium", templateId: "" });
   const variations = state.variations.filter((variation) => variation.siteId === siteId);
+  const variationTemplates = state.contractTemplates.filter((template) => template.status !== "archived" && ["Variation", "Scope Clarification", "Selection Upgrade"].includes(template.type));
 
   return (
     <div className="oy fin">
@@ -1029,7 +1165,7 @@ function VariationsPage() {
                   </td>
                   <td>
                     {variation.status === "submitted" && state.session.role !== "Supervisor" ? (
-                      <Button small tone="bt-p" onClick={() => actions.sendVariationToClient(variation.id)}>
+                      <Button small tone="bt-p" onClick={() => actions.sendVariationToClient(variation.id, variation.templateId)}>
                         Send to Client
                       </Button>
                     ) : null}
@@ -1044,6 +1180,10 @@ function VariationsPage() {
         <div className="ff">
           <label>Title</label>
           <input value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} />
+        </div>
+        <div className="ff">
+          <label>Description</label>
+          <textarea value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} />
         </div>
         <div className="g2">
           <div className="ff">
@@ -1069,6 +1209,21 @@ function VariationsPage() {
             </select>
           </div>
         </div>
+        <div className="ff">
+          <label>Reason</label>
+          <textarea value={form.reason} onChange={(event) => setForm((current) => ({ ...current, reason: event.target.value }))} />
+        </div>
+        <div className="ff">
+          <label>Contract template</label>
+          <select value={form.templateId} onChange={(event) => setForm((current) => ({ ...current, templateId: event.target.value }))}>
+            <option value="">Use default variation template</option>
+            {variationTemplates.map((template) => (
+              <option key={template.id} value={template.id}>
+                {template.name}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="fa">
           <Button onClick={() => setOpen(false)}>Cancel</Button>
           <Button
@@ -1076,7 +1231,7 @@ function VariationsPage() {
             onClick={() => {
               actions.createVariationDraft(form);
               setOpen(false);
-              setForm({ title: "", value: "", days: "", trade: "General", priority: "medium" });
+              setForm({ title: "", description: "", reason: "", value: "", days: "", trade: "General", priority: "medium", templateId: "" });
             }}
           >
             Save Draft
@@ -1218,9 +1373,12 @@ function DiaryPage() {
   const siteId = state.session.siteId;
   const [open, setOpen] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
+  const [variationEntry, setVariationEntry] = useState(null);
   const [rawNote, setRawNote] = useState("");
   const [form, setForm] = useState({ date: "", weather: "", crew: "", summary: "", safety: "", delays: "", rainEvent: false });
+  const [variationForm, setVariationForm] = useState({ title: "", description: "", value: "", days: "", reason: "", trade: "General", priority: "medium", templateId: "" });
   const entries = state.diary.filter((entry) => entry.siteId === siteId);
+  const variationTemplates = state.contractTemplates.filter((template) => template.status !== "archived" && ["Variation", "Selection Upgrade", "Scope Clarification"].includes(template.type));
 
   return (
     <div className="oy fin">
@@ -1248,6 +1406,24 @@ function DiaryPage() {
                 Claim Rain Day
               </Button>
             ) : null}
+            <Button
+              small
+              onClick={() => {
+                setVariationEntry(entry);
+                setVariationForm({
+                  title: `Variation from diary - ${entry.date}`,
+                  description: entry.summary,
+                  value: "",
+                  days: "",
+                  reason: entry.delays && entry.delays !== "Nil" ? entry.delays : "Diary event changed the original scope or sequence.",
+                  trade: "General",
+                  priority: entry.rainEvent ? "high" : "medium",
+                  templateId: state.settings?.contractDefaults?.standardVariationTemplate || variationTemplates[0]?.id || "",
+                });
+              }}
+            >
+              Convert to Variation
+            </Button>
           </div>
         </Card>
       ))}
@@ -1293,6 +1469,68 @@ function DiaryPage() {
             }}
           >
             Save Entry
+          </Button>
+        </div>
+      </Modal>
+      <Modal open={Boolean(variationEntry)} close={() => setVariationEntry(null)} title="Convert Diary Entry to Variation" wide>
+        <div className="ff">
+          <label>Variation title</label>
+          <input value={variationForm.title} onChange={(event) => setVariationForm((current) => ({ ...current, title: event.target.value }))} />
+        </div>
+        <div className="ff">
+          <label>Description for client</label>
+          <textarea value={variationForm.description} onChange={(event) => setVariationForm((current) => ({ ...current, description: event.target.value }))} />
+        </div>
+        <div className="g2">
+          <div className="ff">
+            <label>Estimated cost</label>
+            <input type="number" value={variationForm.value} onChange={(event) => setVariationForm((current) => ({ ...current, value: event.target.value }))} />
+          </div>
+          <div className="ff">
+            <label>Time impact days</label>
+            <input type="number" value={variationForm.days} onChange={(event) => setVariationForm((current) => ({ ...current, days: event.target.value }))} />
+          </div>
+        </div>
+        <div className="g2">
+          <div className="ff">
+            <label>Trade</label>
+            <input value={variationForm.trade} onChange={(event) => setVariationForm((current) => ({ ...current, trade: event.target.value }))} />
+          </div>
+          <div className="ff">
+            <label>Priority</label>
+            <select value={variationForm.priority} onChange={(event) => setVariationForm((current) => ({ ...current, priority: event.target.value }))}>
+              {["critical", "high", "medium", "low"].map((priority) => (
+                <option key={priority}>{priority}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="ff">
+          <label>Reason for variation</label>
+          <textarea value={variationForm.reason} onChange={(event) => setVariationForm((current) => ({ ...current, reason: event.target.value }))} />
+        </div>
+        <div className="ff">
+          <label>Contract template</label>
+          <select value={variationForm.templateId} onChange={(event) => setVariationForm((current) => ({ ...current, templateId: event.target.value }))}>
+            <option value="">Auto select best template</option>
+            {variationTemplates.map((template) => (
+              <option key={template.id} value={template.id}>
+                {template.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="fa">
+          <Button onClick={() => setVariationEntry(null)}>Cancel</Button>
+          <Button
+            tone="bt-p"
+            onClick={() => {
+              if (!variationEntry) return;
+              actions.createVariationFromDiary(variationEntry.id, variationForm);
+              setVariationEntry(null);
+            }}
+          >
+            Create Variation Draft
           </Button>
         </div>
       </Modal>
@@ -1405,9 +1643,39 @@ function DocumentsPage() {
   const siteId = state.session.siteId;
   const [selectedId, setSelectedId] = useState(state.documents.find((document) => document.siteId === siteId)?.id || null);
   const [uploading, setUploading] = useState(false);
+  const [previewHtml, setPreviewHtml] = useState("");
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [planQuery, setPlanQuery] = useState("");
+  const [planResults, setPlanResults] = useState([]);
+  const [annotation, setAnnotation] = useState({ locationRef: "", note: "" });
   const documents = state.documents.filter((document) => document.siteId === siteId && !document.archived);
   const archived = state.documents.filter((document) => document.siteId === siteId && document.archived);
   const selected = documents.find((document) => document.id === selectedId) || documents[0] || null;
+  const selectedFile = selected?.fileId ? state.files.records.find((file) => file.id === selected.fileId) : null;
+  const searchPlan = () => {
+    if (!selected || !planQuery.trim()) return;
+    const haystack = `${selected.title} ${selected.tags?.join(" ") || ""} ${selected.impactAnalysis?.summary || ""} ${selectedFile?.extractedText || ""}`;
+    const lower = haystack.toLowerCase();
+    const tokens = planQuery.toLowerCase().split(/\s+/).filter(Boolean);
+    const score = tokens.reduce((sum, token) => sum + (lower.includes(token) ? 1 : 0), 0);
+    if (!score) {
+      setPlanResults([
+        {
+          page: "Annotation fallback",
+          excerpt: "No extractable text match was found. Add a plan note or describe the room/zone so SiteForge can keep the search context for future uploads.",
+        },
+      ]);
+      return;
+    }
+    const firstToken = tokens.find((token) => lower.includes(token));
+    const index = Math.max(0, lower.indexOf(firstToken) - 80);
+    setPlanResults([
+      {
+        page: selectedFile?.type?.includes("pdf") ? "Page 1" : selected.rev,
+        excerpt: haystack.slice(index, index + 220).trim(),
+      },
+    ]);
+  };
   const columns = [
     {
       key: "title",
@@ -1515,6 +1783,82 @@ function DocumentsPage() {
                   </div>
                 </>
               ) : null}
+              <div className="mini-panel" style={{ marginTop: 12 }}>
+                <div className="fb mb8">
+                  <div>
+                    <div className="xs ct3">Plan preview</div>
+                    <div className="sm b">{selectedFile?.name || "Seeded document without upload blob"}</div>
+                  </div>
+                  <Button
+                    small
+                    disabled={!selectedFile || previewLoading}
+                    onClick={async () => {
+                      if (!selectedFile) return;
+                      setPreviewLoading(true);
+                      try {
+                        const result = selectedFile.type?.includes("pdf")
+                          ? await previewPdf(selectedFile)
+                          : { html: selectedFile.thumbnailDataUrl ? `<img src="${selectedFile.thumbnailDataUrl}" alt="${selectedFile.name}" style="max-width:100%;border-radius:12px;" />` : "<p>No preview available for this file.</p>" };
+                        setPreviewHtml(result.html);
+                      } finally {
+                        setPreviewLoading(false);
+                      }
+                    }}
+                  >
+                    {previewLoading ? "Opening..." : "Open Preview"}
+                  </Button>
+                </div>
+                {previewHtml ? <div className="document-preview" dangerouslySetInnerHTML={{ __html: previewHtml }} /> : <div className="xs ct3">Open a PDF or uploaded image to preview it here.</div>}
+              </div>
+              <div className="mini-panel" style={{ marginTop: 12 }}>
+                <div className="xs ct3 mb4">AI plan search</div>
+                <div className="fx" style={{ gap: 6 }}>
+                  <input className="inline-input" value={planQuery} onChange={(event) => setPlanQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && searchPlan()} />
+                  <Button small tone="bt-p" onClick={searchPlan}>
+                    Search
+                  </Button>
+                </div>
+                <div className="list-stack" style={{ marginTop: 8 }}>
+                  {planResults.map((result, index) => (
+                    <div className="linked-row" key={`${result.page}-${index}`}>
+                      <div>
+                        <div className="b sm">{result.page}</div>
+                        <div className="xs ct3">{result.excerpt}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="mini-panel" style={{ marginTop: 12 }}>
+                <div className="xs ct3 mb4">Pinned annotations</div>
+                <div className="g2">
+                  <input className="inline-input" value={annotation.locationRef} onChange={(event) => setAnnotation((current) => ({ ...current, locationRef: event.target.value }))} placeholder="Grid / room / page" />
+                  <input className="inline-input" value={annotation.note} onChange={(event) => setAnnotation((current) => ({ ...current, note: event.target.value }))} placeholder="Note" />
+                </div>
+                <Button
+                  small
+                  tone="bt-p"
+                  style={{ marginTop: 8 }}
+                  onClick={() => {
+                    if (!annotation.note.trim()) return;
+                    actions.addDocumentAnnotation(selected.id, annotation);
+                    setAnnotation({ locationRef: "", note: "" });
+                  }}
+                >
+                  Pin Note
+                </Button>
+                <div className="list-stack" style={{ marginTop: 8 }}>
+                  {(selected.annotations || []).map((item) => (
+                    <div className="linked-row" key={item.id}>
+                      <div>
+                        <div className="b sm">{item.locationRef}</div>
+                        <div className="xs ct3">{item.note}</div>
+                      </div>
+                      <Badge tone="medium">{item.by}</Badge>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </Card>
           ) : null}
 
@@ -1916,8 +2260,91 @@ function ReportsPage() {
 
 function AdminPage() {
   const { actions, derived, state } = useSiteForge();
+  const [companyForm, setCompanyForm] = useState({
+    name: state.settings?.company?.name || state.company?.name || "",
+    legalName: state.settings?.company?.legalName || state.company?.legalName || "",
+    abn: state.settings?.company?.abn || state.company?.abn || "",
+    address: state.settings?.company?.address || state.company?.address || "",
+    phone: state.settings?.company?.phone || state.company?.phone || "",
+    email: state.settings?.company?.email || state.company?.email || "",
+    logoDataUrl: state.settings?.company?.logoDataUrl || "",
+  });
+  const [integrationsForm, setIntegrationsForm] = useState({
+    anthropicApiKey: state.settings?.integrations?.anthropicApiKey || "",
+    buildxactApiKey: state.settings?.integrations?.buildxactApiKey || "",
+    buildxactWorkspaceId: state.settings?.integrations?.buildxactWorkspaceId || "",
+  });
   return (
     <div className="oy fin">
+      <div className="g2 mb8">
+        <Card title="Company Settings" icon={Icons.briefcase}>
+          <div className="g2">
+            <div className="ff">
+              <label>Trading name</label>
+              <input value={companyForm.name} onChange={(event) => setCompanyForm((current) => ({ ...current, name: event.target.value }))} />
+            </div>
+            <div className="ff">
+              <label>Legal name</label>
+              <input value={companyForm.legalName} onChange={(event) => setCompanyForm((current) => ({ ...current, legalName: event.target.value }))} />
+            </div>
+          </div>
+          <div className="g2">
+            <div className="ff">
+              <label>ABN</label>
+              <input value={companyForm.abn} onChange={(event) => setCompanyForm((current) => ({ ...current, abn: event.target.value }))} />
+            </div>
+            <div className="ff">
+              <label>Email</label>
+              <input value={companyForm.email} onChange={(event) => setCompanyForm((current) => ({ ...current, email: event.target.value }))} />
+            </div>
+          </div>
+          <div className="ff">
+            <label>Address</label>
+            <input value={companyForm.address} onChange={(event) => setCompanyForm((current) => ({ ...current, address: event.target.value }))} />
+          </div>
+          <div className="g2">
+            <div className="ff">
+              <label>Phone</label>
+              <input value={companyForm.phone} onChange={(event) => setCompanyForm((current) => ({ ...current, phone: event.target.value }))} />
+            </div>
+            <div className="ff">
+              <label>Logo</label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = () => setCompanyForm((current) => ({ ...current, logoDataUrl: reader.result }));
+                  reader.readAsDataURL(file);
+                }}
+              />
+            </div>
+          </div>
+          {companyForm.logoDataUrl ? <img alt="Company logo preview" src={companyForm.logoDataUrl} className="settings-logo-preview" /> : null}
+          <Button tone="bt-p" onClick={() => actions.updateSettings("company", companyForm)}>
+            Save Company Settings
+          </Button>
+        </Card>
+        <Card title="Integration Settings" icon={Icons.zap}>
+          <div className="ff">
+            <label>Claude API key</label>
+            <input type="password" value={integrationsForm.anthropicApiKey} onChange={(event) => setIntegrationsForm((current) => ({ ...current, anthropicApiKey: event.target.value }))} />
+          </div>
+          <div className="ff">
+            <label>Buildxact API key</label>
+            <input type="password" value={integrationsForm.buildxactApiKey} onChange={(event) => setIntegrationsForm((current) => ({ ...current, buildxactApiKey: event.target.value }))} />
+          </div>
+          <div className="ff">
+            <label>Workspace ID</label>
+            <input value={integrationsForm.buildxactWorkspaceId} onChange={(event) => setIntegrationsForm((current) => ({ ...current, buildxactWorkspaceId: event.target.value }))} />
+          </div>
+          <Button tone="bt-p" onClick={() => actions.updateSettings("integrations", integrationsForm)}>
+            Save Integration Settings
+          </Button>
+        </Card>
+      </div>
       <div className="g2">
         <Card title="Demo Controls" icon={Icons.gear}>
           <div className="sm ct2">Reset the demo data back to the seeded construction scenario at any time.</div>

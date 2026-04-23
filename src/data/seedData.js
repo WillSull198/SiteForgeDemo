@@ -2,6 +2,10 @@
  * SiteForge v6 seed data
  * Rich demo data designed to exercise field, commercial, contract, client, director,
  * subcontractor, and worker experiences from a single persisted store.
+ *
+ * SiteForge audit: Added a durable settings slice so company details, contract
+ * defaults, notification preferences, integration credentials, and developer
+ * controls persist consistently instead of being scattered across pages.
  */
 
 const today = "2026-04-22";
@@ -2537,6 +2541,42 @@ const makeTemplateMarketplace = () => [
 export function createInitialData() {
   return {
     company: APP_CONFIG.builder,
+    settings: {
+      company: {
+        ...APP_CONFIG.builder,
+        logoDataUrl: "",
+      },
+      user: {
+        name: "Dave Mitchell",
+        email: "dave@siteforge.builders",
+        phone: "0412 345 678",
+        defaultRole: "Supervisor",
+      },
+      notifications: {
+        ...defaultNotificationPrefs,
+        eventChannels: {
+          approval: ["inApp", "email", "portal"],
+          contract: ["inApp", "email"],
+          problem: ["inApp", "teams"],
+          safety: ["inApp", "email", "sms"],
+        },
+      },
+      integrations: {
+        anthropicApiKey: "",
+        buildxactApiKey: "",
+        buildxactWorkspaceId: "BX-WORKSPACE-DEMO",
+        buildxactConnected: true,
+      },
+      contractDefaults: {
+        defaultContractType: "HIA",
+        standardVariationTemplate: "tpl-hia-var",
+      },
+      theme: "dark",
+      developer: {
+        demoDataBanner: true,
+        allowClearData: true,
+      },
+    },
     users: makeUsers(),
     companies: makeCompanies(),
     clients: makeClients(),
@@ -2623,6 +2663,34 @@ export function migrateLegacyState(rawState = {}) {
     ...seed,
     ...rawState,
     company: { ...seed.company, ...(rawState.company || {}) },
+    settings: {
+      ...seed.settings,
+      ...(rawState.settings || {}),
+      company: {
+        ...seed.settings.company,
+        ...(rawState.settings?.company || rawState.company || {}),
+      },
+      user: {
+        ...seed.settings.user,
+        ...(rawState.settings?.user || {}),
+      },
+      notifications: {
+        ...seed.settings.notifications,
+        ...(rawState.settings?.notifications || {}),
+      },
+      integrations: {
+        ...seed.settings.integrations,
+        ...(rawState.settings?.integrations || {}),
+      },
+      contractDefaults: {
+        ...seed.settings.contractDefaults,
+        ...(rawState.settings?.contractDefaults || {}),
+      },
+      developer: {
+        ...seed.settings.developer,
+        ...(rawState.settings?.developer || {}),
+      },
+    },
     files: {
       ...seed.files,
       ...(rawState.files || {}),

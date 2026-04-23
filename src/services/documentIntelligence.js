@@ -1,3 +1,7 @@
+/* SiteForge audit: Contract template previews now return the structured fields
+   expected by Contract Viewer and ClientFlow, fixing uploaded-template contract
+   generation where merge tokens previously populated text but not sections. */
+
 const DB_NAME = "siteforge-files";
 const STORE_NAME = "blobs";
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
@@ -296,7 +300,22 @@ export function buildTemplatePreviewContent(templateText, mergeData = {}) {
       content = content.replaceAll(new RegExp(`\\{\\{\\s*${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\}\\}`, "g"), String(replacement));
     }
   });
-  return { content, unresolved };
+  const clauses = content
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return {
+    content,
+    populatedContent: content,
+    unresolved,
+    unresolvedTokens: unresolved,
+    sections: [
+      {
+        heading: "Uploaded Contract Template",
+        clauses: clauses.length ? clauses : [content || "Template content will appear here after merge fields are populated."],
+      },
+    ],
+  };
 }
 
 export async function previewPdf(fileMeta) {
@@ -415,4 +434,3 @@ export const DOCUMENT_LIMITS = {
   maxFileSize: MAX_FILE_SIZE,
   acceptedTypes: ACCEPTED_TYPES,
 };
-

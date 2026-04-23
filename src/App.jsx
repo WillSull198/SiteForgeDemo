@@ -1,3 +1,6 @@
+/* SiteForge audit: Removed console-only crash logging and connected saved company
+   branding to the live shell header so Settings changes are visible immediately. */
+
 import { Component, useEffect, useMemo, useRef, useState } from "react";
 import AIAssistantDrawer from "./components/AIAssistantDrawer";
 import Breadcrumbs from "./components/Breadcrumbs";
@@ -119,9 +122,7 @@ class ViewBoundary extends Component {
     return { hasError: true };
   }
 
-  componentDidCatch(error) {
-    console.error("SiteForge view crashed", error);
-  }
+  componentDidCatch() {}
 
   render() {
     if (this.state.hasError) {
@@ -158,6 +159,7 @@ function Shell() {
   });
   const [quickNewOpen, setQuickNewOpen] = useState(false);
   const [quickForm, setQuickForm] = useState({ title: "", description: "" });
+  const company = state.settings?.company || state.company || APP_CONFIG.builder;
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -345,7 +347,7 @@ function Shell() {
         <aside className="S">
           <div className="S-h">
             <h1>
-              <span className="lg">SF</span> SiteForge
+              <span className="lg">{company.logoDataUrl ? <img alt="" src={company.logoDataUrl} /> : "SF"}</span> {company.name || "SiteForge"}
             </h1>
             <p>Construction operating layer</p>
           </div>
