@@ -300,6 +300,19 @@ export default function ClientFlowPage() {
                       }
                       onSave={(data) => actions.updateApprovalDraft(selected.id, { aiDraft: data, summary: data.summary, reason: data.reason, recommendation: data.recommendation })}
                     />
+                    {selected.portalUrl ? (
+                      <Card title="Client Portal Link" icon={Icons.link} className="mb8">
+                        <div className="sm ct2" style={{ wordBreak: "break-all" }}>{selected.portalUrl}</div>
+                        <div className="fa" style={{ justifyContent: "flex-start", marginTop: 10 }}>
+                          <Button small tone="bt-p" onClick={() => navigator.clipboard?.writeText(selected.portalUrl)}>
+                            Copy Link
+                          </Button>
+                          <Button small onClick={() => window.open(selected.portalUrl, "_blank", "noopener,noreferrer")}>
+                            Open Portal
+                          </Button>
+                        </div>
+                      </Card>
+                    ) : null}
                   </div>
 
                   <div>

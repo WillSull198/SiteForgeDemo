@@ -1169,6 +1169,160 @@ const makeApprovals = () => [
 const makeContractTemplates = () => {
   const templates = [
     {
+      id: "tpl-hia-var",
+      type: "Variation",
+      name: "HIA Variation Notice",
+      contractType: "HIA",
+      category: "Variation",
+      version: "v1",
+      status: "active",
+      branding: "HIA residential variation notice",
+      clauses: ["Client approval is required before recoverable variation works proceed."],
+      sourceContent: `VARIATION NOTICE - HIA RESIDENTIAL BUILDING CONTRACT
+
+Project: {{site.name}}
+Client: {{client.name}}
+Site Address: {{site.address}}
+Builder: {{builder.name}} ABN: {{builder.abn}}
+Date: {{date.today}}
+Variation No: {{approval.number}}
+
+DESCRIPTION OF VARIATION WORKS:
+{{approval.summary}}
+
+REASON FOR VARIATION:
+{{approval.reason}}
+
+COST OF VARIATION:
+Labour and materials for the above works: {{approval.cost}} incl. GST.
+
+EFFECT ON CONTRACT PERIOD:
+This variation will extend the contract period by {{approval.days}} day(s).
+
+This variation is subject to the terms of the HIA Residential Building Contract.
+
+CLIENT APPROVAL:
+I/We approve this variation and authorise the builder to proceed.
+
+Signed by: {{signature.client}}
+Electronically signed pursuant to the Electronic Transactions Act 1999 (Cth).`,
+    },
+    {
+      id: "tpl-as4000-variation",
+      type: "Variation",
+      name: "AS4000 Variation (Clause 40)",
+      contractType: "AS4000",
+      category: "Variation",
+      version: "v1",
+      status: "active",
+      branding: "AS4000 Clause 40 variation order",
+      clauses: ["Variation instruction and contract sum adjustment under AS4000 Clause 40."],
+      sourceContent: `VARIATION - AS 4000-1997 CLAUSE 40
+
+PROJECT: {{site.name}}
+PRINCIPAL: {{client.name}}
+CONTRACTOR: {{builder.name}}
+SITE: {{site.address}}
+DATE: {{date.today}}
+VARIATION ORDER NO: {{approval.number}}
+
+Pursuant to Clause 40 of AS 4000-1997, the Principal instructs a variation to the Works:
+
+DESCRIPTION:
+{{approval.summary}}
+
+REASON:
+{{approval.reason}}
+
+ADJUSTMENT TO CONTRACT SUM:
+The Contract Sum shall be adjusted by {{approval.cost}} incl. GST.
+
+ADJUSTMENT TO DATE FOR PRACTICAL COMPLETION:
+Extended by {{approval.days}} day(s).
+
+Signed electronically by: {{signature.client}}`,
+    },
+    {
+      id: "tpl-rain-day",
+      type: "Rain Day",
+      name: "Rain Day / EOT Notice",
+      contractType: "General",
+      category: "EOT",
+      version: "v1",
+      status: "active",
+      branding: "Inclement weather extension of time notice",
+      clauses: ["Inclement weather event and critical path impact notice."],
+      sourceContent: `EXTENSION OF TIME NOTICE - INCLEMENT WEATHER
+
+To: {{client.name}}
+From: {{builder.name}}
+Project: {{site.name}}
+Site: {{site.address}}
+Date: {{date.today}}
+Notice No: {{approval.number}}
+
+We give notice that the following inclement weather event delayed the Works:
+
+Description: {{approval.summary}}
+Impact on critical path: {{approval.reason}}
+Extension of time claimed: {{approval.days}} day(s)
+
+Client acknowledgement: {{signature.client}}`,
+    },
+    {
+      id: "tpl-delay-notice",
+      type: "Delay Notice",
+      name: "Delay Notice",
+      contractType: "General",
+      category: "Delay",
+      version: "v1",
+      status: "active",
+      branding: "Programme delay notice",
+      clauses: ["Formal notice of delay affecting progress of the Works."],
+      sourceContent: `NOTICE OF DELAY
+
+To: {{client.name}}
+Project: {{site.name}}
+Date: {{date.today}}
+
+We notify you of a delay affecting the Works:
+
+Cause of delay: {{approval.summary}}
+Estimated impact: {{approval.days}} day(s)
+Additional costs: {{approval.cost}}
+
+Details: {{approval.reason}}
+
+Builder: {{builder.name}}`,
+    },
+    {
+      id: "tpl-selection",
+      type: "Selection Upgrade",
+      name: "Client Selection / Upgrade",
+      contractType: "General",
+      category: "Selection",
+      version: "v1",
+      status: "active",
+      branding: "Client selection approval",
+      clauses: ["Client confirms selected finish, fixture, or upgrade."],
+      sourceContent: `CLIENT SELECTION APPROVAL
+
+Project: {{site.name}}
+Client: {{client.name}}
+Date: {{date.today}}
+Ref: {{approval.number}}
+
+SELECTION DETAILS:
+{{approval.summary}}
+
+COST ADJUSTMENT: {{approval.cost}}
+TIME IMPACT: {{approval.days}} day(s)
+
+I/We confirm this selection and approve the associated costs.
+
+Client: {{signature.client}}`,
+    },
+    {
       id: "tpl-variation",
       type: "Variation",
       name: "Variation Contract (Short Form)",

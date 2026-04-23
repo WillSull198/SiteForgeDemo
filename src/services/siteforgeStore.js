@@ -95,6 +95,7 @@ const cloneState = (value) => {
 };
 
 const randomId = (prefix) => `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
+const uuid = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : randomId("uuid"));
 
 const getRuntimeNow = () => {
   if (typeof window !== "undefined" && window.__siteforgeNow) {
@@ -218,11 +219,20 @@ const createInitialStore = () => {
 function parseHash(hash = "") {
   const cleaned = hash.replace(/^#\/?/, "");
   const parts = cleaned.split("/").filter(Boolean);
+  if (!parts.length && typeof window !== "undefined") {
+    const pathParts = window.location.pathname.split("/").filter(Boolean);
+    if (pathParts[0] === "approve" && pathParts[1]) {
+      return { kind: "client-token", approvalToken: pathParts[1], page: "approvals", entityId: null };
+    }
+  }
 
   if (!parts.length) {
     return null;
   }
 
+  if (parts[0] === "approve") {
+    return { kind: "client-token", approvalToken: parts[1], page: "approvals", entityId: null };
+  }
   if (parts[0] === "client") {
     return { kind: "client", clientId: parts[1] || "c1", page: parts[2] || "home", entityId: parts[3] || null };
   }
@@ -1093,6 +1103,16 @@ export function SiteForgeProvider({ children }) {
             next.session.role = "Client";
           }
         }
+        if (parsed.kind === "client-token") {
+          const approval = next.approvals.find((item) => item.portalToken === parsed.approvalToken);
+          if (approval) {
+            const clientUser = next.users.find((user) => user.clientId === approval.clientId);
+            next.session.role = "Client";
+            next.session.userId = clientUser?.id || DEFAULT_ROLE_USERS.Client;
+            next.session.route = { kind: "client", clientId: approval.clientId, page: "approvals", entityId: approval.id };
+            next.session.siteId = approval.siteId;
+          }
+        }
         if (parsed.kind === "worker") {
           next.session.role = "Worker";
         }
@@ -1107,7 +1127,9 @@ export function SiteForgeProvider({ children }) {
     };
 
     window.addEventListener("hashchange", onHashChange);
-    if (!window.location.hash) {
+    if (!window.location.hash && window.location.pathname.startsWith("/approve/")) {
+      onHashChange();
+    } else if (!window.location.hash) {
       const bootRole = ["Worker", "Client", "Subcontractor"].includes(state.session.role) ? "Supervisor" : state.session.role;
       window.location.hash = buildHash(getDefaultRouteForRole(bootRole, state));
     } else {
@@ -1520,6 +1542,7 @@ export function SiteForgeProvider({ children }) {
             timeImpact: Number(payload.timeImpact || 0),
             linkedApprovals: [],
             linkedRecords: payload.linkedRecords || [],
+            photos: payload.photos || [],
             thread: [
               {
                 id: randomId("pr-msg"),
@@ -1583,6 +1606,7 @@ export function SiteForgeProvider({ children }) {
           const site = next.sites.find((item) => item.id === siteId);
           const client = next.clients.find((item) => item.id === site.clientId);
           const aiDraft = draftApproval(source, approvalType);
+          const portalToken = uuid();
           const approval = {
             id: randomId("ap"),
             siteId,
@@ -1610,6 +1634,7 @@ export function SiteForgeProvider({ children }) {
             messageThread: [],
             contractPackId: null,
           };
+          approval.portalUrl = `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${approval.portalToken}`;
           helpers.appendTimeline(approval, {
             type: "created",
             actor: actorName(helpers.actor),
@@ -1661,6 +1686,8 @@ export function SiteForgeProvider({ children }) {
           const before = { status: approval.status, sentAt: approval.sentAt };
           approval.status = "awaiting-client";
           approval.sentAt = nowStamp();
+          approval.portalToken = approval.portalToken || uuid();
+          approval.portalUrl = `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${approval.portalToken}`;
           helpers.appendTimeline(approval, {
             type: "sent",
             actor: actorName(helpers.actor),
@@ -2276,6 +2303,7 @@ export function SiteForgeProvider({ children }) {
             clientApprovalId: null,
             contractPackId: null,
             linkedRecords: payload.linkedRecords || [],
+            photos: payload.photos || [],
           };
           next.variations.unshift(variation);
           helpers.addAudit({
@@ -2307,6 +2335,8 @@ export function SiteForgeProvider({ children }) {
             priority: variation.priority,
             templateId: selectedTemplateId,
             autoReleaseToClient: true,
+            portalToken,
+            portalUrl: `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${portalToken}`,
             sourceType,
             sourceId: variation.sourceId || variation.id,
             createdBy: helpers.actor.id,
@@ -2468,6 +2498,7 @@ export function SiteForgeProvider({ children }) {
             totalCount: Number(payload.totalCount || 0),
             notes: payload.notes || "",
             linkedRecords: payload.linkedRecords || [],
+            photos: payload.photos || [],
           };
           next.qa.unshift(entry);
           helpers.addAudit({
@@ -2604,6 +2635,7 @@ export function SiteForgeProvider({ children }) {
             clientApprovalId: null,
             contractPackId: null,
             linkedRecords: [buildLink("diary", diary, diary.siteId)],
+            photos: payload.photos || diary.photos || [],
           };
           next.variations.unshift(variation);
           upsertLinkedRecord(diary, buildLink("variation", variation, diary.siteId));
@@ -2639,6 +2671,7 @@ export function SiteForgeProvider({ children }) {
             participants: payload.participants || [helpers.actor.id],
             acknowledgementRequired: Boolean(payload.acknowledgementRequired),
             linkedRecords: payload.linkedRecords || [],
+            photos: payload.photos || [],
           };
           next.safety.unshift(record);
           helpers.addAudit({

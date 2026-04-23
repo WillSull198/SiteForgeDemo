@@ -4,6 +4,12 @@ SiteForge is a React + Vite construction operations demo that links field activi
 
 ## Latest Repair Pass
 
+- The internal product shell has been restyled into a clean white/black professional theme with amber action accents, brighter tables, readable cards, and polished modal/input/button states.
+- A generic IndexedDB CRUD service (`src/services/db.js`) now supports modular persistence for files, photos, plans, settings, audit records, and future per-module slices.
+- Shared photo upload now works across diary, problems, variations, QA, and safety records, with browser-side compression, thumbnail previews, drag-and-drop, IndexedDB persistence, and lightbox viewing.
+- Document Control now includes a full-screen PDF.js viewer for uploaded plan PDFs with page navigation, zoom, download, and Escape-to-close behaviour.
+- ClientFlow now exposes generated client portal links for sent approvals, including direct variation-to-client sends.
+- Seeded contract templates now include HIA Variation, AS4000 Clause 40, Rain Day/EOT, Delay Notice, and Client Selection templates that align with the live merge engine.
 - Main app state now mirrors to IndexedDB with localStorage as fallback, reducing storage failures as uploads/contracts/audit history grow.
 - Portfolio now supports real project creation with client details, contract value/type, programme dates, budget starter lines, audit logging, notifications, and immediate site navigation.
 - Settings now persists company branding, ABN/address/contact details, logo upload, Claude key, and Buildxact credentials.

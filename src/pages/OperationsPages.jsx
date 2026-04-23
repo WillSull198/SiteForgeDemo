@@ -6,6 +6,8 @@ import { useEffect, useMemo, useState } from "react";
 import { flagBudgetAnomaly, suggestRFI } from "../services/aiDraftService";
 import DataTable from "../components/DataTable";
 import FileDropZone from "../components/FileDropZone";
+import PhotoUpload from "../components/PhotoUpload";
+import PDFViewer from "../components/PDFViewer";
 import { exportCsv, exportElementToPdf } from "../services/pdfService";
 import { previewPdf } from "../services/documentIntelligence";
 import { useSiteForge } from "../services/siteforgeStore";
@@ -576,7 +578,7 @@ function ProblemsPage() {
   const [selectedId, setSelectedId] = useState(state.problems.find((problem) => problem.siteId === siteId)?.id || null);
   const [open, setOpen] = useState(false);
   const [reply, setReply] = useState("");
-  const [form, setForm] = useState({ title: "", description: "", priority: "medium", costImpact: "", timeImpact: "" });
+  const [form, setForm] = useState({ title: "", description: "", priority: "medium", costImpact: "", timeImpact: "", photos: [] });
   const problems = state.problems.filter((problem) => problem.siteId === siteId);
   const selected = problems.find((problem) => problem.id === selectedId) || problems[0];
 
@@ -654,6 +656,11 @@ function ProblemsPage() {
                   </div>
                 ))}
               </div>
+              {selected.photos?.length ? (
+                <div style={{ marginTop: 12 }}>
+                  <PhotoUpload existingPhotos={selected.photos} parentType="problem" parentId={selected.id} />
+                </div>
+              ) : null}
               <div className="mi" style={{ paddingLeft: 0, paddingRight: 0 }}>
                 <input value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Reply to field thread..." />
                 <Button
@@ -699,6 +706,15 @@ function ProblemsPage() {
           <label>Cost Impact</label>
           <input value={form.costImpact} onChange={(event) => setForm((current) => ({ ...current, costImpact: event.target.value }))} />
         </div>
+        <div className="ff">
+          <label>Photos</label>
+          <PhotoUpload
+            existingPhotos={form.photos}
+            parentType="problem"
+            onPhotosAdded={(photos) => setForm((current) => ({ ...current, photos: [...current.photos, ...photos] }))}
+            onRemove={(photoId) => setForm((current) => ({ ...current, photos: current.photos.filter((photo) => photo.id !== photoId) }))}
+          />
+        </div>
         <div className="fa">
           <Button onClick={() => setOpen(false)}>Cancel</Button>
           <Button
@@ -706,7 +722,7 @@ function ProblemsPage() {
             onClick={() => {
               actions.addProblem(form);
               setOpen(false);
-              setForm({ title: "", description: "", priority: "medium", costImpact: "", timeImpact: "" });
+              setForm({ title: "", description: "", priority: "medium", costImpact: "", timeImpact: "", photos: [] });
             }}
           >
             Report
@@ -1120,7 +1136,7 @@ function VariationsPage() {
   const { state, actions } = useSiteForge();
   const siteId = state.session.siteId;
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ title: "", description: "", reason: "", value: "", days: "", trade: "General", priority: "medium", templateId: "" });
+  const [form, setForm] = useState({ title: "", description: "", reason: "", value: "", days: "", trade: "General", priority: "medium", templateId: "", photos: [] });
   const variations = state.variations.filter((variation) => variation.siteId === siteId);
   const variationTemplates = state.contractTemplates.filter((template) => template.status !== "archived" && ["Variation", "Scope Clarification", "Selection Upgrade"].includes(template.type));
 
@@ -1224,6 +1240,15 @@ function VariationsPage() {
             ))}
           </select>
         </div>
+        <div className="ff">
+          <label>Supporting photos</label>
+          <PhotoUpload
+            existingPhotos={form.photos}
+            parentType="variation"
+            onPhotosAdded={(photos) => setForm((current) => ({ ...current, photos: [...current.photos, ...photos] }))}
+            onRemove={(photoId) => setForm((current) => ({ ...current, photos: current.photos.filter((photo) => photo.id !== photoId) }))}
+          />
+        </div>
         <div className="fa">
           <Button onClick={() => setOpen(false)}>Cancel</Button>
           <Button
@@ -1231,7 +1256,7 @@ function VariationsPage() {
             onClick={() => {
               actions.createVariationDraft(form);
               setOpen(false);
-              setForm({ title: "", description: "", reason: "", value: "", days: "", trade: "General", priority: "medium", templateId: "" });
+              setForm({ title: "", description: "", reason: "", value: "", days: "", trade: "General", priority: "medium", templateId: "", photos: [] });
             }}
           >
             Save Draft
@@ -1246,7 +1271,7 @@ function QaPage() {
   const { state, actions } = useSiteForge();
   const siteId = state.session.siteId;
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ title: "", type: "Hold Point", trade: "General", date: "", totalCount: "", notes: "" });
+  const [form, setForm] = useState({ title: "", type: "Hold Point", trade: "General", date: "", totalCount: "", notes: "", photos: [] });
   const items = state.qa.filter((item) => item.siteId === siteId);
 
   return (
@@ -1279,6 +1304,7 @@ function QaPage() {
                   <td>
                     <div className="b sm">{item.title}</div>
                     <div className="xs ct3">{item.notes}</div>
+                    {item.photos?.length ? <div className="xs ct3">{item.photos.length} photo(s)</div> : null}
                   </td>
                   <td className="xs">{item.trade}</td>
                   <td className="xs">{item.date}</td>
@@ -1350,6 +1376,15 @@ function QaPage() {
           <label>Notes</label>
           <textarea value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} />
         </div>
+        <div className="ff">
+          <label>Photos</label>
+          <PhotoUpload
+            existingPhotos={form.photos}
+            parentType="qa"
+            onPhotosAdded={(photos) => setForm((current) => ({ ...current, photos: [...current.photos, ...photos] }))}
+            onRemove={(photoId) => setForm((current) => ({ ...current, photos: current.photos.filter((photo) => photo.id !== photoId) }))}
+          />
+        </div>
         <div className="fa">
           <Button onClick={() => setOpen(false)}>Cancel</Button>
           <Button
@@ -1357,7 +1392,7 @@ function QaPage() {
             onClick={() => {
               actions.addQaRecord(form);
               setOpen(false);
-              setForm({ title: "", type: "Hold Point", trade: "General", date: "", totalCount: "", notes: "" });
+              setForm({ title: "", type: "Hold Point", trade: "General", date: "", totalCount: "", notes: "", photos: [] });
             }}
           >
             Add
@@ -1375,8 +1410,8 @@ function DiaryPage() {
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [variationEntry, setVariationEntry] = useState(null);
   const [rawNote, setRawNote] = useState("");
-  const [form, setForm] = useState({ date: "", weather: "", crew: "", summary: "", safety: "", delays: "", rainEvent: false });
-  const [variationForm, setVariationForm] = useState({ title: "", description: "", value: "", days: "", reason: "", trade: "General", priority: "medium", templateId: "" });
+  const [form, setForm] = useState({ date: "", weather: "", crew: "", summary: "", safety: "", delays: "", rainEvent: false, photos: [] });
+  const [variationForm, setVariationForm] = useState({ title: "", description: "", value: "", days: "", reason: "", trade: "General", priority: "medium", templateId: "", photos: [] });
   const entries = state.diary.filter((entry) => entry.siteId === siteId);
   const variationTemplates = state.contractTemplates.filter((template) => template.status !== "archived" && ["Variation", "Selection Upgrade", "Scope Clarification"].includes(template.type));
 
@@ -1398,6 +1433,7 @@ function DiaryPage() {
           <div className="sm ct2" style={{ lineHeight: 1.7 }}>
             {entry.summary}
           </div>
+          {entry.photos?.length ? <PhotoUpload existingPhotos={entry.photos} parentType="diary" parentId={entry.id} /> : null}
           <div className="fx" style={{ gap: 6, flexWrap: "wrap", marginTop: 10 }}>
             <Badge tone="medium">{entry.weather}</Badge>
             <Badge tone="passed">{entry.crew} crew</Badge>
@@ -1419,6 +1455,7 @@ function DiaryPage() {
                   trade: "General",
                   priority: entry.rainEvent ? "high" : "medium",
                   templateId: state.settings?.contractDefaults?.standardVariationTemplate || variationTemplates[0]?.id || "",
+                  photos: entry.photos || [],
                 });
               }}
             >
@@ -1458,6 +1495,15 @@ function DiaryPage() {
           <input type="checkbox" checked={form.rainEvent} onChange={(event) => setForm((current) => ({ ...current, rainEvent: event.target.checked }))} />
           Mark as rain event
         </label>
+        <div className="ff">
+          <label>Photos</label>
+          <PhotoUpload
+            existingPhotos={form.photos}
+            parentType="diary"
+            onPhotosAdded={(photos) => setForm((current) => ({ ...current, photos: [...current.photos, ...photos] }))}
+            onRemove={(photoId) => setForm((current) => ({ ...current, photos: current.photos.filter((photo) => photo.id !== photoId) }))}
+          />
+        </div>
         <div className="fa">
           <Button onClick={() => setOpen(false)}>Cancel</Button>
           <Button
@@ -1465,7 +1511,7 @@ function DiaryPage() {
             onClick={() => {
               actions.addDiaryEntry(form);
               setOpen(false);
-              setForm({ date: "", weather: "", crew: "", summary: "", safety: "", delays: "", rainEvent: false });
+              setForm({ date: "", weather: "", crew: "", summary: "", safety: "", delays: "", rainEvent: false, photos: [] });
             }}
           >
             Save Entry
@@ -1520,6 +1566,15 @@ function DiaryPage() {
             ))}
           </select>
         </div>
+        <div className="ff">
+          <label>Supporting photos</label>
+          <PhotoUpload
+            existingPhotos={variationForm.photos}
+            parentType="variation"
+            onPhotosAdded={(photos) => setVariationForm((current) => ({ ...current, photos: [...current.photos, ...photos] }))}
+            onRemove={(photoId) => setVariationForm((current) => ({ ...current, photos: current.photos.filter((photo) => photo.id !== photoId) }))}
+          />
+        </div>
         <div className="fa">
           <Button onClick={() => setVariationEntry(null)}>Cancel</Button>
           <Button
@@ -1565,7 +1620,7 @@ function SafetyPage() {
   const { state, actions } = useSiteForge();
   const siteId = state.session.siteId;
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ topic: "", type: "toolbox", acknowledgementRequired: false });
+  const [form, setForm] = useState({ topic: "", type: "toolbox", acknowledgementRequired: false, photos: [] });
   const records = state.safety.filter((entry) => entry.siteId === siteId);
 
   return (
@@ -1589,6 +1644,7 @@ function SafetyPage() {
               ? "This item has direct stoppage, notification, and programme implications."
               : "Toolbox or safety advisory record captured for the team."}
           </div>
+          {record.photos?.length ? <PhotoUpload existingPhotos={record.photos} parentType="safety" parentId={record.id} /> : null}
           {record.type === "critical" || record.type === "incident" ? (
             <Button tone="bt-p" icon={Icons.flag} onClick={() => actions.createDelayNoticeFromSafety(record.id)} style={{ marginTop: 10 }}>
               Log Work Stoppage / Delay Notice
@@ -1620,6 +1676,15 @@ function SafetyPage() {
             Acknowledgement required
           </label>
         </div>
+        <div className="ff">
+          <label>Photos</label>
+          <PhotoUpload
+            existingPhotos={form.photos}
+            parentType="safety"
+            onPhotosAdded={(photos) => setForm((current) => ({ ...current, photos: [...current.photos, ...photos] }))}
+            onRemove={(photoId) => setForm((current) => ({ ...current, photos: current.photos.filter((photo) => photo.id !== photoId) }))}
+          />
+        </div>
         <div className="fa">
           <Button onClick={() => setOpen(false)}>Cancel</Button>
           <Button
@@ -1627,7 +1692,7 @@ function SafetyPage() {
             onClick={() => {
               actions.addSafetyRecord(form);
               setOpen(false);
-              setForm({ topic: "", type: "toolbox", acknowledgementRequired: false });
+              setForm({ topic: "", type: "toolbox", acknowledgementRequired: false, photos: [] });
             }}
           >
             Save
@@ -1645,6 +1710,7 @@ function DocumentsPage() {
   const [uploading, setUploading] = useState(false);
   const [previewHtml, setPreviewHtml] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [pdfViewerFile, setPdfViewerFile] = useState(null);
   const [planQuery, setPlanQuery] = useState("");
   const [planResults, setPlanResults] = useState([]);
   const [annotation, setAnnotation] = useState({ locationRef: "", note: "" });
@@ -1807,6 +1873,11 @@ function DocumentsPage() {
                   >
                     {previewLoading ? "Opening..." : "Open Preview"}
                   </Button>
+                  {selectedFile?.type?.includes("pdf") ? (
+                    <Button small tone="bt-p" onClick={() => setPdfViewerFile(selectedFile)}>
+                      Full PDF Viewer
+                    </Button>
+                  ) : null}
                 </div>
                 {previewHtml ? <div className="document-preview" dangerouslySetInnerHTML={{ __html: previewHtml }} /> : <div className="xs ct3">Open a PDF or uploaded image to preview it here.</div>}
               </div>
@@ -1896,6 +1967,7 @@ function DocumentsPage() {
           </Card>
         </div>
       </div>
+      {pdfViewerFile ? <PDFViewer fileMeta={pdfViewerFile} onClose={() => setPdfViewerFile(null)} /> : null}
     </div>
   );
 }

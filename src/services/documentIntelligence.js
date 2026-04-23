@@ -337,6 +337,15 @@ export async function previewPdf(fileMeta) {
   return { html: `<img src="${canvas.toDataURL("image/png")}" alt="PDF preview" style="max-width:100%;border-radius:14px;" />` };
 }
 
+export async function getStoredFileBlob(fileId) {
+  return getBlob(fileId);
+}
+
+export async function loadPdfJs() {
+  const pdfjsWindow = await ensurePdfJs();
+  return pdfjsWindow?.pdfjsLib || window.pdfjsLib;
+}
+
 export async function previewDocx(fileMeta) {
   const blob = fileMeta?.blob || (fileMeta?.id ? await getBlob(fileMeta.id) : null);
   if (!blob) return { html: "<p>DOCX preview unavailable.</p>" };
