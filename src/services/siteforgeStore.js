@@ -1,0 +1,3781 @@
+import React, { createContext, createElement, useCallback, useContext, useEffect, useMemo, useRef } from "react";
+import { APP_CONFIG, createInitialData, migrateLegacyState } from "../data/seedData";
+import { usePersistentState } from "../hooks/usePersistentState";
+import {
+  boardInsights,
+  draftApproval,
+  generateEndOfDay,
+  suggestRFI,
+  structureFieldNote,
+  summariseDiary,
+  summariseRevision,
+} from "./aiDraftService";
+import { appendAuditEntry, exportAuditCsv, verifyAuditChain } from "./auditTrail";
+import { buildContractSummary, generateDraft, signContract } from "./contractService";
+import { diffPlans, parseTemplate, removeFileEverywhere, uploadFile, uploadSeededTextFile, buildTemplatePreviewContent } from "./documentIntelligence";
+import { dispatchNotificationEvent } from "./notificationEngine";
+
+const SiteForgeContext = createContext(null);
+
+const DEFAULT_ROLE_USERS = {
+  Supervisor: "u_sup_1",
+  "Project Manager": "u_pm_1",
+  "Contract Admin": "u_ca_1",
+  Director: "u_dir_1",
+  Subcontractor: "u_sub_1",
+  Client: "u_client_1",
+  Worker: "u_worker_1",
+};
+
+const DEFAULT_ROLE_PAGES = {
+  Supervisor: { kind: "internal", siteId: "s1", page: "dash", entityId: null },
+  "Project Manager": { kind: "internal", siteId: "s1", page: "dash", entityId: null },
+  "Contract Admin": { kind: "internal", siteId: "s1", page: "contracts", entityId: null },
+  Director: { kind: "director", page: "boardroom", siteId: null, entityId: null },
+  Subcontractor: { kind: "subcontractor", userId: "u_sub_1", page: "jobs", entityId: null },
+  Client: { kind: "client", clientId: "c1", page: "home", entityId: null },
+  Worker: { kind: "worker", userId: "u_worker_1", page: "home", entityId: null },
+};
+
+const COLLECTION_MAP = {
+  task: "tasks",
+  tasks: "tasks",
+  problem: "problems",
+  issue: "problems",
+  problems: "problems",
+  procurement: "procurement",
+  material: "procurement",
+  diary: "diary",
+  rfi: "rfis",
+  rfis: "rfis",
+  variation: "variations",
+  variations: "variations",
+  approval: "approvals",
+  approvals: "approvals",
+  qa: "qa",
+  safety: "safety",
+  document: "documents",
+  documents: "documents",
+  contract: "contractPacks",
+  contractPack: "contractPacks",
+  passport: "passports.records",
+  presence: "presence.records",
+  invoice: "invoices",
+  template: "contractTemplates",
+  clause: "clauseLibrary",
+  boardReport: "boardReports",
+  file: "files.records",
+  message: "messages",
+  site: "sites",
+  client: "clients",
+};
+
+const INTERNAL_ROLES = new Set(["Supervisor", "Project Manager", "Contract Admin"]);
+const COMMERCIAL_APPROVALS = new Set([
+  "Variation",
+  "Selection Upgrade",
+  "Provisional Sum Conversion",
+  "Price Escalation",
+  "Scope Clarification",
+]);
+const DELAY_APPROVALS = new Set(["Rain Day", "Extension of Time", "Delay Notice"]);
+
+const SORTABLE_DATE_KEYS = new Set(["date", "createdAt", "updatedAt", "dueDate", "sentAt", "timestamp", "at"]);
+
+const cloneState = (value) => {
+  if (typeof structuredClone === "function") {
+    return structuredClone(value);
+  }
+  return JSON.parse(JSON.stringify(value));
+};
+
+const randomId = (prefix) => `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
+
+const getRuntimeNow = () => {
+  if (typeof window !== "undefined" && window.__siteforgeNow) {
+    return new Date(window.__siteforgeNow);
+  }
+  return new Date();
+};
+
+const nowStamp = () => {
+  const now = getRuntimeNow();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mi = String(now.getMinutes()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+};
+
+const formatDate = (value) => value || nowStamp().slice(0, 10);
+
+const addDays = (dateString, days = 0) => {
+  if (!dateString) return dateString;
+  const base = new Date(dateString.length > 10 ? dateString.replace(" ", "T") : `${dateString}T00:00:00`);
+  if (Number.isNaN(base.getTime())) return dateString;
+  base.setDate(base.getDate() + Number(days || 0));
+  const yyyy = base.getFullYear();
+  const mm = String(base.getMonth() + 1).padStart(2, "0");
+  const dd = String(base.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+};
+
+const formatCurrency = (value = 0) =>
+  new Intl.NumberFormat("en-AU", {
+    style: "currency",
+    currency: "AUD",
+    maximumFractionDigits: 0,
+  }).format(Number(value) || 0);
+
+const readCollection = (state, collectionPath) =>
+  collectionPath.split(".").reduce((accumulator, key) => (accumulator ? accumulator[key] : null), state);
+
+const findInCollection = (state, type, id) => {
+  const collectionPath = COLLECTION_MAP[type] || type;
+  const collection = readCollection(state, collectionPath);
+  if (!Array.isArray(collection)) {
+    return null;
+  }
+  return collection.find((item) => item.id === id || item.docId === id || item.number === id || item.siteId === id || item.clientId === id) || null;
+};
+
+const upsertLinkedRecord = (entity, record) => {
+  entity.linkedRecords = entity.linkedRecords || [];
+  const exists = entity.linkedRecords.some((item) => item.type === record.type && item.id === record.id);
+  if (!exists) {
+    entity.linkedRecords.push(record);
+  }
+};
+
+const removeLinkedRecord = (entity, type, id) => {
+  entity.linkedRecords = (entity.linkedRecords || []).filter((record) => !(record.type === type && record.id === id));
+};
+
+const buildLink = (type, record, siteId) => ({
+  type,
+  id: record.id || record.docId,
+  label: record.title || record.name || record.number || record.item || record.person || record.topic || record.docId,
+  siteId,
+});
+
+const defaultSession = () => ({
+  role: "Supervisor",
+  userId: DEFAULT_ROLE_USERS.Supervisor,
+  siteId: "s1",
+  period: "This Week",
+  route: DEFAULT_ROLE_PAGES.Supervisor,
+  recentSearches: ["waterproofing", "lintels", "Tower B"],
+});
+
+const defaultUi = () => ({
+  notificationsOpen: false,
+  searchOpen: false,
+  shortcutsOpen: false,
+  commandPaletteOpen: false,
+  aiAssistantOpen: false,
+  bootRoleSelectorOpen: true,
+  contractPreviewId: null,
+  activeApprovalId: "ap-003",
+  activeContractId: "cp-004",
+});
+
+const createInitialStore = () => {
+  const base = {
+    version: APP_CONFIG.storageVersion,
+    ...createInitialData(),
+    session: defaultSession(),
+    ui: defaultUi(),
+  };
+
+  if (typeof window === "undefined") {
+    return base;
+  }
+
+  for (const legacyKey of APP_CONFIG.legacyStorageKeys || []) {
+    try {
+      const raw = window.localStorage.getItem(legacyKey);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      return migrateLegacyState({
+        ...parsed,
+        session: { ...defaultSession(), ...(parsed.session || {}) },
+        ui: { ...defaultUi(), ...(parsed.ui || {}) },
+      });
+    } catch (error) {
+      console.warn("Failed to migrate legacy SiteForge state", error);
+    }
+  }
+
+  return base;
+};
+
+function parseHash(hash = "") {
+  const cleaned = hash.replace(/^#\/?/, "");
+  const parts = cleaned.split("/").filter(Boolean);
+
+  if (!parts.length) {
+    return null;
+  }
+
+  if (parts[0] === "client") {
+    return { kind: "client", clientId: parts[1] || "c1", page: parts[2] || "home", entityId: parts[3] || null };
+  }
+  if (parts[0] === "worker") {
+    return { kind: "worker", userId: parts[1] || "u_worker_1", page: parts[2] || "home", entityId: parts[3] || null };
+  }
+  if (parts[0] === "subcontractor") {
+    return { kind: "subcontractor", userId: parts[1] || "u_sub_1", page: parts[2] || "jobs", entityId: parts[3] || null };
+  }
+  if (parts[0] === "director") {
+    return { kind: "director", page: parts[1] || "boardroom", siteId: parts[2] || null, entityId: parts[3] || null };
+  }
+  if (parts[0] === "site") {
+    return { kind: "internal", siteId: parts[1] || "s1", page: parts[2] || "dash", entityId: parts[3] || null };
+  }
+  if (parts[0] === "portfolio") {
+    return { kind: "internal", siteId: "s1", page: "portfolio", entityId: null };
+  }
+
+  return null;
+}
+
+function buildHash(route) {
+  if (!route) return "#/site/s1/dash";
+
+  if (route.kind === "client") {
+    return `#/client/${route.clientId || "c1"}/${route.page || "home"}${route.entityId ? `/${route.entityId}` : ""}`;
+  }
+  if (route.kind === "worker") {
+    return `#/worker/${route.userId || "u_worker_1"}/${route.page || "home"}${route.entityId ? `/${route.entityId}` : ""}`;
+  }
+  if (route.kind === "subcontractor") {
+    return `#/subcontractor/${route.userId || "u_sub_1"}/${route.page || "jobs"}${route.entityId ? `/${route.entityId}` : ""}`;
+  }
+  if (route.kind === "director") {
+    return `#/director/${route.page || "boardroom"}${route.siteId ? `/${route.siteId}` : ""}${route.entityId ? `/${route.entityId}` : ""}`;
+  }
+  return `#/site/${route.siteId || "s1"}/${route.page || "dash"}${route.entityId ? `/${route.entityId}` : ""}`;
+}
+
+function getDefaultRouteForRole(role, state) {
+  const base = cloneState(DEFAULT_ROLE_PAGES[role] || DEFAULT_ROLE_PAGES.Supervisor);
+  if (role === "Client") {
+    const clientUser = state?.users?.find((user) => user.role === "Client" && user.id === DEFAULT_ROLE_USERS.Client);
+    base.clientId = clientUser?.clientId || "c1";
+  }
+  return base;
+}
+
+function getCurrentUser(state) {
+  return state.users.find((user) => user.id === state.session.userId) || state.users[0];
+}
+
+function getCurrentClient(state) {
+  const routeClientId = state.session.route?.clientId;
+  return state.clients.find((client) => client.id === routeClientId || client.id === getCurrentUser(state)?.clientId) || state.clients[0];
+}
+
+function getCurrentSite(state) {
+  const routeSiteId = state.session.route?.siteId || state.session.siteId;
+  return state.sites.find((site) => site.id === routeSiteId) || state.sites[0];
+}
+
+function getAccessibleSiteIds(state, role, userId) {
+  if (role === "Director" || role === "Contract Admin") {
+    return state.sites.map((site) => site.id);
+  }
+  if (role === "Client") {
+    const user = state.users.find((item) => item.id === userId);
+    return user?.siteIds || [];
+  }
+  const user = state.users.find((item) => item.id === userId);
+  return user?.siteIds?.length ? user.siteIds : state.sites.map((site) => site.id);
+}
+
+function normaliseState(state) {
+  const next = state;
+  const role = next.session.role || "Supervisor";
+  const userId = next.session.userId || DEFAULT_ROLE_USERS[role] || DEFAULT_ROLE_USERS.Supervisor;
+  const accessibleSiteIds = getAccessibleSiteIds(next, role, userId);
+  const fallbackSiteId = accessibleSiteIds[0] || next.sites[0]?.id || "s1";
+  const route = next.session.route || getDefaultRouteForRole(role, next);
+
+  next.session.userId = userId;
+  next.session.siteId = accessibleSiteIds.includes(next.session.siteId) ? next.session.siteId : fallbackSiteId;
+
+  if (route.kind === "internal" && !accessibleSiteIds.includes(route.siteId)) {
+    route.siteId = fallbackSiteId;
+  }
+  if (role === "Director" && route.kind !== "director") {
+    next.session.route = getDefaultRouteForRole(role, next);
+  } else if (role === "Client" && route.kind !== "client") {
+    next.session.route = getDefaultRouteForRole(role, next);
+  } else if (role === "Worker" && route.kind !== "worker") {
+    next.session.route = getDefaultRouteForRole(role, next);
+  } else if (role === "Subcontractor" && route.kind !== "subcontractor") {
+    next.session.route = getDefaultRouteForRole(role, next);
+  } else if (INTERNAL_ROLES.has(role) && route.kind !== "internal") {
+    next.session.route = getDefaultRouteForRole(role, next);
+  }
+
+  return next;
+}
+
+function buildMetrics(state) {
+  const siteMetrics = state.sites.map((site) => {
+    const approvals = state.approvals.filter((approval) => approval.siteId === site.id);
+    const problems = state.problems.filter((problem) => problem.siteId === site.id && ["open", "under-review"].includes(problem.status));
+    const procurement = state.procurement.filter((item) => item.siteId === site.id);
+    const qaFailures = state.qa.filter((item) => item.siteId === site.id && item.status === "failed");
+    const presence = state.presence.records.filter((item) => item.siteId === site.id);
+    const stalledApprovals = approvals.filter((approval) =>
+      ["awaiting-client", "question", "changes-requested", "contract-awaiting-builder", "contract-awaiting-client"].includes(approval.status),
+    );
+    const costExposure =
+      stalledApprovals.reduce((sum, approval) => sum + (approval.costImpact || 0), 0) +
+      problems.reduce((sum, problem) => sum + (problem.costImpact || 0), 0);
+    const timeExposure =
+      stalledApprovals.reduce((sum, approval) => sum + (approval.timeImpact || 0), 0) +
+      problems.reduce((sum, problem) => sum + (problem.timeImpact || 0), 0);
+    const presenceConfidence = presence.length
+      ? Math.round(presence.reduce((sum, entry) => sum + (entry.confidence || 0), 0) / presence.length)
+      : 100;
+    const approvalCount = approvals.length;
+    const openProcurementRisk = procurement.filter((item) => ["pending", "requested", "ordered", "delayed", "escalated"].includes(item.status)).length;
+    const riskScore = Math.min(
+      100,
+      Math.round(
+        costExposure / 1200 +
+          timeExposure * 8 +
+          stalledApprovals.length * 6 +
+          qaFailures.length * 9 +
+          Math.max(0, 80 - presenceConfidence) / 2,
+      ),
+    );
+    return {
+      siteId: site.id,
+      siteName: site.name,
+      costExposure,
+      timeExposure,
+      stalledApprovals: stalledApprovals.length,
+      openProblems: problems.length,
+      approvalCount,
+      openProcurementRisk,
+      qaFailures: qaFailures.length,
+      presenceConfidence,
+      riskScore,
+      riskBand: riskScore >= 65 ? "red" : riskScore >= 35 ? "amber" : "green",
+      marginPosition: site.forecastMargin - costExposure / 10000,
+    };
+  });
+
+  const activeSites = state.sites.filter((site) => site.status === "active");
+  const approvalTimes = state.approvals
+    .filter((approval) => approval.sentAt && approval.timeline?.some((entry) => entry.type === "approved"))
+    .map((approval) => {
+      const sent = new Date(approval.sentAt.replace(" ", "T"));
+      const approved = approval.timeline.find((entry) => entry.type === "approved");
+      const approvedAt = new Date(approved.at.replace(" ", "T"));
+      return Math.max(1, Math.round((approvedAt - sent) / 36e5));
+    });
+  const clientVelocity = approvalTimes.length
+    ? Math.round(approvalTimes.reduce((sum, value) => sum + value, 0) / approvalTimes.length)
+    : 18;
+
+  return {
+    siteMetrics,
+    portfolio: {
+      activeProjects: activeSites.length,
+      totalContractValue: activeSites.reduce((sum, site) => sum + site.contractValue, 0),
+      totalMarginAtRisk: siteMetrics.reduce((sum, metric) => sum + metric.costExposure, 0),
+      variationExposure: state.variations
+        .filter((variation) => !["signed", "approved"].includes(variation.status))
+        .reduce((sum, variation) => sum + (variation.value || 0), 0),
+      verifiedLabourPct:
+        state.presence.records.length > 0
+          ? Math.round(
+              (state.presence.records.filter((record) => record.status === "verified-on-site").length / state.presence.records.length) * 100,
+            )
+          : 100,
+      clientVelocityHours: clientVelocity,
+    },
+  };
+}
+
+function normaliseSearchValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(normaliseSearchValue).join(" ");
+  }
+  if (value && typeof value === "object") {
+    return Object.values(value).map(normaliseSearchValue).join(" ");
+  }
+  return String(value ?? "");
+}
+
+function fuzzyScore(query, haystack) {
+  const needle = query.trim().toLowerCase();
+  const target = normaliseSearchValue(haystack).toLowerCase();
+  if (!needle || !target) return -1;
+  if (target.includes(needle)) {
+    return 1200 - target.indexOf(needle);
+  }
+
+  let score = 0;
+  let qIndex = 0;
+  for (let index = 0; index < target.length && qIndex < needle.length; index += 1) {
+    if (target[index] === needle[qIndex]) {
+      score += 12;
+      if (index > 0 && target[index - 1] === " ") {
+        score += 4;
+      }
+      qIndex += 1;
+    }
+  }
+
+  if (qIndex !== needle.length) {
+    return -1;
+  }
+
+  return score - Math.max(0, target.length - needle.length);
+}
+
+function buildSearchResults(state, query) {
+  const q = query.trim().toLowerCase();
+  if (!q) {
+    return [];
+  }
+
+  const collections = [
+    {
+      type: "Tasks",
+      items: state.tasks,
+      label: (item) => item.title,
+      haystack: (item) => [item.title, item.description, item.trade, item.status],
+      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "tasks", entityId: item.id }),
+    },
+    {
+      type: "Problems",
+      items: state.problems,
+      label: (item) => item.title,
+      haystack: (item) => [item.title, item.category, item.priority, item.status, item.thread?.map((entry) => entry.body)],
+      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "probs", entityId: item.id }),
+    },
+    {
+      type: "RFIs",
+      items: state.rfis,
+      label: (item) => `${item.number} ${item.title}`,
+      haystack: (item) => [item.number, item.title, item.description, item.trade, item.to, item.status],
+      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "rfis", entityId: item.id }),
+    },
+    {
+      type: "Variations",
+      items: state.variations,
+      label: (item) => `${item.number} ${item.title}`,
+      haystack: (item) => [item.number, item.title, item.trade, item.status, item.value],
+      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "vos", entityId: item.id }),
+    },
+    {
+      type: "Approvals",
+      items: state.approvals,
+      label: (item) => item.title,
+      haystack: (item) => [item.title, item.type, item.summary, item.reason, item.status],
+      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "clientflow", entityId: item.id }),
+    },
+    {
+      type: "Documents",
+      items: state.documents,
+      label: (item) => item.title,
+      haystack: (item) => [item.title, item.category, item.rev, item.tags, item.impactAnalysis?.summary],
+      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "docs", entityId: item.id }),
+    },
+    {
+      type: "Contracts",
+      items: state.contractPacks,
+      label: (item) => item.docId,
+      haystack: (item) => [item.docId, item.template, item.status, item.content?.sections],
+      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "contracts", entityId: item.docId }),
+    },
+    {
+      type: "Passports",
+      items: state.passports.records,
+      label: (item) => item.person,
+      haystack: (item) => [item.person, item.company, item.trade, item.role, item.docs],
+      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "passport", entityId: item.id }),
+    },
+    {
+      type: "Presence",
+      items: state.presence.records,
+      label: (item) => item.person,
+      haystack: (item) => [item.person, item.status, item.anomalyFlags, item.supervisorNotes],
+      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "presence", entityId: item.id }),
+    },
+    {
+      type: "Invoices",
+      items: state.invoices,
+      label: (item) => item.number,
+      haystack: (item) => [item.number, item.siteId, item.status, item.value, item.period, item.lineItems],
+      route: (item) => ({ kind: "subcontractor", userId: state.session.userId, page: "invoices", entityId: item.id }),
+    },
+    {
+      type: "Messages",
+      items: state.messages,
+      label: (item) => item.threadId,
+      haystack: (item) => [item.threadType, item.threadId, item.messages],
+      route: (item) => ({ kind: "internal", siteId: state.session.siteId, page: "clientflow", entityId: item.threadId }),
+    },
+    {
+      type: "Diary",
+      items: state.diary,
+      label: (item) => `${item.date} ${item.summary.slice(0, 40)}`,
+      haystack: (item) => [item.date, item.summary, item.weather, item.delays, item.safety],
+      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "diary", entityId: item.id }),
+    },
+    {
+      type: "Safety",
+      items: state.safety,
+      label: (item) => item.topic,
+      haystack: (item) => [item.topic, item.type, item.by],
+      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "safety", entityId: item.id }),
+    },
+    {
+      type: "Procurement",
+      items: state.procurement,
+      label: (item) => item.item,
+      haystack: (item) => [item.item, item.supplier, item.status, item.poNumber, item.quantity],
+      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "mats", entityId: item.id }),
+    },
+    {
+      type: "Audit",
+      items: state.auditTrail,
+      label: (item) => item.action,
+      haystack: (item) => [item.action, item.actor, item.entityType, item.entityId, item.siteId],
+      route: (item) => ({ kind: "internal", siteId: item.siteId || state.session.siteId, page: "audit", entityId: item.id }),
+    },
+    {
+      type: "Board Reports",
+      items: state.boardReports,
+      label: (item) => item.title,
+      haystack: (item) => [item.title, item.period, item.summary],
+      route: () => ({ kind: "director", page: "boardroom", siteId: null, entityId: null }),
+    },
+    {
+      type: "Templates",
+      items: state.contractTemplates,
+      label: (item) => item.name,
+      haystack: (item) => [item.name, item.type, item.branding, item.clauses],
+      route: () => ({ kind: "internal", siteId: state.session.siteId, page: "contracts", entityId: null }),
+    },
+    {
+      type: "Clauses",
+      items: state.clauseLibrary,
+      label: (item) => item.title,
+      haystack: (item) => [item.title, item.text, item.tags],
+      route: () => ({ kind: "internal", siteId: state.session.siteId, page: "contracts", entityId: null }),
+    },
+    {
+      type: "People",
+      items: state.users,
+      label: (item) => item.name,
+      haystack: (item) => [item.name, item.role, item.trade, item.company],
+      route: (item) =>
+        item.role === "Client"
+          ? { kind: "client", clientId: item.clientId, page: "home", entityId: null }
+          : { kind: "internal", siteId: item.siteIds?.[0] || "s1", page: "team", entityId: item.id },
+    },
+    {
+      type: "Sites",
+      items: state.sites,
+      label: (item) => `${item.code} ${item.name}`,
+      haystack: (item) => [item.code, item.name, item.address, item.region, item.currentPhase],
+      route: (item) => ({ kind: "internal", siteId: item.id, page: "dash", entityId: null }),
+    },
+  ];
+
+  return collections
+    .map((collection) => ({
+      type: collection.type,
+      results: collection.items
+        .map((item) => ({
+          item,
+          score: fuzzyScore(q, collection.haystack ? collection.haystack(item) : collection.label(item)),
+        }))
+        .filter((entry) => entry.score >= 0)
+        .sort((left, right) => right.score - left.score)
+        .slice(0, 6)
+        .map(({ item }) => ({
+          id: item.id || item.docId || item.number || item.threadId,
+          title: collection.label(item),
+          route: collection.route(item),
+          subtitle:
+            item.status ||
+            item.role ||
+            item.category ||
+            item.type ||
+            item.region ||
+            item.period ||
+            item.threadType ||
+            "",
+        })),
+    }))
+    .filter((group) => group.results.length);
+}
+
+function getRecipientsForRoles(state, roles) {
+  return roles
+    .map((role) => state.users.filter((user) => user.role === role))
+    .flat()
+    .map((user) => ({ user }));
+}
+
+function getRecipientsForClient(state, clientId) {
+  const client = state.clients.find((item) => item.id === clientId);
+  return client ? [{ client }] : [];
+}
+
+function appendProjectLog(state, siteId, title, body) {
+  state.projectLogs.unshift({
+    id: randomId("log"),
+    siteId,
+    at: nowStamp(),
+    title,
+    body,
+  });
+}
+
+function queueBuildxactSync(state, type, reference, siteId, payloadCurrent, payloadPrevious = null) {
+  const queueItem = {
+    id: randomId("bxq"),
+    type,
+    reference,
+    siteId,
+    payloadSize: `${Math.max(2, Math.round(JSON.stringify(payloadCurrent).length / 1000))} KB`,
+    status: "pending",
+  };
+  state.buildxact.queue.unshift(queueItem);
+  state.buildxact.payloadPreviews.unshift({
+    id: randomId("bxp"),
+    type,
+    reference,
+    current: payloadCurrent,
+    previous: payloadPrevious,
+  });
+  return queueItem;
+}
+
+function ensureVariationForApproval(state, approval) {
+  const existingVariation = state.variations.find((variation) => variation.clientApprovalId === approval.id);
+  if (existingVariation || !COMMERCIAL_APPROVALS.has(approval.type)) {
+    return existingVariation || null;
+  }
+
+  const variation = {
+    id: randomId("var"),
+    siteId: approval.siteId,
+    number: `VO-${String(state.variations.length + 1).padStart(3, "0")}`,
+    title: approval.title.replace(/^Approve\s+/i, "").replace(/^Approve\s+/i, ""),
+    sourceType: approval.sourceType,
+    sourceId: approval.sourceId,
+    status: "submitted",
+    priority: approval.priority,
+    value: approval.costImpact || 0,
+    days: approval.timeImpact || 0,
+    trade: findInCollection(state, approval.sourceType, approval.sourceId)?.trade || "General",
+    createdBy: approval.createdBy,
+    clientApprovalId: approval.id,
+    contractPackId: null,
+    linkedRecords: [...(approval.linkedRecords || []), buildLink("approval", approval, approval.siteId)],
+  };
+  state.variations.unshift(variation);
+  approval.linkedRecords = approval.linkedRecords || [];
+  upsertLinkedRecord(approval, buildLink("variation", variation, approval.siteId));
+  return variation;
+}
+
+function applyBudgetImpact(state, approval, contractPack) {
+  const site = state.sites.find((item) => item.id === approval.siteId);
+  const budget = state.siteBudgets.find((item) => item.siteId === approval.siteId);
+  const variation = state.variations.find((item) => item.clientApprovalId === approval.id);
+  const value = Number(approval.costImpact || variation?.value || 0);
+
+  if (site) {
+    site.committed += value;
+    site.marginAtRisk = Math.max(0, site.marginAtRisk - Math.round(value * 0.35));
+  }
+  if (budget) {
+    budget.summary.committed += value;
+    const candidate = budget.items.find((item) => item.category.toLowerCase().includes((variation?.trade || "").toLowerCase())) || budget.items[budget.items.length - 1];
+    if (candidate) {
+      candidate.committed += value;
+      candidate.forecast += value;
+    }
+  }
+
+  if (variation) {
+    variation.status = "signed";
+    variation.contractPackId = contractPack.docId;
+  }
+
+  const existingRegister = state.variationRegister.find((entry) => entry.variationId === variation?.id);
+  if (variation && !existingRegister) {
+    state.variationRegister.unshift({
+      id: randomId("vr"),
+      siteId: approval.siteId,
+      variationId: variation.id,
+      status: "signed",
+      value,
+      approvedAt: nowStamp(),
+    });
+  } else if (existingRegister) {
+    existingRegister.status = "signed";
+    existingRegister.value = value;
+    existingRegister.approvedAt = nowStamp();
+  }
+
+  queueBuildxactSync(
+    state,
+    "budgetImpact",
+    variation?.number || approval.id,
+    approval.siteId,
+    {
+      approvalId: approval.id,
+      contractPack: contractPack.docId,
+      committed: value,
+      siteCode: site?.code,
+    },
+    null,
+  );
+}
+
+function applyScheduleImpact(state, approval) {
+  if (!approval.timeImpact) {
+    return;
+  }
+  const schedule = state.schedules.find((entry) => entry.siteId === approval.siteId);
+  const site = state.sites.find((entry) => entry.id === approval.siteId);
+  if (!schedule) {
+    return;
+  }
+
+  schedule.impacts.unshift({
+    id: randomId("impact"),
+    sourceType: "approval",
+    sourceId: approval.id,
+    days: approval.timeImpact,
+    reason: approval.title,
+  });
+  schedule.currentCompletion = addDays(schedule.currentCompletion, approval.timeImpact);
+  if (site?.estimatedCompletion) {
+    site.estimatedCompletion = addDays(site.estimatedCompletion, approval.timeImpact);
+  }
+}
+
+function parseDateTime(value) {
+  if (!value) return null;
+  const parsed = new Date(String(value).replace(" ", "T"));
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function hoursSince(value, runtime = getRuntimeNow()) {
+  const parsed = parseDateTime(value);
+  if (!parsed) return 0;
+  return Math.max(0, (runtime.getTime() - parsed.getTime()) / 36e5);
+}
+
+function daysUntil(value, runtime = getRuntimeNow()) {
+  const parsed = parseDateTime(value?.length > 10 ? value : `${value} 00:00`);
+  if (!parsed) return Infinity;
+  return Math.ceil((parsed.getTime() - runtime.getTime()) / 86400000);
+}
+
+function setByPath(root, path, value) {
+  const parts = path.split(".");
+  const finalKey = parts.pop();
+  const target = parts.reduce((accumulator, key) => {
+    if (!accumulator[key]) accumulator[key] = {};
+    return accumulator[key];
+  }, root);
+  target[finalKey] = value;
+}
+
+function getCollectionRef(state, type) {
+  const path = COLLECTION_MAP[type] || type;
+  return { path, collection: readCollection(state, path) };
+}
+
+function updateSentiment(state, clientId, delta) {
+  if (!clientId) return;
+  const current = state.clientSentiment[clientId] || { score: 60, trend: [60], label: "neutral" };
+  const score = Math.max(0, Math.min(100, current.score + delta));
+  state.clientSentiment[clientId] = {
+    score,
+    trend: [...(current.trend || []), score].slice(-10),
+    label: score >= 70 ? "positive" : score < 50 ? "concerned" : "neutral",
+  };
+}
+
+function pushToast(state, toast) {
+  state.demo.recentToasts.unshift({
+    id: randomId("toast"),
+    at: nowStamp(),
+    ...toast,
+  });
+  state.demo.recentToasts = state.demo.recentToasts.slice(0, 8);
+}
+
+function getApprovalMergeData(state, approval) {
+  const site = state.sites.find((entry) => entry.id === approval.siteId) || state.sites[0];
+  const client = state.clients.find((entry) => entry.id === approval.clientId) || state.clients[0];
+  const builder = APP_CONFIG.builder;
+  const cost = Number(approval.costImpact || 0);
+  const costWords = new Intl.NumberFormat("en-AU", {
+    style: "currency",
+    currency: "AUD",
+    maximumFractionDigits: 0,
+  }).format(cost);
+
+  return {
+    "client.name": client?.primaryContact || client?.name || "",
+    "client.company": client?.name || "",
+    "client.abn": client?.abn || "",
+    "client.address": client?.address || "",
+    "builder.name": builder?.name || "",
+    "builder.abn": builder?.abn || "",
+    "builder.address": builder?.address || "",
+    "site.name": site?.name || "",
+    "site.address": site?.address || "",
+    "site.lot": site?.lot || site?.code || "",
+    "approval.number": approval.id,
+    "approval.type": approval.type,
+    "approval.title": approval.title,
+    "approval.cost": formatCurrency(cost),
+    "approval.cost_words": costWords,
+    "approval.days": approval.timeImpact || 0,
+    "approval.reason": approval.reason,
+    "approval.summary": approval.summary,
+    "approval.recommendation": approval.recommendation,
+    "date.today": formatDate(),
+    "date.signed": "",
+    "signature.builder": approval.contractPackId ? "Builder signature pending" : "",
+    "signature.client": "",
+  };
+}
+
+function materialiseContractTemplate(contractPack, approval, state) {
+  const template = state.contractTemplates.find((entry) => entry.id === contractPack.templateId || entry.type === approval.type) || state.contractTemplates[0];
+  if (!template?.sourceContent) {
+    return;
+  }
+
+  const mergeData = getApprovalMergeData(state, approval);
+  const preview = buildTemplatePreviewContent(template.sourceContent, mergeData);
+  contractPack.content = {
+    sections: preview.sections,
+    mergeData,
+    unresolvedTokens: preview.unresolvedTokens,
+    templateBody: preview.populatedContent,
+  };
+  contractPack.template = template.name;
+  contractPack.templateId = template.id;
+}
+
+function runTimedAutomationSweep(next, helpers) {
+  const runtime = getRuntimeNow();
+  const runtimeStamp = nowStamp();
+
+  next.rfis.forEach((rfi) => {
+    if (["closed", "responded"].includes(rfi.status)) return;
+    if (daysUntil(rfi.dueDate, runtime) < 0) {
+      if (rfi.status !== "overdue") {
+        rfi.status = "overdue";
+      }
+      if (!rfi.overdueNotifiedAt) {
+        rfi.overdueNotifiedAt = runtimeStamp;
+        helpers.emit({
+          eventType: "rfi.overdue",
+          title: `RFI overdue - ${rfi.number}`,
+          body: `${rfi.title} is now overdue and requires response.`,
+          siteId: rfi.siteId,
+          entityType: "rfi",
+          entityId: rfi.id,
+          recipients: getRecipientsForRoles(next, ["Project Manager", "Contract Admin"]),
+          route: { kind: "internal", siteId: rfi.siteId, page: "rfis", entityId: rfi.id },
+        });
+      }
+    }
+  });
+
+  next.tasks.forEach((task) => {
+    if (task.status === "done" || !task.dueDate) return;
+    if (daysUntil(task.dueDate, runtime) < 0 && !task.overdueNotifiedAt) {
+      task.overdueNotifiedAt = runtimeStamp;
+      helpers.emit({
+        eventType: "task.overdue",
+        title: `Task overdue - ${task.title}`,
+        body: `${task.title} has passed its due date and still needs action.`,
+        siteId: task.siteId,
+        entityType: "task",
+        entityId: task.id,
+        recipients: [
+          { user: next.users.find((entry) => entry.id === task.assigneeId) },
+          ...getRecipientsForRoles(next, ["Supervisor"]),
+        ].filter((entry) => entry.user),
+        route: { kind: "internal", siteId: task.siteId, page: "tasks", entityId: task.id },
+      });
+    }
+  });
+
+  next.approvals.forEach((approval) => {
+    if (!["awaiting-client", "question", "changes-requested", "contract-awaiting-client"].includes(approval.status)) return;
+    if (hoursSince(approval.sentAt, runtime) >= 48 && !approval.stalledNotifiedAt) {
+      approval.stalledNotifiedAt = runtimeStamp;
+      helpers.emit({
+        eventType: "approval.stalled",
+        title: `Approval stalled - ${approval.title}`,
+        body: "No client response has been recorded in the last 48 hours.",
+        siteId: approval.siteId,
+        entityType: "approval",
+        entityId: approval.id,
+        recipients: [...getRecipientsForRoles(next, ["Project Manager"]), ...getRecipientsForClient(next, approval.clientId)],
+        route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+      });
+    }
+  });
+
+  next.contractPacks.forEach((pack) => {
+    if (!pack.signatures?.builder || pack.signatures?.client || pack.pendingSignatureNotifiedAt) return;
+    if (hoursSince(pack.signatures.builder.signedAt, runtime) >= 24) {
+      pack.pendingSignatureNotifiedAt = runtimeStamp;
+      const approval = next.approvals.find((entry) => entry.id === pack.approvalId);
+      helpers.emit({
+        eventType: "contract.pending-signature",
+        title: `Contract pending client signature - ${pack.docId}`,
+        body: `${approval?.title || "Contract"} is still awaiting client execution.`,
+        siteId: pack.siteId,
+        entityType: "contractPack",
+        entityId: pack.docId,
+        recipients: [
+          ...getRecipientsForClient(next, approval?.clientId),
+          ...getRecipientsForRoles(next, ["Project Manager", "Contract Admin"]),
+        ],
+        route: { kind: "client", clientId: approval?.clientId, page: "documents", entityId: pack.docId },
+      });
+    }
+  });
+
+  next.passports.expiringTickets = (next.passports.expiringTickets || []).filter(Boolean);
+  next.passports.expiringTickets.forEach((ticket) => {
+    const days = daysUntil(ticket.expiresOn, runtime);
+    ticket.daysRemaining = days;
+    ticket.notifications = ticket.notifications || [];
+    [30, 14, 7, 1].forEach((threshold) => {
+      if (days <= threshold && days >= 0 && !ticket.notifications.includes(threshold)) {
+        ticket.notifications.push(threshold);
+        helpers.emit({
+          eventType: "passport.ticket-expiring",
+          title: `${ticket.label} expires in ${days} day${days === 1 ? "" : "s"}`,
+          body: `${ticket.label} for ${next.users.find((entry) => entry.id === ticket.userId)?.name || "worker"} needs renewal before site access is blocked.`,
+          siteId: next.passports.records.find((entry) => entry.id === ticket.passportId)?.siteId,
+          entityType: "passport",
+          entityId: ticket.passportId,
+          recipients: [
+            { user: next.users.find((entry) => entry.id === ticket.userId) },
+            ...getRecipientsForRoles(next, ["Supervisor"]),
+          ].filter((entry) => entry.user),
+          route: { kind: "internal", siteId: next.passports.records.find((entry) => entry.id === ticket.passportId)?.siteId || next.session.siteId, page: "passport", entityId: ticket.passportId },
+        });
+      }
+    });
+
+    if (days < 0) {
+      const passport = next.passports.records.find((entry) => entry.id === ticket.passportId);
+      if (passport) {
+        passport.blockedReasons = [...new Set([...(passport.blockedReasons || []), `${ticket.label} expired`])];
+        const expiringDoc = passport.docs.find((doc) => doc.label.toLowerCase().includes(ticket.label.toLowerCase()));
+        if (expiringDoc) expiringDoc.status = "expired";
+      }
+    }
+  });
+}
+
+function createHelpers(prev, next) {
+  const actor = prev.users.find((user) => user.id === prev.session.userId) || prev.users[0];
+
+  const helpers = {
+    actor,
+    addAudit({ action, entityType, entityId, before = null, after = null, siteId = null }) {
+      next.auditTrail = appendAuditEntry(next.auditTrail, {
+        actor: actor.name,
+        actorRole: actor.role,
+        action,
+        entityType,
+        entityId,
+        before,
+        after,
+        siteId,
+      });
+    },
+    emit({ eventType, title, body, siteId = null, entityType = null, entityId = null, recipients = [], route = null }) {
+      const result = dispatchNotificationEvent({
+        state: next,
+        eventType,
+        title,
+        body,
+        siteId,
+        entityType,
+        entityId,
+        actor,
+        route,
+        recipients,
+      });
+      next.notifications.items.unshift(...result.items);
+      next.notifications.eventLog.unshift(...result.eventLog);
+    },
+    addMessage(threadType, threadId, participants, body, byUserId = actor.id) {
+      let thread = next.messages.find((item) => item.threadType === threadType && item.threadId === threadId);
+      if (!thread) {
+        thread = { id: randomId("msg-thread"), threadType, threadId, participants: [...participants], messages: [] };
+        next.messages.unshift(thread);
+      }
+      thread.messages.push({
+        id: randomId("msg"),
+        by: byUserId,
+        at: nowStamp(),
+        body,
+      });
+    },
+    appendTimeline(approval, entry) {
+      approval.timeline = approval.timeline || [];
+      approval.timeline.push({
+        id: randomId("apt"),
+        at: nowStamp(),
+        ...entry,
+      });
+    },
+    queueSync: (type, reference, siteId, current, previous = null) => queueBuildxactSync(next, type, reference, siteId, current, previous),
+    projectLog: (siteId, title, body) => appendProjectLog(next, siteId, title, body),
+    ensureVariation: (approval) => ensureVariationForApproval(next, approval),
+    applyBudgetImpact: (approval, contractPack) => applyBudgetImpact(next, approval, contractPack),
+    applyScheduleImpact: (approval) => applyScheduleImpact(next, approval),
+  };
+
+  return helpers;
+}
+
+export function SiteForgeProvider({ children }) {
+  const [state, setState] = usePersistentState(APP_CONFIG.storageKey, createInitialStore);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const parsed = parseHash(window.location.hash);
+      if (!parsed) {
+        return;
+      }
+      setState((previous) => {
+        const next = cloneState(previous);
+        next.session.route = parsed;
+        if (parsed.siteId) {
+          next.session.siteId = parsed.siteId;
+        }
+        if (parsed.userId) {
+          next.session.userId = parsed.userId;
+        }
+        if (parsed.clientId) {
+          const clientUser = next.users.find((user) => user.clientId === parsed.clientId);
+          if (clientUser) {
+            next.session.userId = clientUser.id;
+            next.session.role = "Client";
+          }
+        }
+        if (parsed.kind === "worker") {
+          next.session.role = "Worker";
+        }
+        if (parsed.kind === "subcontractor") {
+          next.session.role = "Subcontractor";
+        }
+        if (parsed.kind === "director") {
+          next.session.role = "Director";
+        }
+        return normaliseState(next);
+      });
+    };
+
+    window.addEventListener("hashchange", onHashChange);
+    if (!window.location.hash) {
+      const bootRole = ["Worker", "Client", "Subcontractor"].includes(state.session.role) ? "Supervisor" : state.session.role;
+      window.location.hash = buildHash(getDefaultRouteForRole(bootRole, state));
+    } else {
+      onHashChange();
+    }
+
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, [setState, state.session.route]);
+
+  const mutate = useCallback(
+    (mutator) => {
+      setState((previous) => {
+        const next = cloneState(previous);
+        mutator(next, createHelpers(previous, next));
+        return normaliseState(next);
+      });
+    },
+    [setState],
+  );
+
+  const navigate = useCallback(
+    (route) => {
+      const target = route.kind ? route : { ...state.session.route, ...route };
+      setState((previous) => {
+        const next = cloneState(previous);
+        next.session.route = { ...target };
+        if (target.siteId) {
+          next.session.siteId = target.siteId;
+        }
+        if (target.userId) {
+          next.session.userId = target.userId;
+        }
+        return normaliseState(next);
+      });
+      const hash = buildHash(target);
+      if (window.location.hash !== hash) {
+        window.location.hash = hash;
+      }
+    },
+    [setState, state.session.route],
+  );
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.__siteforgeNow = state.demo?.simulatedNow || nowStamp();
+    }
+  }, [state.demo?.simulatedNow]);
+
+  useEffect(() => {
+    mutate((next, helpers) => {
+      runTimedAutomationSweep(next, helpers);
+    });
+  }, [mutate, state.demo?.simulatedNow]);
+
+  useEffect(() => {
+    if (!state.demo?.mode) return undefined;
+    const timer = window.setInterval(() => {
+      mutate((next, helpers) => {
+        if (!next.demo.queuedEvents.length) return;
+        const event = next.demo.queuedEvents.shift();
+        next.demo.queuedEvents.push(event);
+        pushToast(next, {
+          tone: event.tone || "medium",
+          title: event.title,
+          body: event.body,
+        });
+        helpers.emit({
+          eventType: event.type === "approval" ? "approval.question" : event.type === "presence" ? "presence.anomaly" : event.type === "procurement" ? "procurement.delayed" : "problem.created",
+          title: event.title,
+          body: event.body,
+          siteId: next.session.siteId,
+          entityType: event.type,
+          entityId: randomId("demo"),
+          recipients: [{ user: next.users.find((entry) => entry.id === next.session.userId) || next.users[0] }],
+          route: next.session.route,
+        });
+      });
+    }, 26000);
+
+    return () => window.clearInterval(timer);
+  }, [mutate, state.demo?.mode]);
+
+  const actions = useMemo(
+    () => ({
+      navigate,
+      resetDemo() {
+        setState(createInitialStore());
+        window.location.hash = buildHash(DEFAULT_ROLE_PAGES.Supervisor);
+      },
+      setRole(role) {
+        setState((previous) => {
+          const next = cloneState(previous);
+          next.session.role = role;
+          next.session.userId = DEFAULT_ROLE_USERS[role] || DEFAULT_ROLE_USERS.Supervisor;
+          next.session.route = getDefaultRouteForRole(role, next);
+          next.session.siteId = next.users.find((user) => user.id === next.session.userId)?.siteIds?.[0] || next.sites[0]?.id;
+          return normaliseState(next);
+        });
+        window.location.hash = buildHash(getDefaultRouteForRole(role, state));
+      },
+      setSite(siteId) {
+        navigate({ kind: "internal", siteId, page: state.session.route.page || "dash", entityId: null });
+      },
+      setPeriod(period) {
+        mutate((next) => {
+          next.session.period = period;
+        });
+      },
+      toggleNotifications() {
+        mutate((next) => {
+          next.ui.notificationsOpen = !next.ui.notificationsOpen;
+        });
+      },
+      openSearch() {
+        mutate((next) => {
+          next.ui.searchOpen = true;
+        });
+      },
+      openCommandPalette() {
+        mutate((next) => {
+          next.ui.commandPaletteOpen = true;
+          next.ui.searchOpen = true;
+        });
+      },
+      closeSearch() {
+        mutate((next) => {
+          next.ui.searchOpen = false;
+          next.ui.commandPaletteOpen = false;
+        });
+      },
+      toggleAIAssistant() {
+        mutate((next) => {
+          next.ui.aiAssistantOpen = !next.ui.aiAssistantOpen;
+        });
+      },
+      toggleDemoScriptMode() {
+        mutate((next) => {
+          next.demo.demoScriptMode = !next.demo.demoScriptMode;
+          next.demo.demoScriptStep = 0;
+        });
+      },
+      advanceDemoScript() {
+        mutate((next) => {
+          next.demo.demoScriptStep += 1;
+        });
+      },
+      dismissBootRoleSelector() {
+        mutate((next) => {
+          next.ui.bootRoleSelectorOpen = false;
+        });
+      },
+      toggleShortcuts() {
+        mutate((next) => {
+          next.ui.shortcutsOpen = !next.ui.shortcutsOpen;
+        });
+      },
+      rememberSearch(query) {
+        mutate((next) => {
+          const deduped = [query, ...next.session.recentSearches.filter((item) => item !== query)].slice(0, 8);
+          next.session.recentSearches = deduped;
+        });
+      },
+      markNotificationRead(id) {
+        mutate((next) => {
+          const notification = next.notifications.items.find((item) => item.id === id);
+          if (notification) {
+            notification.readAt = notification.readAt || nowStamp();
+          }
+        });
+      },
+      markAllNotificationsRead() {
+        mutate((next) => {
+          next.notifications.items.forEach((item) => {
+            item.readAt = item.readAt || nowStamp();
+          });
+        });
+      },
+      clearOldNotifications() {
+        mutate((next) => {
+          next.notifications.items = next.notifications.items.slice(0, 80);
+        });
+      },
+      saveTableViewState(tableKey, payload) {
+        mutate((next) => {
+          next.tableViews.state[tableKey] = {
+            ...(next.tableViews.state[tableKey] || {}),
+            ...payload,
+            updatedAt: nowStamp(),
+          };
+        });
+      },
+      createNamedTableView(tableKey, name, payload) {
+        mutate((next) => {
+          next.tableViews.saved[tableKey] = next.tableViews.saved[tableKey] || [];
+          next.tableViews.saved[tableKey].unshift({
+            id: randomId("tv"),
+            name,
+            ...payload,
+            updatedAt: nowStamp(),
+          });
+        });
+      },
+      deleteNamedTableView(tableKey, viewId) {
+        mutate((next) => {
+          next.tableViews.saved[tableKey] = (next.tableViews.saved[tableKey] || []).filter((view) => view.id !== viewId);
+        });
+      },
+      setDemoMode(enabled) {
+        mutate((next) => {
+          next.demo.mode = enabled;
+        });
+      },
+      advanceSimulatedTime(days = 1) {
+        mutate((next, helpers) => {
+          next.demo.simulatedNow = `${addDays(next.demo.simulatedNow.slice(0, 10), days)} ${next.demo.simulatedNow.slice(11) || "09:15"}`;
+          helpers.projectLog(next.session.siteId, "Simulated time advanced", `Demo clock moved forward by ${days} day${days === 1 ? "" : "s"}.`);
+        });
+      },
+      addTask(payload) {
+        mutate((next, helpers) => {
+          const task = {
+            id: randomId("tsk"),
+            siteId: payload.siteId || next.session.siteId,
+            title: payload.title,
+            description: payload.description || payload.title,
+            trade: payload.trade || "General",
+            companyId: payload.companyId || getCurrentUser(next).companyId,
+            assigneeId: payload.assigneeId || next.session.userId,
+            priority: payload.priority || "medium",
+            status: "todo",
+            dueDate: payload.dueDate || formatDate(),
+            progress: 0,
+            crewRequired: payload.crewRequired || 1,
+            mobileMaterials: payload.mobileMaterials || [],
+            linkedRecords: payload.linkedRecords || [],
+            clientVisible: Boolean(payload.clientVisible),
+          };
+          next.tasks.unshift(task);
+          helpers.addAudit({
+            action: "task.create",
+            entityType: "task",
+            entityId: task.id,
+            before: null,
+            after: { status: task.status, title: task.title },
+            siteId: task.siteId,
+          });
+        });
+      },
+      updateTaskStatus(taskId, status) {
+        mutate((next, helpers) => {
+          const task = next.tasks.find((item) => item.id === taskId);
+          if (!task) return;
+          const before = { status: task.status, progress: task.progress };
+          task.status = status;
+          task.progress = status === "done" ? 100 : status === "in-progress" ? Math.max(25, task.progress || 0) : 0;
+          helpers.addAudit({
+            action: "task.status",
+            entityType: "task",
+            entityId: task.id,
+            before,
+            after: { status: task.status, progress: task.progress },
+            siteId: task.siteId,
+          });
+          if (status === "done") {
+            helpers.projectLog(task.siteId, `Task completed - ${task.title}`, `${actorName(helpers.actor)} marked the task complete.`);
+          }
+        });
+      },
+      addProblem(payload) {
+        mutate((next, helpers) => {
+          const problem = {
+            id: randomId("prob"),
+            siteId: payload.siteId || next.session.siteId,
+            title: payload.title,
+            category: payload.category || "Field issue",
+            reportedBy: payload.reportedBy || next.session.userId,
+            priority: payload.priority || "medium",
+            status: "open",
+            costImpact: Number(payload.costImpact || 0),
+            timeImpact: Number(payload.timeImpact || 0),
+            linkedApprovals: [],
+            linkedRecords: payload.linkedRecords || [],
+            thread: [
+              {
+                id: randomId("pr-msg"),
+                by: actorName(helpers.actor),
+                role: helpers.actor.role,
+                at: nowStamp(),
+                body: payload.description || payload.title,
+              },
+            ],
+          };
+          next.problems.unshift(problem);
+          helpers.addAudit({
+            action: "problem.create",
+            entityType: "problem",
+            entityId: problem.id,
+            before: null,
+            after: { status: problem.status, priority: problem.priority },
+            siteId: problem.siteId,
+          });
+          helpers.emit({
+            eventType: problem.priority === "critical" ? "problem.critical" : "problem.created",
+            title: problem.priority === "critical" ? `Critical site problem - ${problem.title}` : `Problem reported - ${problem.title}`,
+            body: payload.description || problem.title,
+            siteId: problem.siteId,
+            entityType: "problem",
+            entityId: problem.id,
+            recipients:
+              problem.priority === "critical"
+                ? [...getRecipientsForRoles(next, ["Project Manager", "Director"]), ...getRecipientsForRoles(next, ["Supervisor"])]
+                : getRecipientsForRoles(next, ["Supervisor"]),
+            route: { kind: "internal", siteId: problem.siteId, page: "probs", entityId: problem.id },
+          });
+        });
+      },
+      replyProblem(problemId, message) {
+        mutate((next, helpers) => {
+          const problem = next.problems.find((item) => item.id === problemId);
+          if (!problem || !message.trim()) return;
+          problem.thread.push({
+            id: randomId("pr-msg"),
+            by: actorName(helpers.actor),
+            role: helpers.actor.role,
+            at: nowStamp(),
+            body: message,
+          });
+          helpers.addAudit({
+            action: "problem.comment",
+            entityType: "problem",
+            entityId: problem.id,
+            before: null,
+            after: { comment: message },
+            siteId: problem.siteId,
+          });
+        });
+      },
+      createApprovalFromSource({ sourceType, sourceId, approvalType, handUp = false }) {
+        mutate((next, helpers) => {
+          const source = findInCollection(next, sourceType, sourceId);
+          if (!source) return;
+          const siteId = source.siteId || next.session.siteId;
+          const site = next.sites.find((item) => item.id === siteId);
+          const client = next.clients.find((item) => item.id === site.clientId);
+          const aiDraft = draftApproval(source, approvalType);
+          const approval = {
+            id: randomId("ap"),
+            siteId,
+            clientId: client.id,
+            type: approvalType,
+            title: buildApprovalTitle(source, approvalType),
+            summary: aiDraft.summary,
+            reason: aiDraft.reason,
+            recommendation: aiDraft.recommendation,
+            status: handUp || helpers.actor.role === "Supervisor" ? "draft" : "draft",
+            priority: source.priority || "medium",
+            sourceType,
+            sourceId,
+            createdBy: helpers.actor.id,
+            ownerId: site.pmId || "u_pm_1",
+            sentAt: null,
+            dueAt: addDays(formatDate(), 3),
+            viewedAt: null,
+            costImpact: aiDraft.costImpact,
+            timeImpact: aiDraft.timeImpact,
+            linkedRecords: [...(source.linkedRecords || []), buildLink(sourceType, source, siteId)],
+            attachments: buildSourceAttachments(source),
+            aiDraft,
+            timeline: [],
+            messageThread: [],
+            contractPackId: null,
+          };
+          helpers.appendTimeline(approval, {
+            type: "created",
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            text: `${helpers.actor.role} created approval from ${sourceType}.`,
+          });
+          next.approvals.unshift(approval);
+          if (source.linkedApprovals) {
+            source.linkedApprovals.push(approval.id);
+          }
+          if (sourceType === "procurement") {
+            source.linkedApprovalId = approval.id;
+          }
+          upsertLinkedRecord(source, buildLink("approval", approval, siteId));
+          const variation = helpers.ensureVariation(approval);
+          if (variation) {
+            upsertLinkedRecord(source, buildLink("variation", variation, siteId));
+          }
+          helpers.addAudit({
+            action: "approval.create",
+            entityType: "approval",
+            entityId: approval.id,
+            before: null,
+            after: { status: approval.status, type: approval.type },
+            siteId,
+          });
+        });
+      },
+      updateApprovalDraft(approvalId, patch) {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval) return;
+          const before = { title: approval.title, status: approval.status, costImpact: approval.costImpact, timeImpact: approval.timeImpact };
+          Object.assign(approval, patch);
+          helpers.addAudit({
+            action: "approval.update",
+            entityType: "approval",
+            entityId: approval.id,
+            before,
+            after: { title: approval.title, status: approval.status, costImpact: approval.costImpact, timeImpact: approval.timeImpact },
+            siteId: approval.siteId,
+          });
+        });
+      },
+      sendApproval(approvalId) {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval) return;
+          const before = { status: approval.status, sentAt: approval.sentAt };
+          approval.status = "awaiting-client";
+          approval.sentAt = nowStamp();
+          helpers.appendTimeline(approval, {
+            type: "sent",
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            text: "Approval sent to client portal and outbound channels.",
+          });
+          helpers.addMessage(
+            "approval",
+            approval.id,
+            [approval.ownerId, next.users.find((user) => user.clientId === approval.clientId)?.id].filter(Boolean),
+            `We've sent ${approval.title.toLowerCase()} for review with the current recommendation and supporting records.`,
+          );
+          helpers.addAudit({
+            action: "approval.send",
+            entityType: "approval",
+            entityId: approval.id,
+            before,
+            after: { status: approval.status, sentAt: approval.sentAt },
+            siteId: approval.siteId,
+          });
+          helpers.emit({
+            eventType: "approval.created",
+            title: `Approval sent - ${approval.title}`,
+            body: approval.summary,
+            siteId: approval.siteId,
+            entityType: "approval",
+            entityId: approval.id,
+            recipients: [
+              ...getRecipientsForRoles(next, ["Project Manager"]),
+              ...getRecipientsForClient(next, approval.clientId),
+            ],
+            route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+          });
+        });
+      },
+      viewApproval(approvalId) {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval) return;
+          if (!approval.viewedAt) {
+            approval.viewedAt = nowStamp();
+            helpers.emit({
+              eventType: "approval.viewed",
+              title: `Approval viewed - ${approval.title}`,
+              body: "The client opened the approval detail page.",
+              siteId: approval.siteId,
+              entityType: "approval",
+              entityId: approval.id,
+              recipients: getRecipientsForRoles(next, ["Project Manager"]),
+              route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+            });
+          }
+        });
+      },
+      respondToApproval(approvalId, actionType, note, userName) {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval) return;
+          const clientUser = next.users.find((user) => user.clientId === approval.clientId) || helpers.actor;
+          const actor = userName ? { ...clientUser, name: userName, role: clientUser.role || "Client" } : clientUser;
+          const before = { status: approval.status };
+
+          if (actionType === "approve") {
+            approval.status = "approved";
+            approval.messageThread.push({
+              id: randomId("apm"),
+              by: actor.name,
+              role: "Client",
+              at: nowStamp(),
+              body: note || "Approved. Please proceed.",
+            });
+            helpers.appendTimeline(approval, {
+              type: "approved",
+              actor: actor.name,
+              role: "Client",
+              text: note || "Client approved the request.",
+            });
+            helpers.addAudit({
+              action: "approval.approved",
+              entityType: "approval",
+              entityId: approval.id,
+              before,
+              after: { status: approval.status },
+              siteId: approval.siteId,
+            });
+            helpers.emit({
+              eventType: "approval.approved",
+              title: `Client approved - ${approval.title}`,
+              body: note || "Client approved in portal.",
+              siteId: approval.siteId,
+              entityType: "approval",
+              entityId: approval.id,
+              recipients: getRecipientsForRoles(next, ["Supervisor", "Project Manager", "Contract Admin"]),
+              route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+            });
+            updateSentiment(next, approval.clientId, 8);
+            if (!approval.contractPackId) {
+              const site = next.sites.find((siteItem) => siteItem.id === approval.siteId);
+              const client = next.clients.find((clientItem) => clientItem.id === approval.clientId);
+              const contractPack = generateDraft({
+                approval,
+                client,
+                site,
+                templates: next.contractTemplates,
+              });
+              materialiseContractTemplate(contractPack, approval, next);
+              next.contractPacks.unshift(contractPack);
+              approval.contractPackId = contractPack.docId;
+              approval.status = "contract-drafted";
+              helpers.appendTimeline(approval, {
+                type: "contract-drafted",
+                actor: "System",
+                role: "System",
+                text: "Contract pack auto-generated and sent to Contract Admin review queue.",
+              });
+              helpers.projectLog(
+                approval.siteId,
+                `Contract pack drafted - ${approval.title}`,
+                `Contract draft ${contractPack.docId} generated automatically from client approval.`,
+              );
+              helpers.emit({
+                eventType: "contract.drafted",
+                title: `Contract drafted - ${approval.title}`,
+                body: `Draft ${contractPack.docId} is ready for Contract Admin review.`,
+                siteId: approval.siteId,
+                entityType: "contractPack",
+                entityId: contractPack.docId,
+                recipients: getRecipientsForRoles(next, ["Contract Admin", "Project Manager"]),
+                route: { kind: "internal", siteId: approval.siteId, page: "contracts", entityId: contractPack.docId },
+              });
+            }
+          } else if (actionType === "decline") {
+            approval.status = "declined";
+            approval.messageThread.push({
+              id: randomId("apm"),
+              by: actor.name,
+              role: "Client",
+              at: nowStamp(),
+              body: note || "Declined. Please revise and resend.",
+            });
+            helpers.appendTimeline(approval, {
+              type: "declined",
+              actor: actor.name,
+              role: "Client",
+              text: note || "Client declined the request.",
+            });
+            helpers.addAudit({
+              action: "approval.declined",
+              entityType: "approval",
+              entityId: approval.id,
+              before,
+              after: { status: approval.status },
+              siteId: approval.siteId,
+            });
+            helpers.emit({
+              eventType: "approval.declined",
+              title: `Client declined - ${approval.title}`,
+              body: note || "Client requested alternative commercial options.",
+              siteId: approval.siteId,
+              entityType: "approval",
+              entityId: approval.id,
+              recipients: getRecipientsForRoles(next, ["Project Manager", "Contract Admin"]),
+              route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+            });
+            updateSentiment(next, approval.clientId, -12);
+          } else if (actionType === "question" || actionType === "change") {
+            approval.status = actionType === "change" ? "changes-requested" : "question";
+            approval.messageThread.push({
+              id: randomId("apm"),
+              by: actor.name,
+              role: "Client",
+              at: nowStamp(),
+              body: note || (actionType === "change" ? "Please revise and resend." : "Please clarify this item."),
+            });
+            helpers.appendTimeline(approval, {
+              type: actionType === "change" ? "changes-requested" : "question",
+              actor: actor.name,
+              role: "Client",
+              text: note || (actionType === "change" ? "Client requested a change." : "Client asked a question."),
+            });
+            helpers.emit({
+              eventType: "approval.question",
+              title: `Client ${actionType === "change" ? "change request" : "question"} - ${approval.title}`,
+              body: note || "Client wants clarification before approving.",
+              siteId: approval.siteId,
+              entityType: "approval",
+              entityId: approval.id,
+              recipients: getRecipientsForRoles(next, ["Project Manager"]),
+              route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+            });
+            updateSentiment(next, approval.clientId, actionType === "change" ? -8 : -4);
+          } else if (actionType === "call") {
+            approval.messageThread.push({
+              id: randomId("apm"),
+              by: actor.name,
+              role: "Client",
+              at: nowStamp(),
+              body: note || "Please arrange a callback to run through this approval.",
+            });
+            helpers.appendTimeline(approval, {
+              type: "call-requested",
+              actor: actor.name,
+              role: "Client",
+              text: note || "Client requested a callback.",
+            });
+            helpers.emit({
+              eventType: "approval.question",
+              title: `Callback requested - ${approval.title}`,
+              body: note || "Client requested a call.",
+              siteId: approval.siteId,
+              entityType: "approval",
+              entityId: approval.id,
+              recipients: getRecipientsForRoles(next, ["Project Manager"]),
+              route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+            });
+            updateSentiment(next, approval.clientId, -2);
+          }
+        });
+      },
+      addApprovalMessage(approvalId, message, external = false) {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval || !message.trim()) return;
+          approval.messageThread.push({
+            id: randomId("apm"),
+            by: actorName(helpers.actor),
+            role: external ? "Client" : helpers.actor.role,
+            at: nowStamp(),
+            body: message,
+          });
+          helpers.addMessage(
+            "approval",
+            approval.id,
+            [approval.ownerId, next.users.find((user) => user.clientId === approval.clientId)?.id].filter(Boolean),
+            message,
+            helpers.actor.id,
+          );
+        });
+      },
+      requestContractChanges(contractId, note) {
+        mutate((next, helpers) => {
+          const contractPack = next.contractPacks.find((item) => item.docId === contractId);
+          if (!contractPack) return;
+          const approval = next.approvals.find((item) => item.id === contractPack.approvalId);
+          contractPack.status = "contract-review-requested";
+          contractPack.auditLog.unshift({
+            id: randomId("cpa"),
+            action: "review changes requested",
+            by: actorName(helpers.actor),
+            at: nowStamp(),
+            details: note,
+          });
+          if (approval) {
+            approval.status = "contract-in-review";
+            helpers.appendTimeline(approval, {
+              type: "contract-review-requested",
+              actor: actorName(helpers.actor),
+              role: helpers.actor.role,
+              text: note,
+            });
+          }
+          helpers.emit({
+            eventType: "contract.review-requested",
+            title: `Contract review requested - ${approval?.title || contractId}`,
+            body: note,
+            siteId: approval?.siteId,
+            entityType: "contractPack",
+            entityId: contractPack.docId,
+            recipients: getRecipientsForRoles(next, ["Project Manager"]),
+            route: { kind: "internal", siteId: approval?.siteId || next.session.siteId, page: "contracts", entityId: contractPack.docId },
+          });
+        });
+      },
+      editContractClause(contractId, sectionIndex, clauseIndex, value) {
+        mutate((next, helpers) => {
+          const contractPack = next.contractPacks.find((item) => item.docId === contractId);
+          if (!contractPack) return;
+          const before = contractPack.content.sections[sectionIndex]?.clauses?.[clauseIndex];
+          if (!contractPack.content.sections[sectionIndex]) return;
+          contractPack.content.sections[sectionIndex].clauses[clauseIndex] = value;
+          contractPack.updatedAt = nowStamp();
+          contractPack.auditLog.unshift({
+            id: randomId("cpa"),
+            action: "clause edited",
+            by: actorName(helpers.actor),
+            at: nowStamp(),
+            details: `Updated clause ${clauseIndex + 1} in section ${sectionIndex + 1}.`,
+          });
+          helpers.addAudit({
+            action: "contract.edit",
+            entityType: "contractPack",
+            entityId: contractPack.docId,
+            before: { clause: before },
+            after: { clause: value },
+            siteId: contractPack.siteId,
+          });
+        });
+      },
+      assignTemplateToContract(contractId, templateId) {
+        mutate((next, helpers) => {
+          const contractPack = next.contractPacks.find((item) => item.docId === contractId);
+          if (!contractPack) return;
+          const approval = next.approvals.find((item) => item.id === contractPack.approvalId);
+          const before = { templateId: contractPack.templateId, template: contractPack.template };
+          contractPack.templateId = templateId;
+          if (approval) {
+            materialiseContractTemplate(contractPack, approval, next);
+          }
+          helpers.addAudit({
+            action: "contract.template-assign",
+            entityType: "contractPack",
+            entityId: contractPack.docId,
+            before,
+            after: { templateId: contractPack.templateId, template: contractPack.template },
+            siteId: contractPack.siteId,
+          });
+        });
+      },
+      addContractAttachment(contractId, fileName) {
+        mutate((next, helpers) => {
+          const contractPack = next.contractPacks.find((item) => item.docId === contractId);
+          if (!contractPack || !fileName.trim()) return;
+          contractPack.attachments.push({
+            id: randomId("att"),
+            name: fileName.trim(),
+            kind: fileName.toLowerCase().endsWith(".png") ? "image" : "pdf",
+          });
+          contractPack.auditLog.unshift({
+            id: randomId("cpa"),
+            action: "attachment added",
+            by: actorName(helpers.actor),
+            at: nowStamp(),
+            details: `${fileName.trim()} added to contract pack.`,
+          });
+        });
+      },
+      approveContractDraft(contractId) {
+        mutate((next, helpers) => {
+          const contractPack = next.contractPacks.find((item) => item.docId === contractId);
+          if (!contractPack) return;
+          const approval = next.approvals.find((item) => item.id === contractPack.approvalId);
+          contractPack.status = "builder-signature-pending";
+          contractPack.auditLog.unshift({
+            id: randomId("cpa"),
+            action: "draft approved for builder signature",
+            by: actorName(helpers.actor),
+            at: nowStamp(),
+            details: "Contract Admin approved the draft for builder-side execution.",
+          });
+          if (approval) {
+            approval.status = "contract-awaiting-builder";
+            helpers.appendTimeline(approval, {
+              type: "contract-awaiting-builder",
+              actor: actorName(helpers.actor),
+              role: helpers.actor.role,
+              text: "Contract Admin approved the draft for builder signature.",
+            });
+          }
+          helpers.emit({
+            eventType: "contract.review-requested",
+            title: `Contract ready for builder signature - ${approval?.title || contractId}`,
+            body: "Draft has passed internal review and is ready for PM or Supervisor sign-off.",
+            siteId: approval?.siteId,
+            entityType: "contractPack",
+            entityId: contractPack.docId,
+            recipients: getRecipientsForRoles(next, ["Project Manager", "Supervisor"]),
+            route: { kind: "internal", siteId: approval?.siteId || next.session.siteId, page: "contracts", entityId: contractPack.docId },
+          });
+        });
+      },
+      signBuilderContract(contractId, name) {
+        mutate((next, helpers) => {
+          const contractPack = next.contractPacks.find((item) => item.docId === contractId);
+          if (!contractPack) return;
+          const signedPack = signContract(contractPack, "builder", {
+            name: name || actorName(helpers.actor),
+            role: helpers.actor.role,
+            ip: "198.51.100.88",
+          });
+          Object.assign(contractPack, signedPack);
+          const approval = next.approvals.find((item) => item.id === contractPack.approvalId);
+          if (approval) {
+            approval.status = "contract-awaiting-client";
+            helpers.appendTimeline(approval, {
+              type: "builder-signed",
+              actor: name || actorName(helpers.actor),
+              role: helpers.actor.role,
+              text: "Builder-side signature recorded.",
+            });
+          }
+          helpers.addAudit({
+            action: "contract.builder-sign",
+            entityType: "contractPack",
+            entityId: contractPack.docId,
+            before: null,
+            after: buildContractSummary(contractPack),
+            siteId: contractPack.siteId,
+          });
+          helpers.emit({
+            eventType: "contract.builder-signed",
+            title: `Contract ready for client signature - ${approval?.title || contractId}`,
+            body: "Builder-side signature is complete and the contract pack is now ready for client execution.",
+            siteId: approval?.siteId,
+            entityType: "contractPack",
+            entityId: contractPack.docId,
+            recipients: getRecipientsForClient(next, approval?.clientId),
+            route: { kind: "client", clientId: approval?.clientId, page: "documents", entityId: contractPack.docId },
+          });
+        });
+      },
+      signClientContract(contractId, name) {
+        mutate((next, helpers) => {
+          const contractPack = next.contractPacks.find((item) => item.docId === contractId);
+          if (!contractPack) return;
+          const approval = next.approvals.find((item) => item.id === contractPack.approvalId);
+          const client = next.clients.find((item) => item.id === approval?.clientId);
+          const signedPack = signContract(contractPack, "client", {
+            name: name || client?.primaryContact || "Client",
+            role: "Client",
+            ip: "203.0.113.51",
+          });
+          Object.assign(contractPack, signedPack);
+          if (approval) {
+            approval.status = "signed";
+            helpers.appendTimeline(approval, {
+              type: "signed",
+              actor: name || client?.primaryContact || "Client",
+              role: "Client",
+              text: "Contract fully executed.",
+            });
+          }
+          updateSentiment(next, approval?.clientId, 10);
+          helpers.addAudit({
+            action: "contract.client-sign",
+            entityType: "contractPack",
+            entityId: contractPack.docId,
+            before: null,
+            after: buildContractSummary(contractPack),
+            siteId: contractPack.siteId,
+          });
+          if (approval) {
+            helpers.applyBudgetImpact(approval, contractPack);
+            helpers.applyScheduleImpact(approval);
+            helpers.projectLog(
+              approval.siteId,
+              `Contract executed - ${approval.title}`,
+              `Contract pack ${contractPack.docId} fully executed and archived for ${client?.name || "client"}.`,
+            );
+            helpers.queueSync(
+              "contractPack",
+              contractPack.docId,
+              approval.siteId,
+              {
+                approvalId: approval.id,
+                siteCode: next.sites.find((site) => site.id === approval.siteId)?.code,
+                status: contractPack.status,
+                signedAt: contractPack.signatures.client?.signedAt,
+              },
+              null,
+            );
+            const linkedVariation = next.variations.find((variation) => variation.clientApprovalId === approval.id);
+            if (linkedVariation) {
+              helpers.queueSync(
+                "variation",
+                linkedVariation.number,
+                linkedVariation.siteId,
+                {
+                  variationNumber: linkedVariation.number,
+                  siteCode: next.sites.find((site) => site.id === linkedVariation.siteId)?.code,
+                  status: "signed",
+                  value: linkedVariation.value,
+                },
+                null,
+              );
+            }
+          }
+          helpers.emit({
+            eventType: "contract.client-signed",
+            title: `Contract fully executed - ${approval?.title || contractId}`,
+            body: `${contractPack.docId} is now signed and archived.`,
+            siteId: approval?.siteId,
+            entityType: "contractPack",
+            entityId: contractPack.docId,
+            recipients: [
+              ...getRecipientsForRoles(next, ["Supervisor", "Project Manager", "Contract Admin", "Director"]),
+              ...getRecipientsForClient(next, approval?.clientId),
+            ],
+            route: { kind: "internal", siteId: approval?.siteId || next.session.siteId, page: "contracts", entityId: contractPack.docId },
+          });
+        });
+      },
+      archiveContract(contractId) {
+        mutate((next, helpers) => {
+          const contractPack = next.contractPacks.find((item) => item.docId === contractId);
+          if (!contractPack) return;
+          contractPack.archivedAt = nowStamp();
+          contractPack.status = contractPack.status === "signed" ? "signed" : "archived";
+          contractPack.auditLog.unshift({
+            id: randomId("cpa"),
+            action: "archived",
+            by: actorName(helpers.actor),
+            at: nowStamp(),
+            details: "Contract pack archived by Contract Admin.",
+          });
+        });
+      },
+      createVariationFromRfi(rfiId) {
+        mutate((next, helpers) => {
+          const rfi = next.rfis.find((item) => item.id === rfiId);
+          if (!rfi) return;
+          const variation = {
+            id: randomId("var"),
+            siteId: rfi.siteId,
+            number: `VO-${String(next.variations.length + 1).padStart(3, "0")}`,
+            title: `Variation arising from ${rfi.number}`,
+            sourceType: "rfi",
+            sourceId: rfi.id,
+            status: "submitted",
+            priority: rfi.priority,
+            value: Number(rfi.costImpact || 0),
+            days: Number(rfi.timeImpact || 0),
+            trade: rfi.trade,
+            createdBy: helpers.actor.id,
+            clientApprovalId: null,
+            contractPackId: null,
+            linkedRecords: [buildLink("rfi", rfi, rfi.siteId)],
+          };
+          next.variations.unshift(variation);
+          upsertLinkedRecord(rfi, buildLink("variation", variation, rfi.siteId));
+          helpers.addAudit({
+            action: "variation.create",
+            entityType: "variation",
+            entityId: variation.id,
+            before: null,
+            after: { status: variation.status, value: variation.value },
+            siteId: variation.siteId,
+          });
+        });
+      },
+      createVariationDraft(payload) {
+        mutate((next, helpers) => {
+          const variation = {
+            id: randomId("var"),
+            siteId: payload.siteId || next.session.siteId,
+            number: `VO-${String(next.variations.length + 1).padStart(3, "0")}`,
+            title: payload.title,
+            sourceType: payload.sourceType || "variation",
+            sourceId: payload.sourceId || randomId("src"),
+            status: "submitted",
+            priority: payload.priority || "medium",
+            value: Number(payload.value || 0),
+            days: Number(payload.days || 0),
+            trade: payload.trade || helpers.actor.trade || "General",
+            createdBy: helpers.actor.id,
+            clientApprovalId: null,
+            contractPackId: null,
+            linkedRecords: payload.linkedRecords || [],
+          };
+          next.variations.unshift(variation);
+          helpers.addAudit({
+            action: "variation.create",
+            entityType: "variation",
+            entityId: variation.id,
+            before: null,
+            after: { status: variation.status, value: variation.value },
+            siteId: variation.siteId,
+          });
+        });
+      },
+      sendVariationToClient(variationId) {
+        mutate((next, helpers) => {
+          const variation = next.variations.find((item) => item.id === variationId);
+          if (!variation) return;
+          const sourceType = variation.sourceType === "rfi" ? "rfi" : "variation";
+          const approval = {
+            id: randomId("ap"),
+            siteId: variation.siteId,
+            clientId: next.sites.find((site) => site.id === variation.siteId)?.clientId,
+            type: "Variation",
+            title: `Approve ${variation.title.toLowerCase()}`,
+            summary: `${variation.title} requires commercial approval before the builder can proceed cleanly.`,
+            reason: "The linked field or consultant event has now changed the commercial basis of the work.",
+            recommendation: "Approve now so the variation can be formalised without additional delay.",
+            status: "awaiting-client",
+            priority: variation.priority,
+            sourceType,
+            sourceId: variation.sourceId || variation.id,
+            createdBy: helpers.actor.id,
+            ownerId: next.sites.find((site) => site.id === variation.siteId)?.pmId || "u_pm_1",
+            sentAt: nowStamp(),
+            dueAt: addDays(formatDate(), 3),
+            viewedAt: null,
+            costImpact: variation.value,
+            timeImpact: variation.days,
+            linkedRecords: [buildLink("variation", variation, variation.siteId)],
+            attachments: [],
+            aiDraft: draftApproval(variation, "Variation"),
+            timeline: [],
+            messageThread: [],
+            contractPackId: null,
+          };
+          helpers.appendTimeline(approval, {
+            type: "sent",
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            text: "Variation sent to client from variation register.",
+          });
+          variation.clientApprovalId = approval.id;
+          next.approvals.unshift(approval);
+          helpers.emit({
+            eventType: "approval.created",
+            title: `Variation sent to client - ${variation.title}`,
+            body: approval.summary,
+            siteId: approval.siteId,
+            entityType: "approval",
+            entityId: approval.id,
+            recipients: [...getRecipientsForRoles(next, ["Project Manager"]), ...getRecipientsForClient(next, approval.clientId)],
+            route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+          });
+        });
+      },
+      addProcurementRequest(payload) {
+        mutate((next, helpers) => {
+          const item = {
+            id: randomId("proc"),
+            siteId: payload.siteId || next.session.siteId,
+            item: payload.item,
+            quantity: payload.quantity,
+            requestedBy: payload.requestedBy || next.session.userId,
+            status: "pending",
+            date: formatDate(),
+            eta: payload.eta || "",
+            supplier: payload.supplier || "",
+            poNumber: payload.poNumber || "",
+            cost: Number(payload.cost || 0),
+            linkedApprovalId: null,
+            linkedRecords: payload.linkedRecords || [],
+          };
+          next.procurement.unshift(item);
+          helpers.addAudit({
+            action: "procurement.create",
+            entityType: "procurement",
+            entityId: item.id,
+            before: null,
+            after: { status: item.status, item: item.item },
+            siteId: item.siteId,
+          });
+        });
+      },
+      updateProcurementStatus(itemId, status) {
+        mutate((next, helpers) => {
+          const item = next.procurement.find((entry) => entry.id === itemId);
+          if (!item) return;
+          const before = { status: item.status };
+          item.status = status;
+          helpers.addAudit({
+            action: "procurement.status",
+            entityType: "procurement",
+            entityId: item.id,
+            before,
+            after: { status },
+            siteId: item.siteId,
+          });
+          if (status === "delayed") {
+            helpers.emit({
+              eventType: "procurement.delayed",
+              title: `Procurement delayed - ${item.item}`,
+              body: "Delay detected. SiteForge can draft an EOT request from this event.",
+              siteId: item.siteId,
+              entityType: "procurement",
+              entityId: item.id,
+              recipients: getRecipientsForRoles(next, ["Project Manager"]),
+              route: { kind: "internal", siteId: item.siteId, page: "mats", entityId: item.id },
+            });
+          }
+        });
+      },
+      createEotFromProcurement(itemId) {
+        mutate((next, helpers) => {
+          const item = next.procurement.find((entry) => entry.id === itemId);
+          if (!item) return;
+          const ai = draftApproval(item, "Extension of Time");
+          const site = next.sites.find((entry) => entry.id === item.siteId);
+          const approval = {
+            id: randomId("ap"),
+            siteId: item.siteId,
+            clientId: site.clientId,
+            type: "Extension of Time",
+            title: `EOT request for ${item.item.toLowerCase()} delay`,
+            summary: ai.summary,
+            reason: ai.reason,
+            recommendation: ai.recommendation,
+            status: "draft",
+            priority: "high",
+            sourceType: "procurement",
+            sourceId: item.id,
+            createdBy: helpers.actor.id,
+            ownerId: site.pmId,
+            sentAt: null,
+            dueAt: addDays(formatDate(), 3),
+            viewedAt: null,
+            costImpact: Number(item.cost || 0),
+            timeImpact: 2,
+            linkedRecords: [buildLink("procurement", item, item.siteId)],
+            attachments: [],
+            aiDraft: ai,
+            timeline: [],
+            messageThread: [],
+            contractPackId: null,
+          };
+          helpers.appendTimeline(approval, {
+            type: "created",
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            text: "Drafted from delayed procurement item.",
+          });
+          next.approvals.unshift(approval);
+          item.linkedApprovalId = approval.id;
+          upsertLinkedRecord(item, buildLink("approval", approval, item.siteId));
+        });
+      },
+      addQaRecord(payload) {
+        mutate((next, helpers) => {
+          const entry = {
+            id: randomId("qa"),
+            siteId: payload.siteId || next.session.siteId,
+            title: payload.title,
+            type: payload.type || "Hold Point",
+            trade: payload.trade || "General",
+            inspector: payload.inspector || actorName(helpers.actor),
+            status: "scheduled",
+            date: payload.date || formatDate(),
+            passCount: 0,
+            totalCount: Number(payload.totalCount || 0),
+            notes: payload.notes || "",
+            linkedRecords: payload.linkedRecords || [],
+          };
+          next.qa.unshift(entry);
+          helpers.addAudit({
+            action: "qa.create",
+            entityType: "qa",
+            entityId: entry.id,
+            before: null,
+            after: { status: entry.status, title: entry.title },
+            siteId: entry.siteId,
+          });
+        });
+      },
+      updateQaStatus(qaId, status) {
+        mutate((next, helpers) => {
+          const entry = next.qa.find((item) => item.id === qaId);
+          if (!entry) return;
+          const before = { status: entry.status, passCount: entry.passCount };
+          entry.status = status;
+          if (status === "passed") {
+            entry.passCount = entry.totalCount;
+          }
+          helpers.addAudit({
+            action: "qa.status",
+            entityType: "qa",
+            entityId: entry.id,
+            before,
+            after: { status: entry.status, passCount: entry.passCount },
+            siteId: entry.siteId,
+          });
+          if (status === "failed") {
+            helpers.emit({
+              eventType: "qa.failed",
+              title: `QA failed - ${entry.title}`,
+              body: entry.notes || "Inspection failed and needs rework review.",
+              siteId: entry.siteId,
+              entityType: "qa",
+              entityId: entry.id,
+              recipients: getRecipientsForRoles(next, ["Project Manager", "Contract Admin"]),
+              route: { kind: "internal", siteId: entry.siteId, page: "qa", entityId: entry.id },
+            });
+          }
+        });
+      },
+      addDiaryEntry(payload) {
+        mutate((next, helpers) => {
+          const structured = payload.rawText ? structureFieldNote(payload.rawText) : null;
+          const entry = {
+            id: randomId("dia"),
+            siteId: payload.siteId || next.session.siteId,
+            date: payload.date || formatDate(),
+            weather: payload.weather || "Fine",
+            crew: Number(payload.crew || 0),
+            summary: payload.summary || structured?.summary || "",
+            safety: payload.safety || structured?.safety || "",
+            delays: payload.delays || structured?.delays || "Nil",
+            photos: payload.photos || [],
+            rainEvent: Boolean(payload.rainEvent),
+            linkedRecords: payload.linkedRecords || [],
+          };
+          next.diary.unshift(entry);
+          helpers.addAudit({
+            action: "diary.create",
+            entityType: "diary",
+            entityId: entry.id,
+            before: null,
+            after: { date: entry.date, rainEvent: entry.rainEvent },
+            siteId: entry.siteId,
+          });
+        });
+      },
+      createRainDayClaim(diaryId) {
+        mutate((next, helpers) => {
+          const diary = next.diary.find((entry) => entry.id === diaryId);
+          if (!diary) return;
+          const site = next.sites.find((entry) => entry.id === diary.siteId);
+          const ai = draftApproval(diary, "Rain Day");
+          const approval = {
+            id: randomId("ap"),
+            siteId: diary.siteId,
+            clientId: site.clientId,
+            type: "Rain Day",
+            title: `Rain day claim for ${diary.date}`,
+            summary: ai.summary,
+            reason: ai.reason,
+            recommendation: ai.recommendation,
+            status: "draft",
+            priority: "medium",
+            sourceType: "diary",
+            sourceId: diary.id,
+            createdBy: helpers.actor.id,
+            ownerId: site.pmId,
+            sentAt: null,
+            dueAt: addDays(diary.date, 3),
+            viewedAt: null,
+            costImpact: 0,
+            timeImpact: 1,
+            linkedRecords: [buildLink("diary", diary, diary.siteId)],
+            attachments: [{ id: randomId("att"), name: `Weather evidence ${diary.date}.pdf`, kind: "pdf" }],
+            aiDraft: ai,
+            timeline: [],
+            messageThread: [],
+            contractPackId: null,
+          };
+          helpers.appendTimeline(approval, {
+            type: "created",
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            text: "Rain day claim drafted from site diary.",
+          });
+          next.approvals.unshift(approval);
+          upsertLinkedRecord(diary, buildLink("approval", approval, diary.siteId));
+        });
+      },
+      addSafetyRecord(payload) {
+        mutate((next, helpers) => {
+          const record = {
+            id: randomId("safe"),
+            siteId: payload.siteId || next.session.siteId,
+            type: payload.type || "toolbox",
+            topic: payload.topic,
+            by: actorName(helpers.actor),
+            date: payload.date || formatDate(),
+            participants: payload.participants || [helpers.actor.id],
+            acknowledgementRequired: Boolean(payload.acknowledgementRequired),
+            linkedRecords: payload.linkedRecords || [],
+          };
+          next.safety.unshift(record);
+          helpers.addAudit({
+            action: "safety.create",
+            entityType: "safety",
+            entityId: record.id,
+            before: null,
+            after: { type: record.type, topic: record.topic },
+            siteId: record.siteId,
+          });
+          if (record.type === "critical" || record.type === "incident") {
+            helpers.emit({
+              eventType: "safety.incident",
+              title: `Safety incident - ${record.topic}`,
+              body: "Immediate review and project response required.",
+              siteId: record.siteId,
+              entityType: "safety",
+              entityId: record.id,
+              recipients: [...getRecipientsForRoles(next, ["Supervisor", "Project Manager", "Director"]), ...next.users.map((user) => ({ user }))],
+              route: { kind: "internal", siteId: record.siteId, page: "safety", entityId: record.id },
+            });
+          }
+        });
+      },
+      createDelayNoticeFromSafety(safetyId) {
+        mutate((next, helpers) => {
+          const record = next.safety.find((item) => item.id === safetyId);
+          if (!record) return;
+          const site = next.sites.find((item) => item.id === record.siteId);
+          const ai = draftApproval(record, "Delay Notice");
+          const approval = {
+            id: randomId("ap"),
+            siteId: record.siteId,
+            clientId: site.clientId,
+            type: "Delay Notice",
+            title: `Delay notice - ${record.topic.toLowerCase()}`,
+            summary: ai.summary,
+            reason: ai.reason,
+            recommendation: ai.recommendation,
+            status: "draft",
+            priority: "high",
+            sourceType: "safety",
+            sourceId: record.id,
+            createdBy: helpers.actor.id,
+            ownerId: site.pmId,
+            sentAt: null,
+            dueAt: addDays(formatDate(), 2),
+            viewedAt: null,
+            costImpact: 0,
+            timeImpact: 1,
+            linkedRecords: [buildLink("safety", record, record.siteId)],
+            attachments: [],
+            aiDraft: ai,
+            timeline: [],
+            messageThread: [],
+            contractPackId: null,
+          };
+          next.approvals.unshift(approval);
+          upsertLinkedRecord(record, buildLink("approval", approval, record.siteId));
+        });
+      },
+      createReworkTaskFromQa(qaId) {
+        mutate((next, helpers) => {
+          const qa = next.qa.find((item) => item.id === qaId);
+          if (!qa) return;
+          const task = {
+            id: randomId("tsk"),
+            siteId: qa.siteId,
+            title: `Rework - ${qa.title}`,
+            description: qa.notes,
+            trade: qa.trade,
+            companyId: helpers.actor.companyId,
+            assigneeId: next.sites.find((site) => site.id === qa.siteId)?.superintendentId || helpers.actor.id,
+            priority: "high",
+            status: "todo",
+            dueDate: addDays(qa.date, 2),
+            progress: 0,
+            crewRequired: 1,
+            mobileMaterials: [],
+            linkedRecords: [buildLink("qa", qa, qa.siteId)],
+            clientVisible: false,
+          };
+          next.tasks.unshift(task);
+          upsertLinkedRecord(qa, buildLink("task", task, qa.siteId));
+          helpers.addAudit({
+            action: "task.create",
+            entityType: "task",
+            entityId: task.id,
+            before: null,
+            after: { title: task.title, status: task.status },
+            siteId: task.siteId,
+          });
+        });
+      },
+      createRfi(payload) {
+        mutate((next, helpers) => {
+          const rfi = {
+            id: randomId("rfi"),
+            siteId: payload.siteId || next.session.siteId,
+            number: `RFI-${String(next.rfis.length + 1).padStart(3, "0")}`,
+            title: payload.title,
+            trade: payload.trade || "General",
+            fromUserId: helpers.actor.id,
+            to: payload.to || "Consultant",
+            status: "open",
+            priority: payload.priority || "medium",
+            dueDate: payload.dueDate || addDays(formatDate(), 4),
+            costImpact: Number(payload.costImpact || 0),
+            timeImpact: Number(payload.timeImpact || 0),
+            scopeCompanyId: helpers.actor.companyId,
+            description: payload.description || payload.title,
+            linkedRecords: payload.linkedRecords || [],
+            responses: [],
+          };
+          next.rfis.unshift(rfi);
+          helpers.addAudit({
+            action: "rfi.create",
+            entityType: "rfi",
+            entityId: rfi.id,
+            before: null,
+            after: { status: rfi.status, title: rfi.title },
+            siteId: rfi.siteId,
+          });
+        });
+      },
+      respondRfi(rfiId, message) {
+        mutate((next, helpers) => {
+          const rfi = next.rfis.find((item) => item.id === rfiId);
+          if (!rfi || !message.trim()) return;
+          rfi.responses.push({
+            id: randomId("rfi-r"),
+            by: actorName(helpers.actor),
+            at: nowStamp(),
+            body: message,
+          });
+          rfi.status = "responded";
+        });
+      },
+      closeRfi(rfiId) {
+        mutate((next) => {
+          const rfi = next.rfis.find((item) => item.id === rfiId);
+          if (rfi) {
+            rfi.status = "closed";
+          }
+        });
+      },
+      updatePassportAcknowledgement(passportId, acknowledgementId, typedName) {
+        mutate((next, helpers) => {
+          const passport = next.passports.records.find((item) => item.id === passportId);
+          if (!passport) return;
+          const acknowledgement = passport.acknowledgements.find((item) => item.id === acknowledgementId);
+          if (acknowledgement) {
+            acknowledgement.done = true;
+          }
+          passport.docs.forEach((doc) => {
+            if (acknowledgement?.label?.toLowerCase().includes("revision") && doc.label.toLowerCase().includes("revision")) {
+              doc.status = "complete";
+            }
+            if (acknowledgement?.label?.toLowerCase().includes("retaining") && doc.label.toLowerCase().includes("retaining")) {
+              doc.status = "complete";
+            }
+          });
+          passport.blockedReasons = passport.docs
+            .filter((doc) => doc.status !== "complete")
+            .map((doc) =>
+              doc.status === "expired"
+                ? `${doc.label} expired`
+                : doc.status === "missing"
+                  ? `${doc.label} missing`
+                  : `${doc.label} not acknowledged`,
+            );
+          if (typedName) {
+            helpers.addAudit({
+              action: "passport.acknowledge",
+              entityType: "passport",
+              entityId: passport.id,
+              before: null,
+              after: { acknowledgement: acknowledgement?.label, by: typedName },
+              siteId: passport.siteId,
+            });
+          }
+          next.documents.forEach((document) => {
+            if (document.impactAnalysis?.acknowledgementsRequired?.includes(passport.userId)) {
+              document.impactAnalysis.acknowledgedBy = document.impactAnalysis.acknowledgedBy || [];
+              if (!document.impactAnalysis.acknowledgedBy.includes(passport.userId)) {
+                document.impactAnalysis.acknowledgedBy.push(passport.userId);
+              }
+            }
+          });
+        });
+      },
+      scanPassport(siteId, passportId) {
+        mutate((next, helpers) => {
+          const passport = next.passports.records.find((item) => item.id === passportId);
+          if (!passport) return;
+          const result = passport.blockedReasons.length ? "blocked" : "granted";
+          const reason = passport.blockedReasons[0] || "All documents current";
+          next.passports.scanLog.unshift({
+            id: randomId("scan"),
+            siteId,
+            passportId,
+            at: nowStamp(),
+            result,
+            reason,
+          });
+          next.presence.events.unshift({
+            id: randomId("pe"),
+            siteId,
+            userId: passport.userId,
+            at: nowStamp(),
+            signal: "sign-in",
+            state: result === "granted" ? "captured" : "blocked",
+            note: reason,
+          });
+          if (result === "blocked") {
+            helpers.emit({
+              eventType: "passport.access-denied",
+              title: `Access denied - ${passport.person}`,
+              body: reason,
+              siteId,
+              entityType: "passport",
+              entityId: passport.id,
+              recipients: getRecipientsForRoles(next, ["Supervisor"]),
+              route: { kind: "internal", siteId, page: "passport", entityId: passport.id },
+            });
+          }
+        });
+      },
+      acknowledgeToolboxTalk(talkId, userId, name) {
+        mutate((next) => {
+          const talk = next.toolboxTalks.find((item) => item.id === talkId);
+          if (!talk) return;
+          const already = talk.acknowledgements.some((entry) => entry.userId === userId);
+          if (!already) {
+            talk.acknowledgements.push({
+              userId,
+              name,
+              at: nowStamp(),
+            });
+          }
+        });
+      },
+      resolvePresence(presenceId, outcome, note) {
+        mutate((next, helpers) => {
+          const record = next.presence.records.find((item) => item.id === presenceId);
+          if (!record) return;
+          const before = { status: record.status, confidence: record.confidence, payrollState: record.payrollState };
+          if (outcome === "verify") {
+            record.status = "verified-on-site";
+            record.confidence = Math.max(record.confidence, 85);
+            record.payrollState = "ready";
+            record.anomalyFlags = [];
+          } else if (outcome === "hold") {
+            record.payrollState = "hold";
+            record.confidence = Math.min(record.confidence, 45);
+          }
+          record.supervisorNotes = note || record.supervisorNotes;
+          helpers.addAudit({
+            action: "presence.resolve",
+            entityType: "presence",
+            entityId: record.id,
+            before,
+            after: { status: record.status, confidence: record.confidence, payrollState: record.payrollState },
+            siteId: record.siteId,
+          });
+        });
+      },
+      triggerPresenceDigest() {
+        mutate((next, helpers) => {
+          const flagged = next.presence.records.filter((record) => record.anomalyFlags?.length);
+          if (!flagged.length) return;
+          helpers.emit({
+            eventType: "presence.anomaly",
+            title: "Daily presence anomaly digest ready",
+            body: `${flagged.length} attendance anomalies need supervisor review.`,
+            siteId: next.session.siteId,
+            entityType: "presence",
+            entityId: flagged[0].id,
+            recipients: getRecipientsForRoles(next, ["Supervisor"]),
+            route: { kind: "internal", siteId: next.session.siteId, page: "presence", entityId: flagged[0].id },
+          });
+        });
+      },
+      testBuildxactConnection() {
+        mutate((next) => {
+          next.buildxact.connection.status = "connected";
+          next.buildxact.connection.lastTestedAt = nowStamp();
+        });
+      },
+      updateBuildxactSettings(patch) {
+        mutate((next) => {
+          next.buildxact = {
+            ...next.buildxact,
+            ...patch,
+            toggles: { ...next.buildxact.toggles, ...(patch.toggles || {}) },
+            syncFrequency: { ...next.buildxact.syncFrequency, ...(patch.syncFrequency || {}) },
+            connection: { ...next.buildxact.connection, ...(patch.connection || {}) },
+          };
+        });
+      },
+      retryBuildxactSync(syncId) {
+        mutate((next, helpers) => {
+          const history = next.buildxact.syncHistory.find((item) => item.id === syncId);
+          if (!history) return;
+          next.buildxact.syncHistory.unshift({
+            ...history,
+            id: randomId("bx"),
+            status: "success",
+            duration: "512ms",
+            at: nowStamp(),
+            error: undefined,
+          });
+          helpers.addAudit({
+            action: "sync.retry",
+            entityType: "sync",
+            entityId: syncId,
+            before: { status: history.status },
+            after: { status: "success" },
+            siteId: history.siteId,
+          });
+        });
+      },
+      retryAllFailedSyncs() {
+        mutate((next) => {
+          const failed = next.buildxact.syncHistory.filter((item) => item.status === "error");
+          failed.forEach((entry) => {
+            next.buildxact.syncHistory.unshift({
+              ...entry,
+              id: randomId("bx"),
+              status: "success",
+              duration: "544ms",
+              at: nowStamp(),
+              error: undefined,
+            });
+          });
+        });
+      },
+      triggerSyncQueueItem(queueId) {
+        mutate((next, helpers) => {
+          const item = next.buildxact.queue.find((entry) => entry.id === queueId);
+          if (!item) return;
+          const shouldFail = item.type.toLowerCase().includes("labour") || item.reference.toLowerCase().includes("pay");
+          item.status = shouldFail ? "error" : "sent";
+          const historyEntry = {
+            id: randomId("bx"),
+            type: item.type,
+            reference: item.reference,
+            siteId: item.siteId,
+            payloadSize: item.payloadSize,
+            status: shouldFail ? "error" : "success",
+            duration: shouldFail ? "982ms" : "488ms",
+            at: nowStamp(),
+            error: shouldFail ? "Missing Buildxact cost code mapping for labour export." : undefined,
+          };
+          next.buildxact.syncHistory.unshift(historyEntry);
+          if (shouldFail) {
+            helpers.emit({
+              eventType: "buildxact.sync-error",
+              title: `Buildxact sync error - ${item.reference}`,
+              body: historyEntry.error,
+              siteId: item.siteId,
+              entityType: "sync",
+              entityId: historyEntry.id,
+              recipients: getRecipientsForRoles(next, ["Contract Admin"]),
+              route: { kind: "internal", siteId: item.siteId, page: "integrations", entityId: historyEntry.id },
+            });
+          }
+        });
+      },
+      generateBoardReport() {
+        mutate((next) => {
+          const metrics = buildMetrics(next);
+          const insight = boardInsights({
+            sites: next.sites,
+            approvals: next.approvals.filter((approval) => ["awaiting-client", "question", "contract-awaiting-client"].includes(approval.status)),
+            presence: next.presence.records,
+          });
+          next.boardReports.unshift({
+            id: randomId("br"),
+            period: next.session.period,
+            createdAt: nowStamp(),
+            title: `${next.session.period} board report`,
+            summary: `${insight.summary} Margin at risk currently stands at ${formatCurrency(metrics.portfolio.totalMarginAtRisk)}.`,
+          });
+        });
+      },
+      sendDirectorEscalation(siteId, title) {
+        mutate((next, helpers) => {
+          helpers.emit({
+            eventType: "approval.stalled",
+            title: `Director escalation - ${title}`,
+            body: "Item has aged beyond threshold and has been escalated to the PM via Teams.",
+            siteId,
+            entityType: "approval",
+            entityId: randomId("esc"),
+            recipients: getRecipientsForRoles(next, ["Project Manager"]),
+            route: { kind: "internal", siteId, page: "clientflow", entityId: null },
+          });
+        });
+      },
+      addClientMessage(clientId, body, approvalId = null) {
+        mutate((next, helpers) => {
+          if (!body.trim()) return;
+          const clientUser = next.users.find((user) => user.clientId === clientId);
+          helpers.addMessage(
+            approvalId ? "approval" : "client-general",
+            approvalId || clientId,
+            [helpers.actor.id, clientUser?.id].filter(Boolean),
+            body,
+            helpers.actor.id,
+          );
+        });
+      },
+      addConversationMessage(threadType, threadId, participants, body) {
+        mutate((next, helpers) => {
+          if (!body.trim()) return;
+          helpers.addMessage(threadType, threadId || randomId("msg"), participants, body, helpers.actor.id);
+        });
+      },
+      updateClientPreferences(clientId, patch) {
+        mutate((next) => {
+          const client = next.clients.find((entry) => entry.id === clientId);
+          if (!client) return;
+          Object.assign(client, patch);
+        });
+      },
+      generateWorkerEndOfDay(userId) {
+        mutate((next, helpers) => {
+          const user = next.users.find((item) => item.id === userId) || helpers.actor;
+          const siteId = user.siteIds?.[0] || next.session.siteId;
+          const site = next.sites.find((item) => item.id === siteId);
+          const summary = generateEndOfDay(
+            site,
+            next.tasks.filter((task) => task.siteId === siteId && task.assigneeId === user.id),
+            next.problems.filter((problem) => problem.siteId === siteId),
+            next.procurement.filter((item) => item.siteId === siteId),
+            next.diary.filter((entry) => entry.siteId === siteId),
+            next.presence.records.filter((entry) => entry.siteId === siteId),
+          );
+          appendProjectLog(next, siteId, `End of day summary - ${user.name}`, summary);
+          helpers.addAudit({
+            action: "worker.end-of-day",
+            entityType: "site",
+            entityId: siteId,
+            before: null,
+            after: { summary },
+            siteId,
+          });
+        });
+      },
+      dismissToast(toastId) {
+        mutate((next) => {
+          next.demo.recentToasts = next.demo.recentToasts.filter((entry) => entry.id !== toastId);
+        });
+      },
+      runSystemSweep() {
+        mutate((next, helpers) => {
+          runTimedAutomationSweep(next, helpers);
+        });
+      },
+      updateEntity(type, entityId, patch) {
+        mutate((next, helpers) => {
+          const { path, collection } = getCollectionRef(next, type);
+          if (!Array.isArray(collection)) return;
+          const index = collection.findIndex((entry) => entry.id === entityId || entry.docId === entityId);
+          if (index === -1) return;
+          const before = cloneState(collection[index]);
+          collection[index] = { ...collection[index], ...patch, updatedAt: nowStamp() };
+          setByPath(next, path, collection);
+          helpers.addAudit({
+            action: `${type}.update`,
+            entityType: type,
+            entityId,
+            before,
+            after: collection[index],
+            siteId: collection[index].siteId || next.session.siteId,
+          });
+        });
+      },
+      archiveEntity(type, entityId) {
+        mutate((next, helpers) => {
+          const record = findInCollection(next, type, entityId);
+          if (!record) return;
+          const before = cloneState(record);
+          record.archived = true;
+          record.archivedAt = nowStamp();
+          if (record.status && record.status !== "signed") {
+            record.status = "archived";
+          }
+          helpers.addAudit({
+            action: `${type}.archive`,
+            entityType: type,
+            entityId,
+            before,
+            after: record,
+            siteId: record.siteId || next.session.siteId,
+          });
+        });
+      },
+      restoreEntity(type, entityId) {
+        mutate((next, helpers) => {
+          const record = findInCollection(next, type, entityId);
+          if (!record) return;
+          const before = cloneState(record);
+          record.archived = false;
+          if (record.status === "archived") {
+            record.status = type === "task" ? "todo" : "draft";
+          }
+          helpers.addAudit({
+            action: `${type}.restore`,
+            entityType: type,
+            entityId,
+            before,
+            after: record,
+            siteId: record.siteId || next.session.siteId,
+          });
+        });
+      },
+      deleteEntity(type, entityId) {
+        mutate((next, helpers) => {
+          const { path, collection } = getCollectionRef(next, type);
+          if (!Array.isArray(collection)) return;
+          const target = collection.find((entry) => entry.id === entityId || entry.docId === entityId);
+          if (!target) return;
+          const filtered = collection.filter((entry) => entry.id !== entityId && entry.docId !== entityId);
+          setByPath(next, path, filtered);
+          helpers.addAudit({
+            action: `${type}.delete`,
+            entityType: type,
+            entityId,
+            before: target,
+            after: null,
+            siteId: target.siteId || next.session.siteId,
+          });
+        });
+      },
+      duplicateEntity(type, entityId) {
+        mutate((next, helpers) => {
+          const { path, collection } = getCollectionRef(next, type);
+          if (!Array.isArray(collection)) return;
+          const target = collection.find((entry) => entry.id === entityId || entry.docId === entityId);
+          if (!target) return;
+          const duplicate = {
+            ...cloneState(target),
+            id: randomId(type.slice(0, 3)),
+            docId: target.docId ? `${target.docId}-copy` : undefined,
+            number: target.number ? `${target.number}-COPY` : undefined,
+            title: target.title ? `${target.title} (Copy)` : target.title,
+            name: target.name ? `${target.name} (Copy)` : target.name,
+            archived: false,
+            archivedAt: null,
+            status: ["signed", "approved", "paid"].includes(target.status) ? "draft" : target.status,
+            createdAt: nowStamp(),
+            updatedAt: nowStamp(),
+          };
+          collection.unshift(duplicate);
+          setByPath(next, path, collection);
+          helpers.addAudit({
+            action: `${type}.duplicate`,
+            entityType: type,
+            entityId: duplicate.id || duplicate.docId,
+            before: null,
+            after: duplicate,
+            siteId: duplicate.siteId || next.session.siteId,
+          });
+        });
+      },
+      reopenTask(taskId) {
+        mutate((next, helpers) => {
+          const task = next.tasks.find((entry) => entry.id === taskId);
+          if (!task) return;
+          const before = { status: task.status, progress: task.progress };
+          task.status = "todo";
+          task.progress = 0;
+          helpers.addAudit({
+            action: "task.reopen",
+            entityType: "task",
+            entityId: task.id,
+            before,
+            after: { status: task.status, progress: task.progress },
+            siteId: task.siteId,
+          });
+        });
+      },
+      reassignTask(taskId, assigneeId) {
+        mutate((next, helpers) => {
+          const task = next.tasks.find((entry) => entry.id === taskId);
+          if (!task) return;
+          const before = { assigneeId: task.assigneeId };
+          task.assigneeId = assigneeId;
+          helpers.addAudit({
+            action: "task.reassign",
+            entityType: "task",
+            entityId: task.id,
+            before,
+            after: { assigneeId },
+            siteId: task.siteId,
+          });
+        });
+      },
+      bulkUpdateTasks(taskIds, status) {
+        mutate((next, helpers) => {
+          next.tasks.forEach((task) => {
+            if (!taskIds.includes(task.id)) return;
+            const before = { status: task.status };
+            task.status = status;
+            task.progress = status === "done" ? 100 : status === "in-progress" ? Math.max(task.progress || 0, 35) : 0;
+            helpers.addAudit({
+              action: "task.bulk-status",
+              entityType: "task",
+              entityId: task.id,
+              before,
+              after: { status: task.status },
+              siteId: task.siteId,
+            });
+          });
+        });
+      },
+      setProblemStatus(problemId, status) {
+        mutate((next, helpers) => {
+          const problem = next.problems.find((entry) => entry.id === problemId);
+          if (!problem) return;
+          const before = { status: problem.status };
+          problem.status = status;
+          helpers.addAudit({
+            action: "problem.status",
+            entityType: "problem",
+            entityId: problem.id,
+            before,
+            after: { status },
+            siteId: problem.siteId,
+          });
+        });
+      },
+      reopenRfi(rfiId) {
+        mutate((next, helpers) => {
+          const rfi = next.rfis.find((entry) => entry.id === rfiId);
+          if (!rfi) return;
+          const before = { status: rfi.status };
+          rfi.status = "open";
+          rfi.overdueNotifiedAt = null;
+          helpers.addAudit({
+            action: "rfi.reopen",
+            entityType: "rfi",
+            entityId: rfi.id,
+            before,
+            after: { status: rfi.status },
+            siteId: rfi.siteId,
+          });
+        });
+      },
+      approveVariation(variationId) {
+        mutate((next, helpers) => {
+          const variation = next.variations.find((entry) => entry.id === variationId);
+          if (!variation) return;
+          const before = { status: variation.status };
+          variation.status = "approved";
+          helpers.addAudit({
+            action: "variation.approve",
+            entityType: "variation",
+            entityId: variation.id,
+            before,
+            after: { status: variation.status },
+            siteId: variation.siteId,
+          });
+          helpers.emit({
+            eventType: "variation.approved",
+            title: `Variation approved - ${variation.title}`,
+            body: `${variation.number} is approved and ready for contract formalisation.`,
+            siteId: variation.siteId,
+            entityType: "variation",
+            entityId: variation.id,
+            recipients: getRecipientsForRoles(next, ["Contract Admin", "Project Manager"]),
+            route: { kind: "internal", siteId: variation.siteId, page: "vos", entityId: variation.id },
+          });
+        });
+      },
+      splitVariation(variationId, payload) {
+        mutate((next, helpers) => {
+          const variation = next.variations.find((entry) => entry.id === variationId);
+          if (!variation) return;
+          const splitValue = Math.max(0, Number(payload?.value || variation.value / 2));
+          const duplicate = {
+            ...cloneState(variation),
+            id: randomId("var"),
+            number: `VO-${String(next.variations.length + 1).padStart(3, "0")}`,
+            title: payload?.title || `${variation.title} - Split`,
+            value: splitValue,
+            days: Number(payload?.days || 0),
+            status: "draft",
+            clientApprovalId: null,
+            contractPackId: null,
+            createdBy: helpers.actor.id,
+          };
+          variation.value = Math.max(0, Number(variation.value || 0) - splitValue);
+          next.variations.unshift(duplicate);
+          helpers.addAudit({
+            action: "variation.split",
+            entityType: "variation",
+            entityId: duplicate.id,
+            before: null,
+            after: duplicate,
+            siteId: duplicate.siteId,
+          });
+        });
+      },
+      transitionProcurement(itemId, nextStatus, details = {}) {
+        mutate((next, helpers) => {
+          const item = next.procurement.find((entry) => entry.id === itemId);
+          if (!item) return;
+          const before = cloneState(item);
+          Object.assign(item, details, { status: nextStatus, updatedAt: nowStamp() });
+          if (nextStatus === "supplier-confirmed" && item.eta) {
+            item.confirmedAt = nowStamp();
+          }
+          if (nextStatus === "delivered" && details.signatureName) {
+            item.deliverySignature = details.signatureName;
+          }
+          if (nextStatus === "invoice-received") {
+            item.invoiceReceivedAt = nowStamp();
+          }
+          helpers.addAudit({
+            action: "procurement.transition",
+            entityType: "procurement",
+            entityId: item.id,
+            before,
+            after: item,
+            siteId: item.siteId,
+          });
+          if (["delayed", "escalated"].includes(nextStatus)) {
+            helpers.emit({
+              eventType: "procurement.delayed",
+              title: `Procurement delayed - ${item.item}`,
+              body: "SiteForge suggests an EOT claim or resequencing response.",
+              siteId: item.siteId,
+              entityType: "procurement",
+              entityId: item.id,
+              recipients: getRecipientsForRoles(next, ["Project Manager"]),
+              route: { kind: "internal", siteId: item.siteId, page: "mats", entityId: item.id },
+            });
+          }
+        });
+      },
+      updateQaNotes(qaId, notes) {
+        mutate((next, helpers) => {
+          const qa = next.qa.find((entry) => entry.id === qaId);
+          if (!qa) return;
+          const before = { notes: qa.notes };
+          qa.notes = notes;
+          helpers.addAudit({
+            action: "qa.notes",
+            entityType: "qa",
+            entityId: qa.id,
+            before,
+            after: { notes },
+            siteId: qa.siteId,
+          });
+        });
+      },
+      reopenQa(qaId) {
+        mutate((next, helpers) => {
+          const qa = next.qa.find((entry) => entry.id === qaId);
+          if (!qa) return;
+          const before = { status: qa.status, passCount: qa.passCount };
+          qa.status = "scheduled";
+          qa.passCount = 0;
+          helpers.addAudit({
+            action: "qa.reopen",
+            entityType: "qa",
+            entityId: qa.id,
+            before,
+            after: { status: qa.status, passCount: qa.passCount },
+            siteId: qa.siteId,
+          });
+        });
+      },
+      closeSafetyRecord(safetyId, investigation) {
+        mutate((next, helpers) => {
+          const record = next.safety.find((entry) => entry.id === safetyId);
+          if (!record) return;
+          const before = { status: record.status, investigation: record.investigation };
+          record.closedAt = nowStamp();
+          record.investigation = investigation;
+          record.status = "closed";
+          helpers.addAudit({
+            action: "safety.close",
+            entityType: "safety",
+            entityId: record.id,
+            before,
+            after: { status: record.status, investigation },
+            siteId: record.siteId,
+          });
+        });
+      },
+      withdrawApproval(approvalId) {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((entry) => entry.id === approvalId);
+          if (!approval) return;
+          const before = { status: approval.status };
+          approval.status = "withdrawn";
+          helpers.addAudit({
+            action: "approval.withdraw",
+            entityType: "approval",
+            entityId: approval.id,
+            before,
+            after: { status: approval.status },
+            siteId: approval.siteId,
+          });
+        });
+      },
+      resendApproval(approvalId) {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((entry) => entry.id === approvalId);
+          if (!approval) return;
+          approval.sentAt = nowStamp();
+          approval.status = "awaiting-client";
+          approval.stalledNotifiedAt = null;
+          helpers.appendTimeline(approval, {
+            type: "resent",
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            text: "Approval resent to client.",
+          });
+          helpers.emit({
+            eventType: "approval.created",
+            title: `Approval resent - ${approval.title}`,
+            body: approval.summary,
+            siteId: approval.siteId,
+            entityType: "approval",
+            entityId: approval.id,
+            recipients: [...getRecipientsForRoles(next, ["Project Manager"]), ...getRecipientsForClient(next, approval.clientId)],
+            route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+          });
+        });
+      },
+      archiveApproval(approvalId) {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((entry) => entry.id === approvalId);
+          if (!approval) return;
+          const before = { archived: approval.archived, status: approval.status };
+          approval.archived = true;
+          approval.archivedAt = nowStamp();
+          approval.status = approval.status === "signed" ? "signed" : "archived";
+          helpers.addAudit({
+            action: "approval.archive",
+            entityType: "approval",
+            entityId: approval.id,
+            before,
+            after: { archived: approval.archived, status: approval.status },
+            siteId: approval.siteId,
+          });
+        });
+      },
+      scheduleCallback(clientId, slotId, approvalId, notes = "") {
+        mutate((next, helpers) => {
+          const slot = next.pmAvailability.find((entry) => entry.id === slotId && !entry.booked);
+          const client = next.clients.find((entry) => entry.id === clientId);
+          if (!slot || !client) return;
+          slot.booked = true;
+          slot.bookedForClientId = clientId;
+          slot.bookedForApprovalId = approvalId || null;
+          next.callbacks.unshift({
+            id: randomId("cb"),
+            clientId,
+            approvalId: approvalId || null,
+            pmUserId: slot.userId,
+            slotId: slot.id,
+            at: slot.at,
+            label: slot.label,
+            notes,
+            status: "booked",
+          });
+          helpers.addAudit({
+            action: "callback.booked",
+            entityType: "client",
+            entityId: clientId,
+            before: null,
+            after: { slotId: slot.id, approvalId },
+            siteId: next.sites.find((entry) => entry.clientId === clientId)?.id || next.session.siteId,
+          });
+          helpers.emit({
+            eventType: "approval.question",
+            title: `Client callback booked - ${client.name}`,
+            body: `Callback booked for ${slot.label}.`,
+            siteId: next.sites.find((entry) => entry.clientId === clientId)?.id || next.session.siteId,
+            entityType: "approval",
+            entityId: approvalId,
+            recipients: getRecipientsForRoles(next, ["Project Manager"]),
+            route: { kind: "internal", siteId: next.sites.find((entry) => entry.clientId === clientId)?.id || next.session.siteId, page: "clientflow", entityId: approvalId },
+          });
+        });
+      },
+      createInvoiceDraft(payload = {}) {
+        mutate((next, helpers) => {
+          const invoice = {
+            id: randomId("inv"),
+            companyId: payload.companyId || helpers.actor.companyId,
+            siteId: payload.siteId || next.session.siteId,
+            number: payload.number || `INV-${String(next.invoices.length + 1).padStart(3, "0")}`,
+            value: Number(payload.value || 0),
+            status: "draft",
+            period: payload.period || formatDate().slice(0, 7),
+            expectedPaymentDate: payload.expectedPaymentDate || addDays(formatDate(), 14),
+            lineItems: payload.lineItems || [],
+            notes: payload.notes || "",
+            createdBy: helpers.actor.id,
+          };
+          next.invoices.unshift(invoice);
+          helpers.addAudit({
+            action: "invoice.create",
+            entityType: "invoice",
+            entityId: invoice.id,
+            before: null,
+            after: invoice,
+            siteId: invoice.siteId,
+          });
+        });
+      },
+      updateInvoice(invoiceId, patch) {
+        mutate((next, helpers) => {
+          const invoice = next.invoices.find((entry) => entry.id === invoiceId);
+          if (!invoice) return;
+          const before = cloneState(invoice);
+          Object.assign(invoice, patch, { updatedAt: nowStamp() });
+          helpers.addAudit({
+            action: "invoice.update",
+            entityType: "invoice",
+            entityId: invoice.id,
+            before,
+            after: invoice,
+            siteId: invoice.siteId,
+          });
+        });
+      },
+      setInvoiceStatus(invoiceId, status) {
+        mutate((next, helpers) => {
+          const invoice = next.invoices.find((entry) => entry.id === invoiceId);
+          if (!invoice) return;
+          const before = { status: invoice.status };
+          invoice.status = status;
+          if (status === "paid" && !invoice.paidAt) {
+            invoice.paidAt = nowStamp();
+          }
+          helpers.addAudit({
+            action: "invoice.status",
+            entityType: "invoice",
+            entityId: invoice.id,
+            before,
+            after: { status: invoice.status },
+            siteId: invoice.siteId,
+          });
+        });
+      },
+      saveCalculatorResult(payload) {
+        mutate((next) => {
+          next.calculatorHistory.unshift({
+            id: randomId("calc"),
+            at: nowStamp(),
+            ...payload,
+          });
+          next.calculatorHistory = next.calculatorHistory.slice(0, 50);
+        });
+      },
+      saveCalculationToProcurement(payload) {
+        mutate((next, helpers) => {
+          const item = {
+            id: randomId("proc"),
+            siteId: next.session.siteId,
+            item: payload.item,
+            quantity: payload.quantity,
+            requestedBy: helpers.actor.id,
+            status: "requested",
+            date: formatDate(),
+            eta: payload.eta || "",
+            supplier: payload.supplier || "",
+            poNumber: "",
+            cost: Number(payload.cost || 0),
+            linkedApprovalId: null,
+            linkedRecords: [{ type: "calculator", id: payload.historyId || randomId("calc"), label: payload.calculator || "Calculator result", siteId: next.session.siteId }],
+          };
+          next.procurement.unshift(item);
+        });
+      },
+      async uploadTemplateFiles(fileList) {
+        const incoming = Array.from(fileList || []);
+        for (const file of incoming) {
+          const metadata = await uploadFile({
+            file,
+            uploadedBy: state.session.userId,
+            siteId: state.session.siteId,
+            entityType: "template",
+          });
+          setState((previous) => {
+            const next = cloneState(previous);
+            const templateParse = parseTemplate(metadata.extractedText || metadata.seedContent || "");
+            next.files.records.unshift(metadata);
+            next.contractTemplates.unshift({
+              id: randomId("tpl"),
+              type: "Variation",
+              name: metadata.name.replace(/\.[^.]+$/, ""),
+              version: "v1",
+              status: "active",
+              branding: "Uploaded template",
+              clauses: ["Use uploaded template body for contract generation."],
+              versionHistory: [{ id: randomId("tplh"), version: "v1", at: nowStamp(), by: actorName(getCurrentUser(next)) }],
+              mergeTokens: templateParse.tokens,
+              sourceFileId: metadata.id,
+              sourceContent: metadata.extractedText || metadata.seedContent || "",
+            });
+            return normaliseState(next);
+          });
+        }
+      },
+      createTemplate(payload) {
+        mutate((next, helpers) => {
+          next.contractTemplates.unshift({
+            id: randomId("tpl"),
+            type: payload.type || "Variation",
+            name: payload.name,
+            version: "v1",
+            status: "active",
+            branding: payload.branding || "Custom template",
+            clauses: payload.clauses || [],
+            versionHistory: [{ id: randomId("tplh"), version: "v1", at: nowStamp(), by: actorName(helpers.actor) }],
+            sourceContent: payload.sourceContent || "",
+            mergeTokens: parseTemplate(payload.sourceContent || "").tokens,
+            tags: payload.tags || [],
+          });
+        });
+      },
+      saveTemplateVersion(templateId, patch) {
+        mutate((next, helpers) => {
+          const template = next.contractTemplates.find((entry) => entry.id === templateId);
+          if (!template) return;
+          const nextVersion = `v${(Number(template.version?.replace(/[^\d]/g, "")) || 1) + 1}`;
+          Object.assign(template, patch, {
+            version: nextVersion,
+            mergeTokens: parseTemplate(patch.sourceContent || template.sourceContent || "").tokens,
+          });
+          template.versionHistory = [
+            { id: randomId("tplh"), version: nextVersion, at: nowStamp(), by: actorName(helpers.actor) },
+            ...(template.versionHistory || []),
+          ];
+        });
+      },
+      createClause(payload) {
+        mutate((next) => {
+          next.clauseLibrary.unshift({
+            id: randomId("cl"),
+            title: payload.title,
+            text: payload.text,
+            tags: payload.tags || [],
+            version: 1,
+          });
+        });
+      },
+      updateClause(clauseId, patch) {
+        mutate((next) => {
+          const clause = next.clauseLibrary.find((entry) => entry.id === clauseId);
+          if (!clause) return;
+          Object.assign(clause, patch, { version: Number(clause.version || 1) + 1 });
+        });
+      },
+      async uploadDocumentRevision(file, siteId = state.session.siteId) {
+        if (!file) return;
+        const metadata = await uploadFile({
+          file,
+          uploadedBy: state.session.userId,
+          siteId,
+          entityType: "document",
+        });
+        setState((previous) => {
+          const next = cloneState(previous);
+          const helpers = createHelpers(previous, next);
+          next.files.records.unshift(metadata);
+          const drawingMatch = metadata.name.match(/([A-Z]-\d{3,})\s*Rev\s*([A-Z0-9]+)/i);
+          const drawingNo = drawingMatch?.[1]?.toUpperCase() || metadata.parsedFields?.drawingNumber || metadata.name.replace(/\.[^.]+$/, "");
+          const revision = drawingMatch?.[2]?.toUpperCase() || metadata.parsedFields?.revision || "A";
+          const existing = next.documents.find((entry) => entry.siteId === siteId && (entry.drawingNumber === drawingNo || entry.title.toUpperCase().includes(drawingNo)));
+          const changeSummary = existing ? diffPlans(existing, metadata) : { summary: "Initial issue uploaded to SiteForge.", affectedZones: [], notes: [] };
+          const affectedTasks = existing?.linkedTaskIds || [];
+          const acknowledgementUsers = [...new Set(next.tasks.filter((task) => affectedTasks.includes(task.id)).map((task) => task.assigneeId).filter(Boolean))];
+          const document = {
+            id: randomId("doc"),
+            siteId,
+            title: metadata.name.replace(/\.[^.]+$/, ""),
+            drawingNumber: drawingNo,
+            rev: `Rev ${revision}`,
+            date: formatDate(),
+            category: metadata.classification === "Plan / Drawing" ? "Drawing" : metadata.classification,
+            clientVisible: false,
+            tags: [drawingNo, revision, metadata.classification],
+            linkedTaskIds: affectedTasks,
+            revisionHistory: [
+              ...(existing?.revisionHistory || []).map((entry) => ({ ...entry })),
+              ...(existing ? [{ rev: existing.rev, date: existing.date }] : []),
+              { rev: `Rev ${revision}`, date: formatDate() },
+            ],
+            archived: false,
+            fileId: metadata.id,
+            impactAnalysis: {
+              oldDocumentId: existing?.id || null,
+              summary: changeSummary.summary,
+              affectedTasks,
+              affectedRfis: existing?.impactAnalysis?.affectedRfis || [],
+              affectedTrades: [...new Set(next.tasks.filter((task) => affectedTasks.includes(task.id)).map((task) => task.trade))],
+              affectedZones: changeSummary.affectedZones || [],
+              notes: changeSummary.notes || [],
+              acknowledgementsRequired: acknowledgementUsers,
+              acknowledgedBy: [],
+            },
+          };
+
+          if (existing) {
+            existing.archived = true;
+            existing.supersededBy = document.id;
+          }
+          next.documents.unshift(document);
+          acknowledgementUsers.forEach((userId) => {
+            next.tasks.unshift({
+              id: randomId("tsk"),
+              siteId,
+              title: `Acknowledge ${drawingNo} ${document.rev}`,
+              description: changeSummary.summary,
+              trade: next.users.find((entry) => entry.id === userId)?.trade || "General",
+              companyId: next.users.find((entry) => entry.id === userId)?.companyId || "",
+              assigneeId: userId,
+              priority: "high",
+              status: "todo",
+              dueDate: formatDate(),
+              progress: 0,
+              crewRequired: 1,
+              mobileMaterials: [],
+              linkedRecords: [buildLink("document", document, siteId)],
+              clientVisible: false,
+            });
+          });
+          helpers.addAudit({
+            action: "document.revision-upload",
+            entityType: "document",
+            entityId: document.id,
+            before: existing,
+            after: document,
+            siteId,
+          });
+          return normaliseState(next);
+        });
+      },
+      async uploadPassportFiles(passportId, fileList) {
+        const incoming = Array.from(fileList || []);
+        for (const file of incoming) {
+          const metadata = await uploadFile({
+            file,
+            uploadedBy: state.session.userId,
+            siteId: state.session.siteId,
+            entityType: "passport",
+            entityId: passportId,
+          });
+          setState((previous) => {
+            const next = cloneState(previous);
+            const passport = next.passports.records.find((entry) => entry.id === passportId);
+            if (!passport) return previous;
+            next.files.records.unshift(metadata);
+            passport.docs.unshift({
+              id: randomId("pd"),
+              label: metadata.name,
+              status: "complete",
+              fileId: metadata.id,
+            });
+            if (["Insurance Certificate", "Licence / Ticket"].includes(metadata.classification)) {
+              const expiresOn = metadata.parsedFields?.expiry || addDays(formatDate(), 30);
+              next.passports.expiringTickets.unshift({
+                id: randomId("tick"),
+                fileId: metadata.id,
+                userId: passport.userId,
+                passportId: passport.id,
+                label: metadata.classification === "Insurance Certificate" ? "Insurance certificate" : metadata.parsedFields?.class || metadata.name,
+                expiresOn,
+                notifications: [],
+              });
+              passport.blockedReasons = (passport.blockedReasons || []).filter((reason) => !reason.toLowerCase().includes("expired"));
+            }
+            return normaliseState(next);
+          });
+        }
+      },
+      confirmFileField(fileId, key, value) {
+        mutate((next) => {
+          const file = next.files.records.find((entry) => entry.id === fileId);
+          if (!file) return;
+          file.parsedFields = { ...(file.parsedFields || {}), [key]: value };
+          file.confirmedFields = { ...(file.confirmedFields || {}), [key]: true };
+        });
+      },
+      async deleteFile(fileId) {
+        await removeFileEverywhere(fileId);
+        setState((previous) => {
+          const next = cloneState(previous);
+          next.files.records = next.files.records.filter((entry) => entry.id !== fileId);
+          next.documents.forEach((document) => {
+            if (document.fileId === fileId) document.fileId = null;
+          });
+          next.contractTemplates.forEach((template) => {
+            if (template.sourceFileId === fileId) template.sourceFileId = null;
+          });
+          next.passports.records.forEach((passport) => {
+            passport.docs = passport.docs.filter((doc) => doc.fileId !== fileId);
+          });
+          next.passports.expiringTickets = next.passports.expiringTickets.filter((ticket) => ticket.fileId !== fileId);
+          return normaliseState(next);
+        });
+      },
+      writeOffItem(approvalId, reason) {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((entry) => entry.id === approvalId);
+          if (!approval) return;
+          approval.writtenOff = true;
+          approval.writeOffReason = reason;
+          const site = next.sites.find((entry) => entry.id === approval.siteId);
+          if (site) {
+            site.forecastMargin = Math.max(0, site.forecastMargin - Math.round((approval.costImpact || 0) / 10000));
+          }
+          helpers.addAudit({
+            action: "AUTHORITY OVERRIDE · write-off",
+            entityType: "approval",
+            entityId: approval.id,
+            before: null,
+            after: { writtenOff: true, reason },
+            siteId: approval.siteId,
+          });
+        });
+      },
+      terminateSite(siteId, reason) {
+        mutate((next, helpers) => {
+          const site = next.sites.find((entry) => entry.id === siteId);
+          if (!site) return;
+          const before = { status: site.status };
+          site.status = "terminated";
+          site.terminationReason = reason;
+          helpers.addAudit({
+            action: "AUTHORITY OVERRIDE · terminate-site",
+            entityType: "site",
+            entityId: site.id,
+            before,
+            after: { status: site.status, reason },
+            siteId: site.id,
+          });
+        });
+      },
+      overrideBudget(siteId, budgetItemId, amount, reason) {
+        mutate((next, helpers) => {
+          const budget = next.siteBudgets.find((entry) => entry.siteId === siteId);
+          const item = budget?.items.find((entry) => entry.id === budgetItemId);
+          if (!item) return;
+          const before = { budget: item.budget };
+          item.budget = Number(amount);
+          item.overrideReason = reason;
+          helpers.addAudit({
+            action: "AUTHORITY OVERRIDE · budget-override",
+            entityType: "budget",
+            entityId: budgetItemId,
+            before,
+            after: { budget: item.budget, reason },
+            siteId,
+          });
+        });
+      },
+      exportAuditCsv() {
+        return exportAuditCsv(state.auditTrail);
+      },
+    }),
+    [mutate, navigate, setState, state],
+  );
+
+  const derived = useMemo(() => {
+    const currentUser = getCurrentUser(state);
+    const currentSite = getCurrentSite(state);
+    const currentClient = getCurrentClient(state);
+    const accessibleSiteIds = getAccessibleSiteIds(state, state.session.role, state.session.userId);
+    const accessibleSites = state.sites.filter((site) => accessibleSiteIds.includes(site.id));
+    const notificationsForUser = state.notifications.items.filter((item) => {
+      if (state.session.role === "Client") {
+        return item.recipientId === currentClient.id || item.recipientId === state.session.userId;
+      }
+      return item.recipientId === state.session.userId || item.recipientRole === state.session.role;
+    });
+    const unreadNotifications = notificationsForUser.filter((item) => !item.readAt).length;
+    const metrics = buildMetrics(state);
+    const openApprovals = state.approvals.filter((approval) => !["signed", "declined"].includes(approval.status));
+    const currentContract = state.contractPacks.find((pack) => pack.docId === state.ui.activeContractId) || state.contractPacks[0] || null;
+    const currentApproval = state.approvals.find((approval) => approval.id === state.ui.activeApprovalId) || state.approvals[0] || null;
+
+    return {
+      currentUser,
+      currentSite,
+      currentClient,
+      currentNow: state.demo?.simulatedNow || nowStamp(),
+      accessibleSites,
+      unreadNotifications,
+      notificationsForUser,
+      metrics,
+      openApprovals,
+      currentContract,
+      currentApproval,
+      auditVerification: verifyAuditChain(state.auditTrail),
+      search: (query) => buildSearchResults(state, query),
+      resolveRecord: (type, id) => findInCollection(state, type, id),
+      weeklyClientSummary: summariseDiary(state.diary.filter((entry) => entry.siteId === currentClient.siteId)),
+      boardInsight: boardInsights({
+        sites: state.sites,
+        approvals: openApprovals,
+        presence: state.presence.records,
+      }),
+      photoTimeline: [
+        ...state.files.records
+          .filter((file) => file.classification === "Photo / Site Image")
+          .map((file) => ({
+            id: file.id,
+            siteId: file.siteId,
+            label: file.name,
+            at: new Date(file.lastModified || Date.now()).toISOString(),
+            thumbnailDataUrl: file.thumbnailDataUrl,
+          })),
+        ...state.diary.flatMap((entry) =>
+          (entry.photos || []).map((photo, index) => ({
+            id: `${entry.id}-photo-${index}`,
+            siteId: entry.siteId,
+            label: photo,
+            at: `${entry.date}T12:00:00`,
+            thumbnailDataUrl: null,
+          })),
+        ),
+      ]
+        .sort((left, right) => new Date(right.at) - new Date(left.at))
+        .slice(0, 24),
+      expiringPassportQueue: state.passports.expiringTickets
+        .filter((ticket) => Number.isFinite(ticket.daysRemaining ?? daysUntil(ticket.expiresOn)))
+        .sort((left, right) => (left.daysRemaining ?? daysUntil(left.expiresOn)) - (right.daysRemaining ?? daysUntil(right.expiresOn))),
+      revisionSummary: (docId) => {
+        const document = state.documents.find((item) => item.id === docId);
+        const old = document?.impactAnalysis?.oldDocumentId ? state.documents.find((item) => item.id === document.impactAnalysis.oldDocumentId) : null;
+        return summariseRevision(old, document);
+      },
+    };
+  }, [state]);
+
+  const value = useMemo(() => ({ state, actions, derived }), [state, actions, derived]);
+
+  return createElement(SiteForgeContext.Provider, { value }, children);
+}
+
+function buildSourceAttachments(source) {
+  if (source.attachments?.length) {
+    return source.attachments;
+  }
+  if (source.photos?.length) {
+    return source.photos.map((photo) => ({
+      id: randomId("att"),
+      name: `${photo}.png`,
+      kind: "image",
+    }));
+  }
+  return [];
+}
+
+function buildApprovalTitle(source, approvalType) {
+  const base = source.title || source.item || source.topic || source.number || "site event";
+  if (approvalType === "Rain Day") {
+    return `Rain day claim for ${source.date || "weather event"}`;
+  }
+  if (approvalType === "Extension of Time") {
+    return `EOT request for ${base.toLowerCase()}`;
+  }
+  if (approvalType === "Selection Upgrade") {
+    return `Approve ${base.toLowerCase()}`;
+  }
+  if (approvalType === "Delay Notice") {
+    return `Delay notice - ${base.toLowerCase()}`;
+  }
+  return `Approve ${base.toLowerCase()}`;
+}
+
+function actorName(actor) {
+  return actor?.name || "SiteForge User";
+}
+
+export function useSiteForge() {
+  const context = useContext(SiteForgeContext);
+  if (!context) {
+    throw new Error("useSiteForge must be used inside SiteForgeProvider");
+  }
+  return context;
+}
