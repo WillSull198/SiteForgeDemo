@@ -29,6 +29,11 @@ export function usePersistentState(key, initialValue) {
   if (resolvedInitialValueRef.current === null) {
     resolvedInitialValueRef.current = typeof initialValue === "function" ? initialValue() : initialValue;
   }
+
+  const canUseIndexedDb =
+    typeof window !== "undefined" &&
+    typeof window.indexedDB !== "undefined";
+
   const [hydrated, setHydrated] = useState(false);
   const [value, setValue] = useState(() => {
     const resolvedInitialValue = resolvedInitialValueRef.current;
@@ -92,15 +97,31 @@ export function usePersistentState(key, initialValue) {
 
   useEffect(() => {
     if (!hydrated) return;
+    if (canUseIndexedDb) {
+      persistAppState(key, value)
+        .then(() => {
+          try {
+            window.localStorage.removeItem(key);
+          } catch (error) {
+            // Ignore cleanup failures in restricted contexts.
+          }
+        })
+        .catch(() => {
+          try {
+            window.localStorage.setItem(key, JSON.stringify(value));
+          } catch (error) {
+            console.warn(`Failed to persist state for ${key}`, error);
+          }
+        });
+      return;
+    }
+
     try {
       window.localStorage.setItem(key, JSON.stringify(value));
     } catch (error) {
       console.warn(`Failed to persist state for ${key}`, error);
     }
-    persistAppState(key, value).catch(() => {
-      // LocalStorage remains the fallback if IndexedDB is unavailable.
-    });
-  }, [hydrated, key, value]);
+  }, [canUseIndexedDb, hydrated, key, value]);
 
   return [value, setValue];
 }

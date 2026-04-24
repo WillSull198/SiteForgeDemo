@@ -316,6 +316,20 @@ function normaliseState(state) {
   const fallbackSiteId = accessibleSiteIds[0] || next.sites[0]?.id || "s1";
   const route = next.session.route || getDefaultRouteForRole(role, next);
 
+  next.demo = {
+    ...(next.demo || {}),
+    userControlled: Boolean(next.demo?.userControlled),
+    recentToasts: Array.isArray(next.demo?.recentToasts) ? next.demo.recentToasts.slice(0, 8) : [],
+    queuedEvents: Array.isArray(next.demo?.queuedEvents) ? next.demo.queuedEvents : [],
+  };
+  if (!next.demo.userControlled) {
+    next.demo.mode = false;
+  }
+
+  next.notifications = next.notifications || { items: [], eventLog: [] };
+  next.notifications.items = Array.isArray(next.notifications.items) ? next.notifications.items.slice(0, 180) : [];
+  next.notifications.eventLog = Array.isArray(next.notifications.eventLog) ? next.notifications.eventLog.slice(0, 240) : [];
+
   next.session.userId = userId;
   next.session.siteId = accessibleSiteIds.includes(next.session.siteId) ? next.session.siteId : fallbackSiteId;
 
@@ -1104,6 +1118,8 @@ function createHelpers(prev, next) {
       });
       next.notifications.items.unshift(...result.items);
       next.notifications.eventLog.unshift(...result.eventLog);
+      next.notifications.items = next.notifications.items.slice(0, 180);
+      next.notifications.eventLog = next.notifications.eventLog.slice(0, 240);
     },
     addMessage(threadType, threadId, participants, body, byUserId = actor.id) {
       let thread = next.messages.find((item) => item.threadType === threadType && item.threadId === threadId);
@@ -1497,7 +1513,8 @@ export function SiteForgeProvider({ children }) {
       },
       clearOldNotifications() {
         mutate((next) => {
-          next.notifications.items = next.notifications.items.slice(0, 80);
+          next.notifications.items = next.notifications.items.slice(0, 180);
+          next.notifications.eventLog = next.notifications.eventLog.slice(0, 240);
         });
       },
       saveTableViewState(tableKey, payload) {
@@ -1528,6 +1545,13 @@ export function SiteForgeProvider({ children }) {
       setDemoMode(enabled) {
         mutate((next) => {
           next.demo.mode = enabled;
+          next.demo.userControlled = true;
+          if (enabled && (!Array.isArray(next.demo.queuedEvents) || !next.demo.queuedEvents.length)) {
+            next.demo.queuedEvents = createInitialData().demo.queuedEvents;
+          }
+          if (!enabled) {
+            next.demo.recentToasts = [];
+          }
         });
       },
       advanceSimulatedTime(days = 1) {

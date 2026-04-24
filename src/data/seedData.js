@@ -2774,12 +2774,13 @@ export function createInitialData() {
       saved: {},
     },
     demo: {
-      mode: true,
+      mode: false,
       simulatedNow: "2026-04-22 09:15",
       queuedEvents: makeDemoFeed(),
       recentToasts: [],
       demoScriptMode: false,
       demoScriptStep: 0,
+      userControlled: false,
     },
     callbacks: [],
     pmAvailability: makePmAvailability(),
@@ -2859,6 +2860,10 @@ export function migrateLegacyState(rawState = {}) {
     demo: {
       ...seed.demo,
       ...(rawState.demo || {}),
+      mode: rawState.demo?.userControlled ? Boolean(rawState.demo?.mode) : false,
+      userControlled: Boolean(rawState.demo?.userControlled),
+      queuedEvents: Array.isArray(rawState.demo?.queuedEvents) && rawState.demo.queuedEvents.length ? rawState.demo.queuedEvents : seed.demo.queuedEvents,
+      recentToasts: Array.isArray(rawState.demo?.recentToasts) ? rawState.demo.recentToasts.slice(0, 8) : [],
     },
     clientSentiment: { ...seed.clientSentiment, ...(rawState.clientSentiment || {}) },
     buildxact: {
