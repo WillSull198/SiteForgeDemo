@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSiteForge } from "../services/siteforgeStore";
 import { exportCsv } from "../services/pdfService";
 import { Button, Badge } from "./ui";
@@ -47,6 +47,8 @@ export default function DataTable({
   defaultSort = [],
 }) {
   const { state, actions } = useSiteForge();
+  const actionsRef = useRef(actions);
+  const lastSavedRef = useRef("");
   const savedState = state.tableViews?.state?.[storageKey] || {};
   const [search, setSearch] = useState(savedState.search || "");
   const [sorts, setSorts] = useState(savedState.sorts || defaultSort);
@@ -62,14 +64,27 @@ export default function DataTable({
   const savedViews = state.tableViews?.saved?.[storageKey] || [];
 
   useEffect(() => {
-    actions.saveTableViewState?.(storageKey, {
+    actionsRef.current = actions;
+  }, [actions]);
+
+  useEffect(() => {
+    const payload = {
       search,
       sorts,
       filters,
       visibleColumns,
       pageSize,
-    });
-  }, [actions, filters, pageSize, search, sorts, storageKey, visibleColumns]);
+    };
+    const serialized = JSON.stringify(payload);
+    if (lastSavedRef.current === serialized) return undefined;
+
+    const timer = window.setTimeout(() => {
+      lastSavedRef.current = serialized;
+      actionsRef.current.saveTableViewState?.(storageKey, payload);
+    }, 300);
+
+    return () => window.clearTimeout(timer);
+  }, [filters, pageSize, search, sorts, storageKey, visibleColumns]);
 
   useEffect(() => {
     setPage(1);

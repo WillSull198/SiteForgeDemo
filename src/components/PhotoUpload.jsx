@@ -18,12 +18,33 @@ async function blobToDataUrl(blob) {
 export async function compressImage(file) {
   const bitmap = await createImageBitmap(file);
   const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
   const max = 1200;
   const scale = Math.min(max / bitmap.width, max / bitmap.height, 1);
   canvas.width = Math.round(bitmap.width * scale);
   canvas.height = Math.round(bitmap.height * scale);
-  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+
+  const toBlob = (quality) => new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+  let quality = 0.82;
+  let blob = await toBlob(quality);
+  while (blob && blob.size > 500 * 1024 && quality > 0.54) {
+    quality -= 0.08;
+    blob = await toBlob(quality);
+  }
+
+  if (blob && blob.size > 500 * 1024) {
+    const shrink = Math.max(0.55, Math.sqrt((500 * 1024) / blob.size));
+    const nextWidth = Math.max(1, Math.round(canvas.width * shrink));
+    const nextHeight = Math.max(1, Math.round(canvas.height * shrink));
+    canvas.width = nextWidth;
+    canvas.height = nextHeight;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, nextWidth, nextHeight);
+    blob = await toBlob(0.72);
+  }
+
+  bitmap.close?.();
+  return blob;
 }
 
 export default function PhotoUpload({ onPhotosAdded, existingPhotos = [], onRemove, parentType = "record", parentId = null }) {
@@ -31,15 +52,18 @@ export default function PhotoUpload({ onPhotosAdded, existingPhotos = [], onRemo
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
   const [lightbox, setLightbox] = useState(null);
+  const [error, setError] = useState("");
 
   const handleFiles = async (files) => {
     const incoming = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
     if (!incoming.length) return;
     setBusy(true);
+    setError("");
     try {
       const records = [];
       for (const file of incoming) {
         const compressed = await compressImage(file);
+        if (!compressed) throw new Error(`Could not process ${file.name}.`);
         const dataUrl = await blobToDataUrl(compressed);
         const record = await put("photos", {
           id: crypto.randomUUID(),
@@ -55,6 +79,8 @@ export default function PhotoUpload({ onPhotosAdded, existingPhotos = [], onRemo
         records.push(record);
       }
       onPhotosAdded?.(records);
+    } catch (err) {
+      setError(err?.message || "Photo upload failed. Please try a smaller image.");
     } finally {
       setBusy(false);
       if (inputRef.current) inputRef.current.value = "";
@@ -106,6 +132,7 @@ export default function PhotoUpload({ onPhotosAdded, existingPhotos = [], onRemo
           <span>{busy ? "Processing..." : "Add Photo"}</span>
         </label>
       </div>
+      {error ? <div className="form-error">{error}</div> : null}
       {lightbox ? (
         <div className="photo-lightbox" onClick={() => setLightbox(null)}>
           <button className="photo-lightbox-close" type="button" onClick={() => setLightbox(null)}>

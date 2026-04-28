@@ -26,6 +26,7 @@ function mergeWithDefaults(savedValue, defaultValue) {
 
 export function usePersistentState(key, initialValue) {
   const resolvedInitialValueRef = useRef(null);
+  const persistTimerRef = useRef(null);
   if (resolvedInitialValueRef.current === null) {
     resolvedInitialValueRef.current = typeof initialValue === "function" ? initialValue() : initialValue;
   }
@@ -97,30 +98,42 @@ export function usePersistentState(key, initialValue) {
 
   useEffect(() => {
     if (!hydrated) return;
-    if (canUseIndexedDb) {
-      persistAppState(key, value)
-        .then(() => {
-          try {
-            window.localStorage.removeItem(key);
-          } catch (error) {
-            // Ignore cleanup failures in restricted contexts.
-          }
-        })
-        .catch(() => {
-          try {
-            window.localStorage.setItem(key, JSON.stringify(value));
-          } catch (error) {
-            console.warn(`Failed to persist state for ${key}`, error);
-          }
-        });
-      return;
+    if (persistTimerRef.current) {
+      window.clearTimeout(persistTimerRef.current);
     }
 
-    try {
-      window.localStorage.setItem(key, JSON.stringify(value));
-    } catch (error) {
-      console.warn(`Failed to persist state for ${key}`, error);
-    }
+    persistTimerRef.current = window.setTimeout(() => {
+      if (canUseIndexedDb) {
+        persistAppState(key, value)
+          .then(() => {
+            try {
+              window.localStorage.removeItem(key);
+            } catch (error) {
+              // Ignore cleanup failures in restricted contexts.
+            }
+          })
+          .catch(() => {
+            try {
+              window.localStorage.setItem(key, JSON.stringify(value));
+            } catch (error) {
+              console.warn(`Failed to persist state for ${key}`, error);
+            }
+          });
+        return;
+      }
+
+      try {
+        window.localStorage.setItem(key, JSON.stringify(value));
+      } catch (error) {
+        console.warn(`Failed to persist state for ${key}`, error);
+      }
+    }, 350);
+
+    return () => {
+      if (persistTimerRef.current) {
+        window.clearTimeout(persistTimerRef.current);
+      }
+    };
   }, [canUseIndexedDb, hydrated, key, value]);
 
   return [value, setValue];

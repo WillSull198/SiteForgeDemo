@@ -24,6 +24,7 @@ export default function PDFViewer({ fileMeta, onClose }) {
 
   useEffect(() => {
     let cancelled = false;
+    let loadedPdf = null;
     async function load() {
       setLoading(true);
       setError("");
@@ -33,6 +34,11 @@ export default function PDFViewer({ fileMeta, onClose }) {
         const pdfjs = await loadPdfJs();
         const data = await blob.arrayBuffer();
         const pdf = await pdfjs.getDocument({ data }).promise;
+        loadedPdf = pdf;
+        if (cancelled) {
+          pdf.destroy?.();
+          return;
+        }
         if (!cancelled) {
           setPdfDoc(pdf);
           setPageNum(1);
@@ -46,6 +52,7 @@ export default function PDFViewer({ fileMeta, onClose }) {
     load();
     return () => {
       cancelled = true;
+      loadedPdf?.destroy?.();
     };
   }, [fileMeta]);
 
@@ -53,14 +60,21 @@ export default function PDFViewer({ fileMeta, onClose }) {
     if (!pdfDoc || !canvasRef.current) return;
     let cancelled = false;
     async function renderPage() {
-      const page = await pdfDoc.getPage(pageNum);
-      if (cancelled) return;
-      const viewport = page.getViewport({ scale });
-      const canvas = canvasRef.current;
-      const context = canvas.getContext("2d");
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      await page.render({ canvasContext: context, viewport }).promise;
+      try {
+        const page = await pdfDoc.getPage(pageNum);
+        if (cancelled || !canvasRef.current) return;
+        const viewport = page.getViewport({ scale });
+        const canvas = canvasRef.current;
+        const context = canvas.getContext("2d");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const task = page.render({ canvasContext: context, viewport });
+        await task.promise;
+      } catch (renderError) {
+        if (!cancelled) {
+          setError(renderError.message || "Unable to render this PDF page.");
+        }
+      }
     }
     renderPage();
     return () => {

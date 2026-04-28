@@ -150,6 +150,7 @@ function Shell() {
   const role = state.session.role;
   const user = derived.currentUser;
   const goPrefixRef = useRef("");
+  const goPrefixTimerRef = useRef(null);
   const [showSplash, setShowSplash] = useState(() => {
     try {
       return !window.sessionStorage.getItem("siteforge-splash-seen");
@@ -191,8 +192,10 @@ function Shell() {
       }
       if (!isMeta && event.key.toLowerCase() === "g") {
         goPrefixRef.current = "g";
-        window.setTimeout(() => {
+        if (goPrefixTimerRef.current) window.clearTimeout(goPrefixTimerRef.current);
+        goPrefixTimerRef.current = window.setTimeout(() => {
           goPrefixRef.current = "";
+          goPrefixTimerRef.current = null;
         }, 900);
       } else if (!isMeta && goPrefixRef.current === "g") {
         const shortcuts = {
@@ -218,7 +221,13 @@ function Shell() {
       }
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      if (goPrefixTimerRef.current) {
+        window.clearTimeout(goPrefixTimerRef.current);
+        goPrefixTimerRef.current = null;
+      }
+    };
   }, [actions, role, state.demo.mode, state.session.siteId]);
 
   useEffect(() => {

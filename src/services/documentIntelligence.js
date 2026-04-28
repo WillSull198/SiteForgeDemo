@@ -133,9 +133,11 @@ function loadScriptOnce(key, src) {
     }
     const existing = document.querySelector(`script[data-siteforge-script="${key}"]`);
     if (existing) {
-      existing.addEventListener("load", () => resolve(window));
-      existing.addEventListener("error", reject);
       if (existing.dataset.ready === "true") resolve(window);
+      else {
+        existing.addEventListener("load", () => resolve(window), { once: true });
+        existing.addEventListener("error", reject, { once: true });
+      }
       return;
     }
     const script = document.createElement("script");

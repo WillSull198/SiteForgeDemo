@@ -329,6 +329,14 @@ function normaliseState(state) {
   next.notifications = next.notifications || { items: [], eventLog: [] };
   next.notifications.items = Array.isArray(next.notifications.items) ? next.notifications.items.slice(0, 180) : [];
   next.notifications.eventLog = Array.isArray(next.notifications.eventLog) ? next.notifications.eventLog.slice(0, 240) : [];
+  next.auditTrail = Array.isArray(next.auditTrail) ? next.auditTrail.slice(0, 600) : [];
+  next.projectLogs = Array.isArray(next.projectLogs) ? next.projectLogs.slice(0, 240) : [];
+  next.messages = Array.isArray(next.messages)
+    ? next.messages.slice(0, 120).map((thread) => ({
+        ...thread,
+        messages: Array.isArray(thread.messages) ? thread.messages.slice(-80) : [],
+      }))
+    : [];
 
   next.session.userId = userId;
   next.session.siteId = accessibleSiteIds.includes(next.session.siteId) ? next.session.siteId : fallbackSiteId;
@@ -670,6 +678,7 @@ function appendProjectLog(state, siteId, title, body) {
     title,
     body,
   });
+  state.projectLogs = state.projectLogs.slice(0, 240);
 }
 
 function queueBuildxactSync(state, type, reference, siteId, payloadCurrent, payloadPrevious = null) {
@@ -1101,7 +1110,7 @@ function createHelpers(prev, next) {
         before,
         after,
         siteId,
-      });
+      }).slice(0, 600);
     },
     emit({ eventType, title, body, siteId = null, entityType = null, entityId = null, recipients = [], route = null }) {
       const result = dispatchNotificationEvent({
@@ -1120,6 +1129,14 @@ function createHelpers(prev, next) {
       next.notifications.eventLog.unshift(...result.eventLog);
       next.notifications.items = next.notifications.items.slice(0, 180);
       next.notifications.eventLog = next.notifications.eventLog.slice(0, 240);
+      const urgent = result.items.find((item) => ["high", "critical"].includes(item.severity));
+      if (urgent) {
+        pushToast(next, {
+          tone: urgent.severity === "critical" ? "critical" : "high",
+          title: urgent.title,
+          body: urgent.body,
+        });
+      }
     },
     addMessage(threadType, threadId, participants, body, byUserId = actor.id) {
       let thread = next.messages.find((item) => item.threadType === threadType && item.threadId === threadId);
@@ -2347,6 +2364,21 @@ export function SiteForgeProvider({ children }) {
             ],
             route: { kind: "internal", siteId: approval?.siteId || next.session.siteId, page: "contracts", entityId: contractPack.docId },
           });
+          if (approval) {
+            helpers.emit({
+              eventType: "approval.signed",
+              title: `Approval signed - ${approval.title}`,
+              body: `${approval.number || approval.id} is fully signed and its contract pack is archived.`,
+              siteId: approval.siteId,
+              entityType: "approval",
+              entityId: approval.id,
+              recipients: [
+                ...getRecipientsForRoles(next, ["Supervisor", "Project Manager", "Contract Admin", "Director"]),
+                ...getRecipientsForClient(next, approval.clientId),
+              ],
+              route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+            });
+          }
         });
       },
       archiveContract(contractId) {
