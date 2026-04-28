@@ -4,7 +4,7 @@ import { APP_CONFIG } from "../data/seedData";
 import { useSiteForge } from "../services/siteforgeStore";
 import { exportElementToPdf } from "../services/pdfService";
 import { Icons, renderIcon } from "../components/icons";
-import { Button, Modal } from "../components/ui";
+import { Badge, Button, Modal } from "../components/ui";
 
 const PORTAL_TABS = [
   { value: "home", label: "Home" },
@@ -28,7 +28,9 @@ export default function ClientPortalPage() {
   const [decision, setDecision] = useState(null);
   const [note, setNote] = useState("");
   const [typedName, setTypedName] = useState(client?.primaryContact || "");
+  const [signatureAck, setSignatureAck] = useState(false);
   const [callbackSlotId, setCallbackSlotId] = useState("");
+  const builder = state.settings?.company || state.company || APP_CONFIG.builder;
 
   const currentPage = route.page || "home";
   const selectedApproval = approvals.find((approval) => approval.id === route.entityId) || approvals[0] || null;
@@ -52,9 +54,19 @@ export default function ClientPortalPage() {
       setCallbackSlotId("");
       return;
     }
-    actions.respondToApproval(selectedApproval.id, decision, note, typedName);
+    if (decision === "approve") {
+      if (!typedName.trim() || !signatureAck) return;
+      const expected = (client.primaryContact || "").trim().toLowerCase();
+      if (expected && typedName.trim().toLowerCase() !== expected) {
+        setNote((current) => current || `Signature recorded as ${typedName.trim()}; expected portal contact is ${client.primaryContact}.`);
+      }
+      actions.approveAndSignApproval(selectedApproval.id, typedName.trim(), note);
+    } else {
+      actions.respondToApproval(selectedApproval.id, decision, note, typedName);
+    }
     setDecision(null);
     setNote("");
+    setSignatureAck(false);
   };
 
   const signedPacks = contracts.filter((pack) => pack.status === "signed");
@@ -82,7 +94,10 @@ export default function ClientPortalPage() {
     <div className="client-shell">
       <div className="client-topbar">
         <div>
-          <div className="client-brand">SiteForge Client Portal</div>
+          <div className="client-brand">
+            {builder.logoDataUrl ? <img alt={`${builder.name || "Builder"} logo`} src={builder.logoDataUrl} className="client-brand-logo" /> : null}
+            {builder.name || APP_CONFIG.builder.name}
+          </div>
           <div className="client-project">{site.name}</div>
         </div>
         <div className="fx" style={{ gap: 10, alignItems: "center" }}>
@@ -561,9 +576,15 @@ export default function ClientPortalPage() {
 
       <Modal open={Boolean(decision)} close={() => setDecision(null)} title="Record your decision">
         <div className="ff">
-          <label>Typed name</label>
+          <label>{decision === "approve" ? "Type your full name to sign" : "Typed name"}</label>
           <input value={typedName} onChange={(event) => setTypedName(event.target.value)} />
         </div>
+        {decision === "approve" ? (
+          <label className="checkline" style={{ marginBottom: 12 }}>
+            <input type="checkbox" checked={signatureAck} onChange={(event) => setSignatureAck(event.target.checked)} />
+            <span>I have read and agree to the terms of this variation and authorise electronic signature under the Electronic Transactions Act 1999 (Cth).</span>
+          </label>
+        ) : null}
         <div className="ff">
           <label>
             {decision === "decline"
@@ -593,7 +614,7 @@ export default function ClientPortalPage() {
         ) : null}
         <div className="fa">
           <Button onClick={() => setDecision(null)}>Cancel</Button>
-          <Button tone="bt-p" onClick={submitDecision}>
+          <Button tone="bt-p" onClick={submitDecision} disabled={decision === "approve" && (!typedName.trim() || !signatureAck)}>
             Confirm
           </Button>
         </div>

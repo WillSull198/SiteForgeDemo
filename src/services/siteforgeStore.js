@@ -95,7 +95,15 @@ const cloneState = (value) => {
 };
 
 const randomId = (prefix) => `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
-const uuid = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : randomId("uuid"));
+const uuid = () => {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (char) =>
+      (Number(char) ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (Number(char) / 4)))).toString(16),
+    );
+  }
+  return randomId("uuid");
+};
 
 const getRuntimeNow = () => {
   if (typeof window !== "undefined" && window.__siteforgeNow) {
@@ -278,6 +286,12 @@ function getDefaultRouteForRole(role, state) {
   if (role === "Client") {
     const clientUser = state?.users?.find((user) => user.role === "Client" && user.id === DEFAULT_ROLE_USERS.Client);
     base.clientId = clientUser?.clientId || "c1";
+  }
+  if (base.kind === "internal") {
+    const activeProjectId = state?.settings?.activeProjectId;
+    if (activeProjectId && state?.sites?.some((site) => site.id === activeProjectId)) {
+      base.siteId = activeProjectId;
+    }
   }
   return base;
 }
@@ -701,6 +715,16 @@ function queueBuildxactSync(state, type, reference, siteId, payloadCurrent, payl
   return queueItem;
 }
 
+function nextScopedNumber(state, collectionName, siteId, prefix, field = "number") {
+  const collection = Array.isArray(state[collectionName]) ? state[collectionName] : [];
+  const matches = collection.filter((entry) => entry.siteId === siteId && String(entry[field] || "").startsWith(`${prefix}-`));
+  const highest = matches.reduce((max, entry) => {
+    const value = Number(String(entry[field] || "").replace(`${prefix}-`, ""));
+    return Number.isFinite(value) ? Math.max(max, value) : max;
+  }, 0);
+  return `${prefix}-${String(highest + 1).padStart(3, "0")}`;
+}
+
 function ensureVariationForApproval(state, approval) {
   const existingVariation = state.variations.find((variation) => variation.clientApprovalId === approval.id);
   if (existingVariation || !COMMERCIAL_APPROVALS.has(approval.type)) {
@@ -710,7 +734,7 @@ function ensureVariationForApproval(state, approval) {
   const variation = {
     id: randomId("var"),
     siteId: approval.siteId,
-    number: `VO-${String(state.variations.length + 1).padStart(3, "0")}`,
+    number: nextScopedNumber(state, "variations", approval.siteId, "VO"),
     title: approval.title.replace(/^Approve\s+/i, "").replace(/^Approve\s+/i, ""),
     sourceType: approval.sourceType,
     sourceId: approval.sourceId,
@@ -973,6 +997,128 @@ function createContractPackForApproval(next, approval, helpers, { autoRelease = 
     `Contract pack drafted - ${approval.title}`,
     `Contract draft ${contractPack.docId} generated automatically from client approval.`,
   );
+  return contractPack;
+}
+
+function finaliseClientSignedContract(next, helpers, contractPack, approval, signerName) {
+  if (!contractPack || contractPack.status === "signed") return contractPack;
+  const client = next.clients.find((item) => item.id === approval?.clientId);
+  const signedPack = signContract(contractPack, "client", {
+    name: signerName || client?.primaryContact || "Client",
+    role: "Client",
+    ip: "203.0.113.51",
+  });
+  Object.assign(contractPack, signedPack);
+  if (approval) {
+    approval.status = "signed";
+    helpers.appendTimeline(approval, {
+      type: "signed",
+      actor: signerName || client?.primaryContact || "Client",
+      role: "Client",
+      text: "Contract fully executed.",
+    });
+  }
+  updateSentiment(next, approval?.clientId, 10);
+  helpers.addAudit({
+    action: "contract.client-sign",
+    entityType: "contractPack",
+    entityId: contractPack.docId,
+    before: null,
+    after: buildContractSummary(contractPack),
+    siteId: contractPack.siteId,
+  });
+  if (approval) {
+    helpers.applyBudgetImpact(approval, contractPack);
+    helpers.applyScheduleImpact(approval);
+    if (!next.documents.some((document) => document.contractPackId === contractPack.docId)) {
+      next.documents.unshift({
+        id: randomId("doc"),
+        siteId: approval.siteId,
+        title: `${contractPack.docId.toUpperCase()} executed contract pack`,
+        drawingNumber: contractPack.docId.toUpperCase(),
+        rev: "Executed",
+        date: formatDate(),
+        category: "Contract Pack",
+        clientVisible: true,
+        tags: ["contract", "executed", approval.type],
+        linkedTaskIds: [],
+        revisionHistory: [{ rev: "Executed", date: formatDate(), by: signerName || client?.primaryContact || "Client" }],
+        archived: false,
+        fileId: null,
+        contractPackId: contractPack.docId,
+        impactAnalysis: {
+          summary: `Fully executed ${approval.type.toLowerCase()} contract archived from ClientFlow.`,
+          affectedTasks: [],
+          affectedRfis: [],
+          affectedTrades: [],
+          affectedZones: [],
+          notes: [`Signed by ${signerName || client?.primaryContact || "Client"} at ${contractPack.signatures.client?.signedAt}.`],
+          acknowledgementsRequired: [],
+          acknowledgedBy: [],
+        },
+      });
+    }
+    helpers.projectLog(
+      approval.siteId,
+      `Contract executed - ${approval.title}`,
+      `Contract pack ${contractPack.docId} fully executed and archived for ${client?.name || "client"}.`,
+    );
+    helpers.queueSync(
+      "contractPack",
+      contractPack.docId,
+      approval.siteId,
+      {
+        approvalId: approval.id,
+        siteCode: next.sites.find((site) => site.id === approval.siteId)?.code,
+        status: contractPack.status,
+        signedAt: contractPack.signatures.client?.signedAt,
+      },
+      null,
+    );
+    const linkedVariation = next.variations.find((variation) => variation.clientApprovalId === approval.id);
+    if (linkedVariation) {
+      helpers.queueSync(
+        "variation",
+        linkedVariation.number,
+        linkedVariation.siteId,
+        {
+          variationNumber: linkedVariation.number,
+          siteCode: next.sites.find((site) => site.id === linkedVariation.siteId)?.code,
+          status: "signed",
+          value: linkedVariation.value,
+        },
+        null,
+      );
+    }
+  }
+  helpers.emit({
+    eventType: "contract.client-signed",
+    title: `Contract fully executed - ${approval?.title || contractPack.docId}`,
+    body: `${contractPack.docId} is now signed and archived.`,
+    siteId: approval?.siteId,
+    entityType: "contractPack",
+    entityId: contractPack.docId,
+    recipients: [
+      ...getRecipientsForRoles(next, ["Supervisor", "Project Manager", "Contract Admin", "Director"]),
+      ...getRecipientsForClient(next, approval?.clientId),
+    ],
+    route: { kind: "internal", siteId: approval?.siteId || next.session.siteId, page: "contracts", entityId: contractPack.docId },
+  });
+  if (approval) {
+    helpers.emit({
+      eventType: "approval.signed",
+      title: `Approval signed - ${approval.title}`,
+      body: `${approval.number || approval.id} is fully signed and its contract pack is archived.`,
+      siteId: approval.siteId,
+      entityType: "approval",
+      entityId: approval.id,
+      recipients: [
+        ...getRecipientsForRoles(next, ["Supervisor", "Project Manager", "Contract Admin", "Director"]),
+        ...getRecipientsForClient(next, approval.clientId),
+      ],
+      route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+    });
+  }
   return contractPack;
 }
 
@@ -1313,15 +1459,20 @@ export function SiteForgeProvider({ children }) {
       setRole(role) {
         setState((previous) => {
           const next = cloneState(previous);
+          const defaultRoute = getDefaultRouteForRole(role, next);
           next.session.role = role;
           next.session.userId = DEFAULT_ROLE_USERS[role] || DEFAULT_ROLE_USERS.Supervisor;
-          next.session.route = getDefaultRouteForRole(role, next);
-          next.session.siteId = next.users.find((user) => user.id === next.session.userId)?.siteIds?.[0] || next.sites[0]?.id;
+          next.session.route = defaultRoute;
+          next.session.siteId = defaultRoute.siteId || next.users.find((user) => user.id === next.session.userId)?.siteIds?.[0] || next.sites[0]?.id;
           return normaliseState(next);
         });
         window.location.hash = buildHash(getDefaultRouteForRole(role, state));
       },
       setSite(siteId) {
+        mutate((next) => {
+          next.settings = next.settings || {};
+          next.settings.activeProjectId = siteId;
+        });
         navigate({ kind: "internal", siteId, page: state.session.route.page || "dash", entityId: null });
       },
       createProject(payload) {
@@ -1411,6 +1562,8 @@ export function SiteForgeProvider({ children }) {
             title: "Project created",
             body: `${payload.projectName} was created with ${payload.contractType || "HIA"} contract defaults.`,
           });
+          next.settings = next.settings || {};
+          next.settings.activeProjectId = siteId;
           next.session.siteId = siteId;
           next.session.route = { kind: "internal", siteId, page: "dash", entityId: null };
           helpers.addAudit({
@@ -1708,6 +1861,7 @@ export function SiteForgeProvider({ children }) {
           const portalToken = uuid();
           const approval = {
             id: randomId("ap"),
+            number: nextScopedNumber(next, "approvals", siteId, "CF"),
             siteId,
             clientId: client.id,
             type: approvalType,
@@ -2262,123 +2416,71 @@ export function SiteForgeProvider({ children }) {
           const contractPack = next.contractPacks.find((item) => item.docId === contractId);
           if (!contractPack) return;
           const approval = next.approvals.find((item) => item.id === contractPack.approvalId);
-          const client = next.clients.find((item) => item.id === approval?.clientId);
-          const signedPack = signContract(contractPack, "client", {
-            name: name || client?.primaryContact || "Client",
-            role: "Client",
-            ip: "203.0.113.51",
-          });
-          Object.assign(contractPack, signedPack);
-          if (approval) {
-            approval.status = "signed";
-            helpers.appendTimeline(approval, {
-              type: "signed",
-              actor: name || client?.primaryContact || "Client",
+          finaliseClientSignedContract(next, helpers, contractPack, approval, name);
+        });
+      },
+      approveAndSignApproval(approvalId, signerName, note = "") {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval) return;
+          const client = next.clients.find((item) => item.id === approval.clientId);
+          const before = { status: approval.status, contractPackId: approval.contractPackId };
+          if (!["approved", "contract-drafted", "contract-awaiting-client", "signed"].includes(approval.status)) {
+            approval.status = "approved";
+            approval.messageThread = approval.messageThread || [];
+            approval.messageThread.push({
+              id: randomId("apm"),
+              by: signerName || client?.primaryContact || "Client",
               role: "Client",
-              text: "Contract fully executed.",
+              at: nowStamp(),
+              body: note || "Approved and signed electronically.",
             });
-          }
-          updateSentiment(next, approval?.clientId, 10);
-          helpers.addAudit({
-            action: "contract.client-sign",
-            entityType: "contractPack",
-            entityId: contractPack.docId,
-            before: null,
-            after: buildContractSummary(contractPack),
-            siteId: contractPack.siteId,
-          });
-          if (approval) {
-            helpers.applyBudgetImpact(approval, contractPack);
-            helpers.applyScheduleImpact(approval);
-            if (!next.documents.some((document) => document.contractPackId === contractPack.docId)) {
-              next.documents.unshift({
-                id: randomId("doc"),
-                siteId: approval.siteId,
-                title: `${contractPack.docId.toUpperCase()} executed contract pack`,
-                drawingNumber: contractPack.docId.toUpperCase(),
-                rev: "Executed",
-                date: formatDate(),
-                category: "Contract Pack",
-                clientVisible: true,
-                tags: ["contract", "executed", approval.type],
-                linkedTaskIds: [],
-                revisionHistory: [{ rev: "Executed", date: formatDate(), by: name || client?.primaryContact || "Client" }],
-                archived: false,
-                fileId: null,
-                contractPackId: contractPack.docId,
-                impactAnalysis: {
-                  summary: `Fully executed ${approval.type.toLowerCase()} contract archived from ClientFlow.`,
-                  affectedTasks: [],
-                  affectedRfis: [],
-                  affectedTrades: [],
-                  affectedZones: [],
-                  notes: [`Signed by ${name || client?.primaryContact || "Client"} at ${contractPack.signatures.client?.signedAt}.`],
-                  acknowledgementsRequired: [],
-                  acknowledgedBy: [],
-                },
-              });
-            }
-            helpers.projectLog(
-              approval.siteId,
-              `Contract executed - ${approval.title}`,
-              `Contract pack ${contractPack.docId} fully executed and archived for ${client?.name || "client"}.`,
-            );
-            helpers.queueSync(
-              "contractPack",
-              contractPack.docId,
-              approval.siteId,
-              {
-                approvalId: approval.id,
-                siteCode: next.sites.find((site) => site.id === approval.siteId)?.code,
-                status: contractPack.status,
-                signedAt: contractPack.signatures.client?.signedAt,
-              },
-              null,
-            );
-            const linkedVariation = next.variations.find((variation) => variation.clientApprovalId === approval.id);
-            if (linkedVariation) {
-              helpers.queueSync(
-                "variation",
-                linkedVariation.number,
-                linkedVariation.siteId,
-                {
-                  variationNumber: linkedVariation.number,
-                  siteCode: next.sites.find((site) => site.id === linkedVariation.siteId)?.code,
-                  status: "signed",
-                  value: linkedVariation.value,
-                },
-                null,
-              );
-            }
-          }
-          helpers.emit({
-            eventType: "contract.client-signed",
-            title: `Contract fully executed - ${approval?.title || contractId}`,
-            body: `${contractPack.docId} is now signed and archived.`,
-            siteId: approval?.siteId,
-            entityType: "contractPack",
-            entityId: contractPack.docId,
-            recipients: [
-              ...getRecipientsForRoles(next, ["Supervisor", "Project Manager", "Contract Admin", "Director"]),
-              ...getRecipientsForClient(next, approval?.clientId),
-            ],
-            route: { kind: "internal", siteId: approval?.siteId || next.session.siteId, page: "contracts", entityId: contractPack.docId },
-          });
-          if (approval) {
+            helpers.appendTimeline(approval, {
+              type: "approved",
+              actor: signerName || client?.primaryContact || "Client",
+              role: "Client",
+              text: note || "Client approved the request.",
+            });
+            helpers.addAudit({
+              action: "approval.approved",
+              entityType: "approval",
+              entityId: approval.id,
+              before,
+              after: { status: approval.status },
+              siteId: approval.siteId,
+            });
             helpers.emit({
-              eventType: "approval.signed",
-              title: `Approval signed - ${approval.title}`,
-              body: `${approval.number || approval.id} is fully signed and its contract pack is archived.`,
+              eventType: "approval.approved",
+              title: `Client approved - ${approval.title}`,
+              body: note || "Client approved in portal.",
               siteId: approval.siteId,
               entityType: "approval",
               entityId: approval.id,
-              recipients: [
-                ...getRecipientsForRoles(next, ["Supervisor", "Project Manager", "Contract Admin", "Director"]),
-                ...getRecipientsForClient(next, approval.clientId),
-              ],
+              recipients: getRecipientsForRoles(next, ["Supervisor", "Project Manager", "Contract Admin"]),
               route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
             });
+            updateSentiment(next, approval.clientId, 8);
           }
+          const contractPack =
+            next.contractPacks.find((pack) => pack.docId === approval.contractPackId) ||
+            createContractPackForApproval(next, approval, helpers, { autoRelease: true });
+          if (contractPack && contractPack.status !== "contract-awaiting-client" && contractPack.status !== "signed") {
+            contractPack.status = "contract-awaiting-client";
+            contractPack.signatures.builder = contractPack.signatures.builder || {
+              name: next.company?.name || APP_CONFIG.builder.name,
+              role: "Builder",
+              signedAt: nowStamp(),
+              ip: "browser",
+            };
+            approval.status = "contract-awaiting-client";
+            helpers.appendTimeline(approval, {
+              type: "contract-awaiting-client",
+              actor: "System",
+              role: "System",
+              text: "Contract pack released for client e-signature.",
+            });
+          }
+          finaliseClientSignedContract(next, helpers, contractPack, approval, signerName || client?.primaryContact || "Client");
         });
       },
       archiveContract(contractId) {
@@ -2403,7 +2505,7 @@ export function SiteForgeProvider({ children }) {
           const variation = {
             id: randomId("var"),
             siteId: rfi.siteId,
-            number: `VO-${String(next.variations.length + 1).padStart(3, "0")}`,
+            number: nextScopedNumber(next, "variations", rfi.siteId, "VO"),
             title: `Variation arising from ${rfi.number}`,
             sourceType: "rfi",
             sourceId: rfi.id,
@@ -2434,7 +2536,7 @@ export function SiteForgeProvider({ children }) {
           const variation = {
             id: randomId("var"),
             siteId: payload.siteId || next.session.siteId,
-            number: `VO-${String(next.variations.length + 1).padStart(3, "0")}`,
+            number: nextScopedNumber(next, "variations", payload.siteId || next.session.siteId, "VO"),
             title: payload.title,
             sourceType: payload.sourceType || "variation",
             sourceId: payload.sourceId || randomId("src"),
@@ -2469,8 +2571,10 @@ export function SiteForgeProvider({ children }) {
           if (!variation) return;
           const selectedTemplateId = templateId || variation.templateId || next.settings?.contractDefaults?.standardVariationTemplate || null;
           const sourceType = variation.sourceType === "rfi" ? "rfi" : "variation";
+          const portalToken = uuid();
           const approval = {
             id: randomId("ap"),
+            number: nextScopedNumber(next, "approvals", variation.siteId, "CF"),
             siteId: variation.siteId,
             clientId: next.sites.find((site) => site.id === variation.siteId)?.clientId,
             type: "Variation",
@@ -2594,6 +2698,7 @@ export function SiteForgeProvider({ children }) {
           const site = next.sites.find((entry) => entry.id === item.siteId);
           const approval = {
             id: randomId("ap"),
+            number: nextScopedNumber(next, "approvals", item.siteId, "CF"),
             siteId: item.siteId,
             clientId: site.clientId,
             type: "Extension of Time",
@@ -2724,6 +2829,7 @@ export function SiteForgeProvider({ children }) {
           const ai = draftApproval(diary, "Rain Day");
           const approval = {
             id: randomId("ap"),
+            number: nextScopedNumber(next, "approvals", diary.siteId, "CF"),
             siteId: diary.siteId,
             clientId: site.clientId,
             type: "Rain Day",
@@ -2766,7 +2872,7 @@ export function SiteForgeProvider({ children }) {
           const variation = {
             id: randomId("var"),
             siteId: diary.siteId,
-            number: `VO-${String(next.variations.length + 1).padStart(3, "0")}`,
+            number: nextScopedNumber(next, "variations", diary.siteId, "VO"),
             title: payload.title || `Variation from diary - ${diary.date}`,
             sourceType: "diary",
             sourceId: diary.id,
@@ -2851,6 +2957,7 @@ export function SiteForgeProvider({ children }) {
           const ai = draftApproval(record, "Delay Notice");
           const approval = {
             id: randomId("ap"),
+            number: nextScopedNumber(next, "approvals", record.siteId, "CF"),
             siteId: record.siteId,
             clientId: site.clientId,
             type: "Delay Notice",
@@ -2918,7 +3025,7 @@ export function SiteForgeProvider({ children }) {
           const rfi = {
             id: randomId("rfi"),
             siteId: payload.siteId || next.session.siteId,
-            number: `RFI-${String(next.rfis.length + 1).padStart(3, "0")}`,
+            number: nextScopedNumber(next, "rfis", payload.siteId || next.session.siteId, "RFI"),
             title: payload.title,
             trade: payload.trade || "General",
             fromUserId: helpers.actor.id,

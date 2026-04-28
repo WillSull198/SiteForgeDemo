@@ -8,7 +8,7 @@ import GlobalSearch from "./components/GlobalSearch";
 import NotificationBell from "./components/NotificationBell";
 import RoleSelector from "./components/RoleSelector";
 import { Icons, renderIcon } from "./components/icons";
-import { Button, Modal } from "./components/ui";
+import { AccessDenied, Button, Modal } from "./components/ui";
 import { APP_CONFIG } from "./data/seedData";
 import ClientFlowPage from "./pages/ClientFlowPage";
 import ClientPortalPage from "./pages/ClientPortalPage";
@@ -20,6 +20,7 @@ import PresencePage from "./pages/PresencePage";
 import SitePassportPage from "./pages/SitePassportPage";
 import SubcontractorPortal from "./pages/SubcontractorPortal";
 import WorkerMobileView from "./pages/WorkerMobileView";
+import { can, getNavForRole } from "./services/permissions";
 import { SiteForgeProvider, useSiteForge } from "./services/siteforgeStore";
 
 const PAGE_TITLES = {
@@ -54,62 +55,24 @@ const PAGE_TITLES = {
   "safety-record": "Safety Record",
 };
 
-const NAV_BY_ROLE = {
-  Supervisor: [
-    { page: "dash", label: "Command Centre", icon: Icons.grid },
-    { page: "tasks", label: "Tasks", icon: Icons.check },
-    { page: "probs", label: "Problems", icon: Icons.alert },
-    { page: "wf", label: "Workforce", icon: Icons.users },
-    { page: "diary", label: "Site Diary", icon: Icons.book },
-    { page: "safety", label: "Safety", icon: Icons.shield },
-    { page: "rfis", label: "RFIs", icon: Icons.help },
-    { page: "mats", label: "Procurement", icon: Icons.box },
-    { page: "qa", label: "QA", icon: Icons.clipboard },
-    { page: "docs", label: "Plans", icon: Icons.file },
-    { page: "team", label: "Team", icon: Icons.users },
-    { page: "calc", label: "Calculators", icon: Icons.calc },
-    { page: "clientflow", label: "ClientFlow", icon: Icons.flag },
-    { page: "passport", label: "Site Passport", icon: Icons.qr },
-  ],
-  "Project Manager": [
-    { page: "dash", label: "Command Centre", icon: Icons.grid },
-    { page: "tasks", label: "Tasks", icon: Icons.check },
-    { page: "probs", label: "Problems", icon: Icons.alert },
-    { page: "wf", label: "Workforce", icon: Icons.users },
-    { page: "diary", label: "Site Diary", icon: Icons.book },
-    { page: "safety", label: "Safety", icon: Icons.shield },
-    { page: "rfis", label: "RFIs", icon: Icons.help },
-    { page: "mats", label: "Procurement", icon: Icons.box },
-    { page: "qa", label: "QA", icon: Icons.clipboard },
-    { page: "docs", label: "Plans", icon: Icons.file },
-    { page: "sched", label: "Schedule", icon: Icons.cal },
-    { page: "budget", label: "Budget", icon: Icons.dollar },
-    { page: "vos", label: "Variations", icon: Icons.shuffle },
-    { page: "clientflow", label: "ClientFlow", icon: Icons.flag },
-    { page: "passport", label: "Site Passport", icon: Icons.qr },
-    { page: "presence", label: "Presence", icon: Icons.eye },
-    { page: "rpts", label: "Reports", icon: Icons.bar },
-    { page: "contracts", label: "Contract Studio", icon: Icons.book },
-  ],
-  "Contract Admin": [
-    { page: "contracts", label: "Contract Studio", icon: Icons.book },
-    { page: "clientflow", label: "ClientFlow", icon: Icons.flag },
-    { page: "vos", label: "Variations", icon: Icons.shuffle },
-    { page: "rfis", label: "RFIs", icon: Icons.help },
-    { page: "docs", label: "Document Control", icon: Icons.file },
-    { page: "integrations", label: "Integrations", icon: Icons.gear },
-    { page: "audit", label: "Audit Trail", icon: Icons.clipboard },
-    { page: "rpts", label: "Reports", icon: Icons.bar },
-  ],
-  Director: [
-    { page: "boardroom", label: "Boardroom", icon: Icons.grid },
-    { page: "portfolio", label: "Portfolio", icon: Icons.briefcase },
-    { page: "financial-summary", label: "Financial Summary", icon: Icons.dollar },
-    { page: "commercial-risk", label: "Commercial Risk", icon: Icons.alert },
-    { page: "safety-record", label: "Safety Record", icon: Icons.shield },
-    { page: "integrations", label: "Integrations", icon: Icons.gear },
-    { page: "rpts", label: "Reports", icon: Icons.bar },
-  ],
+const PAGE_PERMISSIONS = {
+  clientflow: "clientflow.view",
+  probs: "problems.view",
+  tasks: "tasks.view",
+  wf: "checkin.manage",
+  diary: "diary.create",
+  rfis: "rfis.view",
+  mats: "procurement.view",
+  vos: "variations.view",
+  contracts: "contracts.view",
+  budget: "budget.view",
+  sched: "schedule.view",
+  passport: "passport.admin",
+  presence: "presence.view",
+  integrations: "integrations.view",
+  docs: "documents.view",
+  plans: "documents.view",
+  audit: "audit.view",
 };
 
 class ViewBoundary extends Component {
@@ -236,6 +199,18 @@ function Shell() {
   }, [role, route.page]);
 
   useEffect(() => {
+    const requestedTheme = state.settings?.appearance?.theme || state.settings?.theme || "light";
+    const resolvedTheme =
+      requestedTheme === "system"
+        ? window.matchMedia?.("(prefers-color-scheme: dark)")?.matches
+          ? "dark"
+          : "light"
+        : requestedTheme;
+    document.documentElement.dataset.theme = resolvedTheme;
+    document.documentElement.classList.toggle("theme-dark", resolvedTheme === "dark");
+  }, [state.settings?.appearance?.theme, state.settings?.theme]);
+
+  useEffect(() => {
     if (!showSplash) return undefined;
     const timer = window.setTimeout(() => {
       setShowSplash(false);
@@ -252,8 +227,19 @@ function Shell() {
   const isWorker = route.kind === "worker";
   const isSubcontractor = route.kind === "subcontractor";
   const isDirector = route.kind === "director";
-  const internalNav = NAV_BY_ROLE[role] || NAV_BY_ROLE.Supervisor;
+  const navSections = useMemo(() => getNavForRole(role), [role]);
   const routeKey = `${route.kind || "internal"}:${route.page || "dash"}:${route.siteId || ""}:${route.entityId || ""}:${state.session.userId || ""}`;
+
+  const navBadgeFor = (badge) => {
+    const siteId = state.session.siteId;
+    if (badge === "tasks") return state.tasks.filter((task) => task.siteId === siteId && task.status !== "done" && !task.archived).length;
+    if (badge === "problems") return state.problems.filter((problem) => problem.siteId === siteId && ["open", "under-review", "in-progress"].includes(problem.status)).length;
+    if (badge === "approvals") return state.approvals.filter((approval) => approval.siteId === siteId && !["signed", "declined", "archived", "withdrawn"].includes(approval.status)).length;
+    if (badge === "rfis") return state.rfis.filter((rfi) => rfi.siteId === siteId && !["closed", "responded"].includes(rfi.status)).length;
+    return 0;
+  };
+
+  const iconFor = (iconName) => Icons[iconName] || Icons.grid;
 
   if (!user) {
     return (
@@ -297,6 +283,10 @@ function Shell() {
   }, [derived.currentSite, isClient, isSubcontractor, isWorker, role, route, state.session.siteId, state.sites]);
 
   const renderInternalPage = () => {
+    const permission = PAGE_PERMISSIONS[route.page];
+    if (permission && !can(role, permission)) {
+      return <AccessDenied permission={permission} />;
+    }
     if (route.page === "clientflow") return <ClientFlowPage />;
     if (route.page === "passport") return <SitePassportPage />;
     if (route.page === "presence") return <PresencePage />;
@@ -367,23 +357,32 @@ function Shell() {
             </div>
           ) : null}
           <div className="S-n">
-            {internalNav.map((item) => (
-              <button
-                key={item.page}
-                className={`N ${route.page === item.page ? "on" : ""}`.trim()}
-                onClick={() =>
-                  actions.navigate({
-                    kind: role === "Director" ? "director" : "internal",
-                    page: item.page,
-                    siteId: role === "Director" ? route.siteId : state.session.siteId,
-                    entityId: null,
-                  })
-                }
-                type="button"
-              >
-                {renderIcon(item.icon, 14)}
-                {item.label}
-              </button>
+            {navSections.map((section) => (
+              <div className="nav-section" key={section.section}>
+                <div className="nav-section-header">{section.section}</div>
+                {section.items.map((item) => {
+                  const badge = navBadgeFor(item.badge);
+                  return (
+                    <button
+                      key={item.key}
+                      className={`N ${route.page === item.page ? "on" : ""}`.trim()}
+                      onClick={() =>
+                        actions.navigate({
+                          kind: role === "Director" ? "director" : "internal",
+                          page: item.page,
+                          siteId: role === "Director" ? route.siteId : state.session.siteId,
+                          entityId: null,
+                        })
+                      }
+                      type="button"
+                    >
+                      {renderIcon(iconFor(item.icon), 14)}
+                      <span>{item.label}</span>
+                      {badge ? <span className="nb">{badge}</span> : null}
+                    </button>
+                  );
+                })}
+              </div>
             ))}
           </div>
           <div className="S-u">

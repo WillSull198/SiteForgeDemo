@@ -1,5 +1,6 @@
 import React from "react";
 import { renderIcon } from "./icons";
+import { allowedRoles } from "../services/permissions";
 
 export function Card({ title, icon, right, children, bodyClassName = "", className = "" }) {
   return (
@@ -157,6 +158,22 @@ export function RestrictedPanel({ title = "Restricted", body = "Your current rol
       <div className="restricted-badge">Role Restricted</div>
       <div className="b md" style={{ marginTop: 8 }}>{title}</div>
       <div className="sm ct2" style={{ marginTop: 5 }}>{body}</div>
+    </div>
+  );
+}
+
+export function AccessDenied({ permission, title = "You don't have access to this feature." }) {
+  const roles = allowedRoles(permission);
+  return (
+    <div className="restricted access-denied">
+      <div className="restricted-badge">Permission Required</div>
+      <div className="b md" style={{ marginTop: 8 }}>{title}</div>
+      <div className="sm ct2" style={{ marginTop: 5 }}>
+        This route requires <span className="mono">{permission}</span>.
+      </div>
+      <div className="xs ct3" style={{ marginTop: 8 }}>
+        Allowed roles: {roles.length ? roles.join(", ") : "No roles configured"}
+      </div>
     </div>
   );
 }

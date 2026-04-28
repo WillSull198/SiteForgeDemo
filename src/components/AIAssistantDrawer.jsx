@@ -152,7 +152,9 @@ export default function AIAssistantDrawer({ open, onClose }) {
                 const result = await askSiteForgeAi({
                   userMessage: outgoing.text,
                   projectContext,
-                  apiKey: state.settings?.integrations?.anthropicApiKey,
+                  apiKey:
+                    (typeof window !== "undefined" ? window.localStorage.getItem("siteforge-anthropic-key") : "") ||
+                    state.settings?.integrations?.anthropicApiKey,
                 });
                 setChat((current) => [...current, { id: `a-${Date.now()}`, role: "assistant", text: result.text, source: result.source }]);
                 setLoading(false);

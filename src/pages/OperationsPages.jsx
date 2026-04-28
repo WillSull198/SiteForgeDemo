@@ -79,6 +79,33 @@ function SearchFilterBar({ storageKey, placeholder = "Search...", statusOptions 
   );
 }
 
+function validateABN(value) {
+  const digits = String(value || "").replace(/\s/g, "").split("").map(Number);
+  if (digits.length !== 11 || digits.some(Number.isNaN)) return false;
+  digits[0] -= 1;
+  const weights = [10, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19];
+  const sum = digits.reduce((total, digit, index) => total + digit * weights[index], 0);
+  return sum % 89 === 0;
+}
+
+function validEmail(value) {
+  return !value || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value));
+}
+
+function validAuPhone(value) {
+  return !value || /^\+?61\s?[2-478]\s?\d{4}\s?\d{4}$|^0[2-478]\s?\d{4}\s?\d{4}$/.test(String(value).replace(/[()-]/g, ""));
+}
+
+function downloadJson(filename, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 function PortfolioPage() {
   const { state, actions } = useSiteForge();
   const [open, setOpen] = useState(false);
@@ -1760,34 +1787,49 @@ function DocumentsPage() {
   const [pdfViewerFile, setPdfViewerFile] = useState(null);
   const [planQuery, setPlanQuery] = useState("");
   const [planResults, setPlanResults] = useState([]);
+  const [planSearchLoading, setPlanSearchLoading] = useState(false);
   const [annotation, setAnnotation] = useState({ locationRef: "", note: "" });
   const documents = state.documents.filter((document) => document.siteId === siteId && !document.archived);
   const archived = state.documents.filter((document) => document.siteId === siteId && document.archived);
   const selected = documents.find((document) => document.id === selectedId) || documents[0] || null;
   const selectedFile = selected?.fileId ? state.files.records.find((file) => file.id === selected.fileId) : null;
-  const searchPlan = () => {
-    if (!selected || !planQuery.trim()) return;
-    const haystack = `${selected.title} ${selected.tags?.join(" ") || ""} ${selected.impactAnalysis?.summary || ""} ${selectedFile?.extractedText || ""}`;
-    const lower = haystack.toLowerCase();
+  const searchPlan = async () => {
+    if (!planQuery.trim()) return;
+    setPlanSearchLoading(true);
     const tokens = planQuery.toLowerCase().split(/\s+/).filter(Boolean);
-    const score = tokens.reduce((sum, token) => sum + (lower.includes(token) ? 1 : 0), 0);
-    if (!score) {
-      setPlanResults([
-        {
-          page: "Annotation fallback",
-          excerpt: "No extractable text match was found. Add a plan note or describe the room/zone so SiteForge can keep the search context for future uploads.",
-        },
-      ]);
+    const searchable = documents
+      .map((document) => {
+        const file = document.fileId ? state.files.records.find((entry) => entry.id === document.fileId) : null;
+        const haystack = `${document.title} ${document.drawingNumber || ""} ${document.rev || ""} ${document.tags?.join(" ") || ""} ${document.impactAnalysis?.summary || ""} ${file?.extractedText || ""}`;
+        const lower = haystack.toLowerCase();
+        const score = tokens.reduce((sum, token) => sum + (lower.includes(token) ? 1 : 0), 0);
+        const firstToken = tokens.find((token) => lower.includes(token));
+        const index = firstToken ? Math.max(0, lower.indexOf(firstToken) - 80) : 0;
+        return {
+          id: document.id,
+          page: file?.textPages?.find((page) => tokens.some((token) => page.text.toLowerCase().includes(token)))?.pageNumber || (file?.type?.includes("pdf") ? 1 : document.rev),
+          title: document.title,
+          fileId: file?.id,
+          score,
+          excerpt: haystack.slice(index, index + 240).trim(),
+        };
+      })
+      .filter((result) => result.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 8);
+    if (searchable.length) {
+      setPlanResults(searchable);
+      setPlanSearchLoading(false);
       return;
     }
-    const firstToken = tokens.find((token) => lower.includes(token));
-    const index = Math.max(0, lower.indexOf(firstToken) - 80);
     setPlanResults([
       {
-        page: selectedFile?.type?.includes("pdf") ? "Page 1" : selected.rev,
-        excerpt: haystack.slice(index, index + 220).trim(),
+        page: "Annotation fallback",
+        title: "No text match",
+        excerpt: "No extractable text match was found. Add a plan note or describe the room/zone so SiteForge can keep the search context for future uploads.",
       },
     ]);
+    setPlanSearchLoading(false);
   };
   const columns = [
     {
@@ -1933,16 +1975,27 @@ function DocumentsPage() {
                 <div className="fx" style={{ gap: 6 }}>
                   <input className="inline-input" value={planQuery} onChange={(event) => setPlanQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && searchPlan()} />
                   <Button small tone="bt-p" onClick={searchPlan}>
-                    Search
+                    {planSearchLoading ? "Searching..." : "Search"}
                   </Button>
                 </div>
                 <div className="list-stack" style={{ marginTop: 8 }}>
                   {planResults.map((result, index) => (
                     <div className="linked-row" key={`${result.page}-${index}`}>
                       <div>
-                        <div className="b sm">{result.page}</div>
+                        <div className="b sm">{result.title || selected?.title} · Page {result.page}</div>
                         <div className="xs ct3">{result.excerpt}</div>
                       </div>
+                      {result.fileId ? (
+                        <Button
+                          small
+                          onClick={() => {
+                            const file = state.files.records.find((entry) => entry.id === result.fileId);
+                            if (file) setPdfViewerFile(file);
+                          }}
+                        >
+                          Open
+                        </Button>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -2379,6 +2432,7 @@ function ReportsPage() {
 
 function AdminPage() {
   const { actions, derived, state } = useSiteForge();
+  const deviceApiKey = typeof window !== "undefined" ? window.localStorage.getItem("siteforge-anthropic-key") || "" : "";
   const [companyForm, setCompanyForm] = useState({
     name: state.settings?.company?.name || state.company?.name || "",
     legalName: state.settings?.company?.legalName || state.company?.legalName || "",
@@ -2386,15 +2440,81 @@ function AdminPage() {
     address: state.settings?.company?.address || state.company?.address || "",
     phone: state.settings?.company?.phone || state.company?.phone || "",
     email: state.settings?.company?.email || state.company?.email || "",
+    website: state.settings?.company?.website || state.company?.website || "",
+    defaultContractType: state.settings?.contractDefaults?.defaultContractType || "HIA",
     logoDataUrl: state.settings?.company?.logoDataUrl || "",
   });
   const [integrationsForm, setIntegrationsForm] = useState({
-    anthropicApiKey: state.settings?.integrations?.anthropicApiKey || "",
+    anthropicApiKey: deviceApiKey,
+    aiModel: state.settings?.integrations?.aiModel || "claude-sonnet-4-20250514",
     buildxactApiKey: state.settings?.integrations?.buildxactApiKey || "",
     buildxactWorkspaceId: state.settings?.integrations?.buildxactWorkspaceId || "",
   });
+  const [appearanceForm, setAppearanceForm] = useState({ theme: state.settings?.appearance?.theme || state.settings?.theme || "light" });
+  const [settingsMessage, setSettingsMessage] = useState("");
+  const [deleteConfirm, setDeleteConfirm] = useState("");
+
+  const saveCompany = () => {
+    if (!companyForm.name.trim()) {
+      setSettingsMessage("Company name is required.");
+      return;
+    }
+    if (!validateABN(companyForm.abn)) {
+      setSettingsMessage("ABN must be a valid 11-digit Australian Business Number.");
+      return;
+    }
+    if (!validEmail(companyForm.email)) {
+      setSettingsMessage("Company email format is invalid.");
+      return;
+    }
+    if (!validAuPhone(companyForm.phone)) {
+      setSettingsMessage("Phone number should be an Australian landline or mobile format.");
+      return;
+    }
+    actions.updateSettings("company", companyForm);
+    actions.updateSettings("contractDefaults", { defaultContractType: companyForm.defaultContractType });
+    setSettingsMessage("Company settings saved and will flow into contracts and portal headers.");
+  };
+
+  const saveIntegrations = () => {
+    if (typeof window !== "undefined") {
+      if (integrationsForm.anthropicApiKey.trim()) {
+        window.localStorage.setItem("siteforge-anthropic-key", integrationsForm.anthropicApiKey.trim());
+      } else {
+        window.localStorage.removeItem("siteforge-anthropic-key");
+      }
+    }
+    actions.updateSettings("integrations", {
+      aiModel: integrationsForm.aiModel,
+      anthropicConfigured: Boolean(integrationsForm.anthropicApiKey.trim()),
+      buildxactApiKey: integrationsForm.buildxactApiKey,
+      buildxactWorkspaceId: integrationsForm.buildxactWorkspaceId,
+    });
+    setSettingsMessage("Integration settings saved. Claude key is stored on this device only.");
+  };
+
+  const saveAppearance = () => {
+    actions.updateSettings("appearance", appearanceForm);
+    setSettingsMessage("Theme preference saved.");
+  };
+
+  const clearAllData = () => {
+    if (deleteConfirm !== "DELETE") {
+      setSettingsMessage('Type "DELETE" to confirm clearing all local data.');
+      return;
+    }
+    try {
+      window.localStorage.clear();
+      window.indexedDB?.deleteDatabase?.("siteforge-enterprise-db");
+      window.indexedDB?.deleteDatabase?.("siteforge-files");
+    } finally {
+      window.location.reload();
+    }
+  };
+
   return (
     <div className="oy fin">
+      {settingsMessage ? <div className="notice-banner mb8">{settingsMessage}</div> : null}
       <div className="g2 mb8">
         <Card title="Company Settings" icon={Icons.briefcase}>
           <div className="g2">
@@ -2421,11 +2541,25 @@ function AdminPage() {
             <label>Address</label>
             <input value={companyForm.address} onChange={(event) => setCompanyForm((current) => ({ ...current, address: event.target.value }))} />
           </div>
+          <div className="ff">
+            <label>Website</label>
+            <input value={companyForm.website} onChange={(event) => setCompanyForm((current) => ({ ...current, website: event.target.value }))} />
+          </div>
           <div className="g2">
             <div className="ff">
               <label>Phone</label>
               <input value={companyForm.phone} onChange={(event) => setCompanyForm((current) => ({ ...current, phone: event.target.value }))} />
             </div>
+            <div className="ff">
+              <label>Default contract type</label>
+              <select value={companyForm.defaultContractType} onChange={(event) => setCompanyForm((current) => ({ ...current, defaultContractType: event.target.value }))}>
+                {["HIA", "AS4000", "AS2124", "MBA", "Custom"].map((type) => (
+                  <option key={type}>{type}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="g2">
             <div className="ff">
               <label>Logo</label>
               <input
@@ -2442,7 +2576,7 @@ function AdminPage() {
             </div>
           </div>
           {companyForm.logoDataUrl ? <img alt="Company logo preview" src={companyForm.logoDataUrl} className="settings-logo-preview" /> : null}
-          <Button tone="bt-p" onClick={() => actions.updateSettings("company", companyForm)}>
+          <Button tone="bt-p" onClick={saveCompany}>
             Save Company Settings
           </Button>
         </Card>
@@ -2450,6 +2584,11 @@ function AdminPage() {
           <div className="ff">
             <label>Claude API key</label>
             <input type="password" value={integrationsForm.anthropicApiKey} onChange={(event) => setIntegrationsForm((current) => ({ ...current, anthropicApiKey: event.target.value }))} />
+            <div className="xs ct3" style={{ marginTop: 4 }}>Stored in this browser only, not in exported demo data.</div>
+          </div>
+          <div className="ff">
+            <label>Claude model</label>
+            <input value={integrationsForm.aiModel} onChange={(event) => setIntegrationsForm((current) => ({ ...current, aiModel: event.target.value }))} />
           </div>
           <div className="ff">
             <label>Buildxact API key</label>
@@ -2459,12 +2598,34 @@ function AdminPage() {
             <label>Workspace ID</label>
             <input value={integrationsForm.buildxactWorkspaceId} onChange={(event) => setIntegrationsForm((current) => ({ ...current, buildxactWorkspaceId: event.target.value }))} />
           </div>
-          <Button tone="bt-p" onClick={() => actions.updateSettings("integrations", integrationsForm)}>
+          <div className="fa" style={{ justifyContent: "flex-start" }}>
+            <Button tone="bt-p" onClick={saveIntegrations}>
             Save Integration Settings
-          </Button>
+            </Button>
+            <Button
+              onClick={() => {
+                if (typeof window !== "undefined") window.localStorage.removeItem("siteforge-anthropic-key");
+                setIntegrationsForm((current) => ({ ...current, anthropicApiKey: "" }));
+                setSettingsMessage("Claude API key cleared from this device.");
+              }}
+            >
+              Clear Claude Key
+            </Button>
+          </div>
         </Card>
       </div>
       <div className="g2">
+        <Card title="Appearance" icon={Icons.eye}>
+          <div className="ff">
+            <label>Theme</label>
+            <select value={appearanceForm.theme} onChange={(event) => setAppearanceForm({ theme: event.target.value })}>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+              <option value="system">System</option>
+            </select>
+          </div>
+          <Button tone="bt-p" onClick={saveAppearance}>Save Theme</Button>
+        </Card>
         <Card title="Demo Controls" icon={Icons.gear}>
           <div className="sm ct2">Reset the demo data back to the seeded construction scenario at any time.</div>
           <div className="sm ct2" style={{ marginTop: 8 }}>Current simulated time: {derived.currentNow}</div>
@@ -2486,32 +2647,23 @@ function AdminPage() {
             </Button>
           </div>
         </Card>
-        <Card title="Shortcuts & Demo Flags" icon={Icons.help}>
+        <Card title="Data Management" icon={Icons.help}>
           <div className="list-stack">
             <div className="linked-row">
               <div>
-                <div className="b sm">⌘K / Ctrl+K</div>
-                <div className="xs ct3">Global search</div>
+                <div className="b sm">Export all data</div>
+                <div className="xs ct3">Download the current SiteForge state as JSON.</div>
               </div>
+              <Button small onClick={() => downloadJson(`siteforge-export-${new Date().toISOString().slice(0, 10)}.json`, state)}>Export JSON</Button>
             </div>
             <div className="linked-row">
               <div>
-                <div className="b sm">N</div>
-                <div className="xs ct3">Context-aware new action</div>
+                <div className="b sm">Clear all local data</div>
+                <div className="xs ct3">Type DELETE to wipe IndexedDB and local browser settings.</div>
               </div>
+              <input className="inline-input" style={{ maxWidth: 120 }} value={deleteConfirm} onChange={(event) => setDeleteConfirm(event.target.value)} />
             </div>
-            <div className="linked-row">
-              <div>
-                <div className="b sm">?</div>
-                <div className="xs ct3">Shortcuts overlay</div>
-              </div>
-            </div>
-            <div className="linked-row">
-              <div>
-                <div className="b sm">Demo Mode</div>
-                <div className="xs ct3">Fake live events are currently {state.demo.mode ? "enabled" : "disabled"}.</div>
-              </div>
-            </div>
+            <Button tone="bt-r" onClick={clearAllData}>Clear All Data</Button>
           </div>
         </Card>
       </div>

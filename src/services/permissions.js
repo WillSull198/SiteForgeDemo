@@ -59,6 +59,10 @@ export const PERMISSIONS = {
   "audit.view": ["Contract Admin", "Director"],
 };
 
+export function allowedRoles(permission) {
+  return PERMISSIONS[permission] || [];
+}
+
 export function can(role, permission) {
   return PERMISSIONS[permission]?.includes(role) ?? false;
 }
@@ -68,57 +72,75 @@ export function canAny(role, permissions = []) {
 }
 
 export function getNavForRole(role) {
+  if (role === "Director") {
+    return [
+      {
+        section: "BOARDROOM",
+        items: [
+          { key: "boardroom", page: "boardroom", label: "Boardroom", icon: "grid" },
+          { key: "portfolio", page: "portfolio", label: "Portfolio", icon: "briefcase" },
+          { key: "financial-summary", page: "financial-summary", label: "Financial Summary", icon: "dollar", permission: "budget.view" },
+          { key: "commercial-risk", page: "commercial-risk", label: "Commercial Risk", icon: "alert" },
+          { key: "safety-record", page: "safety-record", label: "Safety Record", icon: "shield" },
+          { key: "integrations", page: "integrations", label: "Integrations", icon: "gear", permission: "integrations.view" },
+          { key: "rpts", page: "rpts", label: "Reports", icon: "bar" },
+        ].filter((item) => !item.permission || can(role, item.permission)),
+      },
+    ];
+  }
+
   const sections = [
     {
       section: "OVERVIEW",
       items: [
-        { key: "dash", label: "Command Centre" },
-        { key: "sched", label: "Schedule", permission: "schedule.view" },
-        { key: "budget", label: "Budget", permission: "budget.view" },
+        { key: "dash", page: "dash", label: "Command Centre", icon: "grid" },
+        { key: "sched", page: "sched", label: "Schedule", icon: "cal", permission: "schedule.view" },
+        { key: "budget", page: "budget", label: "Budget", icon: "dollar", permission: "budget.view" },
       ],
     },
     {
       section: "FIELD OPS",
       items: [
-        { key: "tasks", label: "Tasks", permission: "tasks.view" },
-        { key: "probs", label: "Problems", permission: "problems.view" },
-        { key: "wf", label: "Workforce", permission: "checkin.manage" },
-        { key: "diary", label: "Site Diary", permission: "diary.create" },
+        { key: "tasks", page: "tasks", label: "Tasks", icon: "check", permission: "tasks.view", badge: "tasks" },
+        { key: "probs", page: "probs", label: "Problems", icon: "alert", permission: "problems.view", badge: "problems" },
+        { key: "wf", page: "wf", label: "Workforce", icon: "users", permission: "checkin.manage" },
+        { key: "diary", page: "diary", label: "Site Diary", icon: "book", permission: "diary.create" },
       ],
     },
     {
       section: "COMMERCIAL",
       items: [
-        { key: "clientflow", label: "ClientFlow", permission: "clientflow.view" },
-        { key: "vos", label: "Variations", permission: "variations.view" },
-        { key: "rfis", label: "RFIs", permission: "rfis.view" },
-        { key: "mats", label: "Procurement", permission: "procurement.view" },
-        { key: "contracts", label: "Contract Studio", permission: "contracts.view" },
+        { key: "clientflow", page: "clientflow", label: "ClientFlow", icon: "flag", permission: "clientflow.view", badge: "approvals" },
+        { key: "vos", page: "vos", label: "Variations", icon: "shuffle", permission: "variations.view" },
+        { key: "rfis", page: "rfis", label: "RFIs", icon: "help", permission: "rfis.view", badge: "rfis" },
+        { key: "mats", page: "mats", label: "Procurement", icon: "box", permission: "procurement.view" },
+        { key: "contracts", page: "contracts", label: "Contract Studio", icon: "book", permission: "contracts.view" },
       ],
     },
     {
       section: "QUALITY",
       items: [
-        { key: "qa", label: "QA / Inspections" },
-        { key: "safety", label: "Safety" },
-        { key: "docs", label: "Document Control", permission: "documents.view" },
+        { key: "qa", page: "qa", label: "QA / Inspections", icon: "clipboard" },
+        { key: "safety", page: "safety", label: "Safety", icon: "shield" },
+        { key: "docs", page: "docs", label: "Document Control", icon: "file", permission: "documents.view" },
       ],
     },
     {
       section: "OPERATIONS",
       items: [
-        { key: "passport", label: "Site Passport", permission: "passport.admin" },
-        { key: "presence", label: "Presence", permission: "presence.view" },
-        { key: "integrations", label: "Integrations", permission: "integrations.view" },
+        { key: "passport", page: "passport", label: "Site Passport", icon: "qr", permission: "passport.admin" },
+        { key: "presence", page: "presence", label: "Presence", icon: "eye", permission: "presence.view" },
+        { key: "integrations", page: "integrations", label: "Integrations", icon: "gear", permission: "integrations.view" },
       ],
     },
     {
       section: "TOOLS",
       items: [
-        { key: "rpts", label: "Reports" },
-        { key: "calc", label: "Calculators" },
-        { key: "audit", label: "Audit Trail", permission: "audit.view" },
-        { key: "admin", label: "Settings" },
+        { key: "team", page: "team", label: "Team", icon: "users" },
+        { key: "rpts", page: "rpts", label: "Reports", icon: "bar" },
+        { key: "calc", page: "calc", label: "Calculators", icon: "calc" },
+        { key: "audit", page: "audit", label: "Audit Trail", icon: "clipboard", permission: "audit.view" },
+        { key: "admin", page: "admin", label: "Settings", icon: "gear" },
       ],
     },
   ];

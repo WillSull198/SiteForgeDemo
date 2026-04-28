@@ -15,12 +15,16 @@ const nowStamp = () => {
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
 };
 
-const formatCurrency = (value = 0) =>
+export const formatCurrency = (value = 0) =>
   new Intl.NumberFormat("en-AU", {
     style: "currency",
     currency: "AUD",
     maximumFractionDigits: 0,
   }).format(Number(value) || 0);
+
+function titleCase(value) {
+  return String(value || "").replace(/\b\w/g, (match) => match.toUpperCase());
+}
 
 function numberToWordsUnderThousand(value) {
   const ones = [
@@ -56,19 +60,31 @@ function numberToWordsUnderThousand(value) {
   return `${ones[Math.floor(value / 100)]} hundred${value % 100 ? ` and ${numberToWordsUnderThousand(value % 100)}` : ""}`;
 }
 
-function numberToWords(value = 0) {
+export function numberToWords(value = 0) {
   const amount = Math.round(Number(value) || 0);
+  let words = "";
   if (amount < 1000) {
-    return numberToWordsUnderThousand(amount);
-  }
-  if (amount < 1000000) {
+    words = numberToWordsUnderThousand(amount);
+  } else if (amount < 1000000) {
     const thousands = Math.floor(amount / 1000);
     const remainder = amount % 1000;
-    return `${numberToWordsUnderThousand(thousands)} thousand${remainder ? ` ${numberToWordsUnderThousand(remainder)}` : ""}`;
+    words = `${numberToWordsUnderThousand(thousands)} thousand${remainder ? ` ${numberToWordsUnderThousand(remainder)}` : ""}`;
+  } else {
+    const millions = Math.floor(amount / 1000000);
+    const remainder = amount % 1000000;
+    words = `${numberToWordsUnderThousand(millions)} million${remainder ? ` ${numberToWords(remainder)}` : ""}`;
   }
-  const millions = Math.floor(amount / 1000000);
-  const remainder = amount % 1000000;
-  return `${numberToWordsUnderThousand(millions)} million${remainder ? ` ${numberToWords(remainder)}` : ""}`;
+  return titleCase(words.replace(/-/g, " "));
+}
+
+function simpleHash(input) {
+  const value = String(input || "");
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `sf-${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 export function pickTemplate(templates = [], approvalType) {
@@ -88,7 +104,7 @@ export function generateDraft({
 }) {
   const template = pickTemplateForApproval(templates, approval);
   const now = nowStamp();
-  const costWords = `${numberToWords(approval.costImpact || 0)} dollars`;
+  const costWords = `${numberToWords(approval.costImpact || 0)} Dollars`;
   const mergeData = {
     approvalId: approval.id,
     approvalTitle: approval.title,
@@ -198,6 +214,18 @@ export function updateContractContent(contractPack, updater) {
 }
 
 export function signContract(contractPack, side, signer) {
+  const signedAt = nowStamp();
+  const documentHash =
+    signer.documentHash ||
+    simpleHash(
+      JSON.stringify({
+        docId: contractPack.docId,
+        approvalId: contractPack.approvalId,
+        content: contractPack.content,
+        signer: signer.name,
+        side,
+      }),
+    );
   const updated = {
     ...contractPack,
     signatures: {
@@ -205,11 +233,12 @@ export function signContract(contractPack, side, signer) {
       [side]: {
         name: signer.name,
         role: signer.role,
-        signedAt: nowStamp(),
+        signedAt,
         ip: signer.ip || "198.51.100.200",
+        documentHash,
       },
     },
-    updatedAt: nowStamp(),
+    updatedAt: signedAt,
   };
 
   if (side === "builder") {
@@ -218,7 +247,7 @@ export function signContract(contractPack, side, signer) {
 
   if (side === "client") {
     updated.status = "signed";
-    updated.archivedAt = nowStamp();
+    updated.archivedAt = signedAt;
     updated.pdfArchiveLabel = `${contractPack.approvalId.toUpperCase()} executed pack.pdf`;
   }
 

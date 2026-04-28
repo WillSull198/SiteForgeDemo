@@ -27,6 +27,16 @@ export const STORES = {
 
 let dbPromise = null;
 
+function uuid() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (char) =>
+      (Number(char) ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (Number(char) / 4)))).toString(16),
+    );
+  }
+  return `id-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function openDB() {
   if (typeof window === "undefined" || !window.indexedDB) {
     return Promise.reject(new Error("IndexedDB is not available."));
@@ -75,7 +85,7 @@ export function put(store, record) {
   const now = Date.now();
   const cleanRecord = {
     ...record,
-    id: record.id || crypto.randomUUID(),
+    id: record.id || uuid(),
     createdAt: record.createdAt || now,
     updatedAt: now,
   };

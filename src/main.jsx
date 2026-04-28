@@ -6,6 +6,8 @@ import "./siteforge.css";
 
 document.title = APP_CONFIG.appTitle;
 
+const PDFJS_VERSION = "3.11.174";
+
 const ensureMeta = (name, content) => {
   let tag = document.querySelector(`meta[name="${name}"]`);
   if (!tag) {
@@ -30,7 +32,7 @@ const ensureLink = (rel, href, extra = {}) => {
 };
 
 ensureMeta("description", APP_CONFIG.metaDescription);
-ensureMeta("theme-color", "#060910");
+ensureMeta("theme-color", "#F7F6F2");
 ensureLink("preconnect", "https://fonts.googleapis.com");
 ensureLink("preconnect", "https://fonts.gstatic.com", { crossOrigin: "anonymous" });
 ensureLink(
@@ -44,6 +46,10 @@ ensureLink(
   `)}`,
   { type: "image/svg+xml" },
 );
+
+if (window.pdfjsLib) {
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.worker.min.js`;
+}
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>

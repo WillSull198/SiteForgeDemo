@@ -6,6 +6,24 @@ import { useRef, useState } from "react";
 import { put } from "../services/db";
 import { Icons, renderIcon } from "./icons";
 
+function uuid() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (char) =>
+      (Number(char) ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (Number(char) / 4)))).toString(16),
+    );
+  }
+  return `photo-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+async function assertStorageAvailable() {
+  if (!navigator.storage?.estimate) return;
+  const { usage = 0, quota = 1 } = await navigator.storage.estimate();
+  if (quota && usage / quota >= 0.9) {
+    throw new Error("Storage is over 90% full. Export and clear old data before adding more photos.");
+  }
+}
+
 async function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -60,13 +78,14 @@ export default function PhotoUpload({ onPhotosAdded, existingPhotos = [], onRemo
     setBusy(true);
     setError("");
     try {
+      await assertStorageAvailable();
       const records = [];
       for (const file of incoming) {
         const compressed = await compressImage(file);
         if (!compressed) throw new Error(`Could not process ${file.name}.`);
         const dataUrl = await blobToDataUrl(compressed);
         const record = await put("photos", {
-          id: crypto.randomUUID(),
+          id: uuid(),
           filename: file.name,
           data: dataUrl,
           size: compressed.size,

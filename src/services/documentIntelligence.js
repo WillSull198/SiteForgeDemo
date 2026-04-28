@@ -5,6 +5,7 @@
 const DB_NAME = "siteforge-files";
 const STORE_NAME = "blobs";
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
+const PDFJS_VERSION = "3.11.174";
 const ACCEPTED_TYPES = [
   "application/pdf",
   "image/png",
@@ -156,7 +157,15 @@ function loadScriptOnce(key, src) {
 }
 
 export async function ensurePdfJs() {
-  return loadScriptOnce("pdfjs", "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.5.136/pdf.min.js");
+  if (typeof window !== "undefined" && window.pdfjsLib) {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.worker.min.js`;
+    return window;
+  }
+  const pdfjsWindow = await loadScriptOnce("pdfjs", `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.min.js`);
+  if (pdfjsWindow?.pdfjsLib) {
+    pdfjsWindow.pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.worker.min.js`;
+  }
+  return pdfjsWindow;
 }
 
 export async function ensureMammoth() {
@@ -211,6 +220,61 @@ async function makeImageThumbnail(file) {
     img.onerror = () => resolve(null);
     img.src = src;
   });
+}
+
+async function extractPdfTextAndThumbnail(file) {
+  const result = { fullText: "", pages: [], thumbnailDataUrl: null, extractionStatus: "not-run" };
+  try {
+    const pdfjsWindow = await ensurePdfJs();
+    const pdfjs = pdfjsWindow?.pdfjsLib || window.pdfjsLib;
+    if (!pdfjs) return { ...result, extractionStatus: "pdfjs-unavailable" };
+
+    const data = await readFileAsArrayBuffer(file);
+    const pdf = await pdfjs.getDocument({ data }).promise;
+    const pages = [];
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const textContent = await page.getTextContent();
+      const text = textContent.items.map((item) => item.str).join(" ").trim();
+      pages.push({ pageNumber, text });
+
+      if (pageNumber === 1 && typeof document !== "undefined") {
+        const viewport = page.getViewport({ scale: 0.35 });
+        const canvas = document.createElement("canvas");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+        result.thumbnailDataUrl = canvas.toDataURL("image/jpeg", 0.78);
+      }
+      page.cleanup?.();
+    }
+    pdf.destroy?.();
+    result.pages = pages;
+    result.fullText = pages.map((page) => page.text).filter(Boolean).join("\n\n");
+    result.extractionStatus = result.fullText ? "complete" : "no-text-layer";
+    return result;
+  } catch (error) {
+    const message = String(error?.message || "").toLowerCase();
+    return {
+      ...result,
+      extractionStatus: message.includes("password") || message.includes("encrypted") ? "encrypted" : "failed",
+    };
+  }
+}
+
+export async function checkStorageQuota() {
+  if (typeof navigator === "undefined" || !navigator.storage?.estimate) {
+    return { ok: true, warning: null, usage: 0, quota: 0, ratio: 0 };
+  }
+  const { usage = 0, quota = 1 } = await navigator.storage.estimate();
+  const ratio = quota ? usage / quota : 0;
+  return {
+    ok: ratio < 0.9,
+    usage,
+    quota,
+    ratio,
+    warning: ratio >= 0.7 ? `Storage ${Math.round(ratio * 100)}% full. Consider exporting and clearing old data.` : null,
+  };
 }
 
 const regexExtractors = {
@@ -326,7 +390,7 @@ export async function previewPdf(fileMeta) {
   const pdfjsWindow = await ensurePdfJs();
   const pdfjs = pdfjsWindow?.pdfjsLib || window.pdfjsLib;
   if (!pdfjs) return { html: "<p>PDF preview unavailable.</p>" };
-  pdfjs.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.5.136/pdf.worker.min.js";
+  pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.worker.min.js`;
   const data = await blob.arrayBuffer();
   const pdf = await pdfjs.getDocument({ data }).promise;
   const page = await pdf.getPage(1);
@@ -336,6 +400,8 @@ export async function previewPdf(fileMeta) {
   canvas.width = viewport.width;
   canvas.height = viewport.height;
   await page.render({ canvasContext: context, viewport }).promise;
+  page.cleanup?.();
+  pdf.destroy?.();
   return { html: `<img src="${canvas.toDataURL("image/png")}" alt="PDF preview" style="max-width:100%;border-radius:14px;" />` };
 }
 
@@ -371,30 +437,44 @@ export async function uploadFile({
   if (file.size > MAX_FILE_SIZE) {
     throw new Error("File exceeds 25MB limit.");
   }
+  const quota = await checkStorageQuota();
+  if (!quota.ok) {
+    throw new Error("Storage is over 90% full. Export and clear old data before uploading more files.");
+  }
   if (!ACCEPTED_TYPES.includes(file.type) && !/\.(pdf|png|jpe?g|docx|txt|md)$/i.test(file.name)) {
     throw new Error("File type not supported.");
   }
 
   onProgress?.(10);
   let extractedText = "";
+  let textPages = [];
+  let extractionStatus = "not-run";
+  let thumbnailDataUrl = null;
   if (isTextLike(file.type, file.name)) {
     extractedText = await readFileAsText(file);
+    extractionStatus = "complete";
   } else if (isDocx(file.type, file.name)) {
     try {
       await ensureMammoth();
       const result = await window.mammoth.convertToHtml({ arrayBuffer: await readFileAsArrayBuffer(file) });
       extractedText = result.value.replace(/<[^>]+>/g, " ");
+      extractionStatus = extractedText.trim() ? "complete" : "no-text-layer";
     } catch (error) {
       extractedText = file.name;
+      extractionStatus = "failed";
     }
   } else if (isPdf(file.type, file.name)) {
-    extractedText = file.name;
+    const pdf = await extractPdfTextAndThumbnail(file);
+    extractedText = pdf.fullText || file.name;
+    textPages = pdf.pages;
+    extractionStatus = pdf.extractionStatus;
+    thumbnailDataUrl = pdf.thumbnailDataUrl;
   }
   onProgress?.(40);
 
   const classification = classificationHint || classify({ name: file.name, type: file.type, text: extractedText });
   const parsedFields = extractFields(classification, extractedText, file.name);
-  const thumbnailDataUrl = isImage(file.type, file.name) ? await makeImageThumbnail(file) : null;
+  thumbnailDataUrl = thumbnailDataUrl || (isImage(file.type, file.name) ? await makeImageThumbnail(file) : null);
   onProgress?.(75);
 
   const id = randomId("file");
@@ -410,6 +490,8 @@ export async function uploadFile({
     uploadedBy,
     classification,
     extractedText: sentence(extractedText),
+    textPages,
+    extractionStatus,
     parsedFields,
     thumbnailDataUrl,
     confirmedFields: {},

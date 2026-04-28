@@ -17,10 +17,14 @@ export default function PDFViewer({ fileMeta, onClose }) {
   useEffect(() => {
     const onKey = (event) => {
       if (event.key === "Escape") onClose?.();
+      if (event.key === "ArrowLeft") setPageNum((page) => Math.max(1, page - 1));
+      if (event.key === "ArrowRight") setPageNum((page) => (pdfDoc ? Math.min(pdfDoc.numPages, page + 1) : page));
+      if (event.key === "+" || event.key === "=") setScale((value) => Math.min(3, value + 0.2));
+      if (event.key === "-") setScale((value) => Math.max(0.5, value - 0.2));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, pdfDoc]);
 
   useEffect(() => {
     let cancelled = false;
@@ -70,6 +74,7 @@ export default function PDFViewer({ fileMeta, onClose }) {
         canvas.height = viewport.height;
         const task = page.render({ canvasContext: context, viewport });
         await task.promise;
+        page.cleanup?.();
       } catch (renderError) {
         if (!cancelled) {
           setError(renderError.message || "Unable to render this PDF page.");
