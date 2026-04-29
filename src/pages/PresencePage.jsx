@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useSiteForge } from "../services/siteforgeStore";
-import { can } from "../services/permissions";
+import { can, canSeeAllSites } from "../services/permissions";
 import DataTable from "../components/DataTable";
 import { Badge, Button, Card, MetricGrid, RestrictedPanel, Tabs } from "../components/ui";
 import { Icons } from "../components/icons";
@@ -14,12 +14,12 @@ export default function PresencePage() {
   const [tab, setTab] = useState("overview");
 
   const records = useMemo(
-    () => state.presence.records.filter((record) => (role === "Director" ? true : record.siteId === siteId)),
+    () => state.presence.records.filter((record) => (canSeeAllSites(role) ? true : record.siteId === siteId)),
     [role, siteId, state.presence.records],
   );
   const anomalies = records.filter((record) => record.anomalyFlags?.length);
-  const timeline = state.presence.events.filter((event) => (role === "Director" ? true : event.siteId === siteId)).slice(0, 10);
-  const payrollExports = state.presence.exports.filter((entry) => (role === "Director" ? true : entry.siteId === siteId));
+  const timeline = state.presence.events.filter((event) => (canSeeAllSites(role) ? true : event.siteId === siteId)).slice(0, 10);
+  const payrollExports = state.presence.exports.filter((entry) => (canSeeAllSites(role) ? true : entry.siteId === siteId));
   const metrics = [
     { label: "Verified On Site", value: records.filter((record) => record.status === "verified-on-site").length, color: "g" },
     { label: "Anomalies", value: anomalies.length, color: "r" },

@@ -4,6 +4,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { flagBudgetAnomaly, suggestRFI } from "../services/aiDraftService";
+import { askSiteForgeAi } from "../services/aiService";
 import DataTable from "../components/DataTable";
 import FileDropZone from "../components/FileDropZone";
 import PhotoUpload from "../components/PhotoUpload";
@@ -11,7 +12,7 @@ import PDFViewer from "../components/PDFViewer";
 import { exportCsv, exportElementToPdf } from "../services/pdfService";
 import { previewPdf } from "../services/documentIntelligence";
 import { useSiteForge } from "../services/siteforgeStore";
-import { can } from "../services/permissions";
+import { can, canSeeAllSites, mustHandUpForApproval } from "../services/permissions";
 import { Icons } from "../components/icons";
 import {
   Badge,
@@ -297,7 +298,7 @@ function DashboardPage() {
   const openRainEvent = state.diary.find((entry) => entry.siteId === site.id && entry.rainEvent);
 
   const quickActions =
-    role === "Supervisor"
+    mustHandUpForApproval(role)
       ? [
           { label: "Report Problem", icon: Icons.alert, onClick: () => actions.navigate({ kind: "internal", siteId: site.id, page: "probs", entityId: null }) },
           { label: "Check In Crew", icon: Icons.login, onClick: () => actions.navigate({ kind: "internal", siteId: site.id, page: "passport", entityId: null }) },
@@ -312,7 +313,7 @@ function DashboardPage() {
             icon: Icons.link,
             onClick: () =>
               openProblems[0]
-                ? actions.createApprovalFromSource({ sourceType: "problem", sourceId: openProblems[0].id, approvalType: "Variation", handUp: true })
+                ? actions.createApprovalFromSource({ sourceType: "problem", sourceId: openProblems[0].id, approvalType: "Variation", handUp: mustHandUpForApproval(role) })
                 : actions.navigate({ kind: "internal", siteId: site.id, page: "probs", entityId: null }),
           },
         ]
@@ -323,7 +324,7 @@ function DashboardPage() {
         ];
 
   const metrics =
-    role === "Project Manager"
+    can(role, "budget.view")
       ? [
           { label: "Margin At Risk", value: `$${Math.round(siteMetric?.costExposure || 0)}`, color: "r" },
           { label: "Programme At Risk", value: `${siteMetric?.timeExposure || 0}d`, color: "a" },
@@ -387,7 +388,7 @@ function DashboardPage() {
                       ${problem.costImpact.toLocaleString()} · {problem.timeImpact}d
                     </div>
                   </div>
-                  <Button small tone="bt-p" onClick={() => actions.createApprovalFromSource({ sourceType: "problem", sourceId: problem.id, approvalType: "Variation", handUp: role === "Supervisor" })}>
+                  <Button small tone="bt-p" onClick={() => actions.createApprovalFromSource({ sourceType: "problem", sourceId: problem.id, approvalType: "Variation", handUp: mustHandUpForApproval(role) })}>
                     Raise Approval
                   </Button>
                 </div>
@@ -617,7 +618,7 @@ function ProblemsPage() {
   const canResolveProblem = can(role, "problems.resolve");
   const canEscalateProblem = can(role, "problems.escalate");
   const scopedProblems = state.problems.filter((problem) => {
-    if (role === "Director" || role === "Contract Admin" || role === "Project Manager") {
+    if (canSeeAllSites(role) || can(role, "problems.escalate")) {
       return accessibleSiteIds.has(problem.siteId);
     }
     return problem.siteId === siteId;
@@ -695,7 +696,7 @@ function ProblemsPage() {
                         label: "Raise Approval",
                         tone: "bt-p",
                         icon: Icons.link,
-                        onClick: () => actions.createApprovalFromSource({ sourceType: "problem", sourceId: selected.id, approvalType: "Variation", handUp: role === "Supervisor" }),
+                        onClick: () => actions.createApprovalFromSource({ sourceType: "problem", sourceId: selected.id, approvalType: "Variation", handUp: mustHandUpForApproval(role) }),
                       }
                     : null,
                   {
@@ -1530,6 +1531,7 @@ function DiaryPage() {
                   priority: entry.rainEvent ? "high" : "medium",
                   templateId: state.settings?.contractDefaults?.standardVariationTemplate || variationTemplates[0]?.id || "",
                   photos: entry.photos || [],
+                  releaseToClient: true,
                 });
               }}
             >
@@ -1649,6 +1651,10 @@ function DiaryPage() {
             onRemove={(photoId) => setVariationForm((current) => ({ ...current, photos: current.photos.filter((photo) => photo.id !== photoId) }))}
           />
         </div>
+        <label className="sig-check">
+          <input type="checkbox" checked={variationForm.releaseToClient !== false} onChange={(event) => setVariationForm((current) => ({ ...current, releaseToClient: event.target.checked }))} />
+          Send to client immediately for approval and signature
+        </label>
         <div className="fa">
           <Button onClick={() => setVariationEntry(null)}>Cancel</Button>
           <Button
@@ -1659,7 +1665,7 @@ function DiaryPage() {
               setVariationEntry(null);
             }}
           >
-            Create Variation Draft
+            {variationForm.releaseToClient !== false ? "Create ClientFlow Approval" : "Create Variation Draft"}
           </Button>
         </div>
       </Modal>
@@ -1788,15 +1794,15 @@ function DocumentsPage() {
   const [planQuery, setPlanQuery] = useState("");
   const [planResults, setPlanResults] = useState([]);
   const [planSearchLoading, setPlanSearchLoading] = useState(false);
+  const [planSearchSummary, setPlanSearchSummary] = useState("");
+  const [planSearchSource, setPlanSearchSource] = useState("");
   const [annotation, setAnnotation] = useState({ locationRef: "", note: "" });
   const documents = state.documents.filter((document) => document.siteId === siteId && !document.archived);
   const archived = state.documents.filter((document) => document.siteId === siteId && document.archived);
   const selected = documents.find((document) => document.id === selectedId) || documents[0] || null;
   const selectedFile = selected?.fileId ? state.files.records.find((file) => file.id === selected.fileId) : null;
-  const searchPlan = async () => {
-    if (!planQuery.trim()) return;
-    setPlanSearchLoading(true);
-    const tokens = planQuery.toLowerCase().split(/\s+/).filter(Boolean);
+  const keywordPlanSearch = (query) => {
+    const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
     const searchable = documents
       .map((document) => {
         const file = document.fileId ? state.files.records.find((entry) => entry.id === document.fileId) : null;
@@ -1807,9 +1813,12 @@ function DocumentsPage() {
         const index = firstToken ? Math.max(0, lower.indexOf(firstToken) - 80) : 0;
         return {
           id: document.id,
+          documentId: document.id,
+          drawingNumber: document.drawingNumber || document.title,
           page: file?.textPages?.find((page) => tokens.some((token) => page.text.toLowerCase().includes(token)))?.pageNumber || (file?.type?.includes("pdf") ? 1 : document.rev),
           title: document.title,
           fileId: file?.id,
+          confidence: score > 1 ? "medium" : "low",
           score,
           excerpt: haystack.slice(index, index + 240).trim(),
         };
@@ -1817,18 +1826,81 @@ function DocumentsPage() {
       .filter((result) => result.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, 8);
-    if (searchable.length) {
-      setPlanResults(searchable);
-      setPlanSearchLoading(false);
-      return;
+    return searchable.length
+      ? searchable
+      : [
+          {
+            page: "Annotation fallback",
+            title: "No text match",
+            confidence: "low",
+            excerpt: "No extractable text match was found. Add a plan note or describe the room/zone so SiteForge can keep the search context for future uploads.",
+          },
+        ];
+  };
+  const searchPlan = async () => {
+    if (!planQuery.trim()) return;
+    setPlanSearchLoading(true);
+    setPlanSearchSummary("");
+    setPlanSearchSource("");
+    const documentContext = documents
+      .map((document) => {
+        const file = document.fileId ? state.files.records.find((entry) => entry.id === document.fileId) : null;
+        return {
+          documentId: document.id,
+          drawingNumber: document.drawingNumber || document.title,
+          title: document.title,
+          revision: document.rev,
+          extractedText: (file?.extractedText || "").slice(0, 5000),
+        };
+      })
+      .filter((document) => document.extractedText);
+    const apiKey = typeof window !== "undefined" ? window.localStorage.getItem("siteforge-anthropic-key") : "";
+    try {
+      const result = await askSiteForgeAi({
+        apiKey,
+        projectContext: { siteId, documents: documentContext },
+        userMessage: `Plan search query: "${planQuery}".
+
+Search these SiteForge construction documents and respond only as JSON:
+{
+  "summary": "plain-English summary",
+  "results": [
+    { "documentId": "document id", "drawingNumber": "drawing number", "page": "page or revision", "excerpt": "short excerpt", "confidence": "high|medium|low" }
+  ]
+}
+
+Documents:
+${JSON.stringify(documentContext)}`,
+      });
+      if (result.source === "claude") {
+        const match = result.text.match(/\{[\s\S]*\}/);
+        const parsed = JSON.parse(match ? match[0] : result.text);
+        setPlanSearchSummary(parsed.summary || "");
+        setPlanSearchSource("claude");
+        setPlanResults(
+          (parsed.results || []).map((entry, index) => {
+            const document = documents.find((item) => item.id === entry.documentId || item.drawingNumber === entry.drawingNumber);
+            const file = document?.fileId ? state.files.records.find((item) => item.id === document.fileId) : null;
+            return {
+              id: document?.id || `${entry.drawingNumber || "ai"}-${index}`,
+              title: document?.title || entry.drawingNumber || "AI plan match",
+              drawingNumber: entry.drawingNumber,
+              page: entry.page || "-",
+              excerpt: entry.excerpt || "",
+              confidence: entry.confidence || "medium",
+              fileId: file?.id,
+            };
+          }),
+        );
+        setPlanSearchLoading(false);
+        return;
+      }
+      setPlanSearchSource(result.source);
+    } catch (error) {
+      setPlanSearchSource("keyword");
     }
-    setPlanResults([
-      {
-        page: "Annotation fallback",
-        title: "No text match",
-        excerpt: "No extractable text match was found. Add a plan note or describe the room/zone so SiteForge can keep the search context for future uploads.",
-      },
-    ]);
+    setPlanSearchSummary("");
+    setPlanResults(keywordPlanSearch(planQuery));
     setPlanSearchLoading(false);
   };
   const columns = [
@@ -1978,6 +2050,12 @@ function DocumentsPage() {
                     {planSearchLoading ? "Searching..." : "Search"}
                   </Button>
                 </div>
+                {planSearchSource && planSearchSource !== "claude" ? (
+                  <div className="xs ct3" style={{ marginTop: 8 }}>
+                    <Badge tone="medium">Keyword match</Badge> Add Claude API key in Settings for AI plan search.
+                  </div>
+                ) : null}
+                {planSearchSummary ? <div className="mini-panel sm ct2" style={{ marginTop: 8 }}>{planSearchSummary}</div> : null}
                 <div className="list-stack" style={{ marginTop: 8 }}>
                   {planResults.map((result, index) => (
                     <div className="linked-row" key={`${result.page}-${index}`}>
@@ -1985,6 +2063,7 @@ function DocumentsPage() {
                         <div className="b sm">{result.title || selected?.title} · Page {result.page}</div>
                         <div className="xs ct3">{result.excerpt}</div>
                       </div>
+                      {result.confidence ? <Badge tone={result.confidence === "high" ? "passed" : result.confidence === "medium" ? "medium" : "low"}>{result.confidence}</Badge> : null}
                       {result.fileId ? (
                         <Button
                           small
@@ -2152,7 +2231,7 @@ function BudgetPage() {
 function TeamPage() {
   const { state } = useSiteForge();
   const siteId = state.session.siteId;
-  const users = state.users.filter((user) => user.siteIds?.includes(siteId) || user.role === "Director");
+  const users = state.users.filter((user) => user.siteIds?.includes(siteId) || canSeeAllSites(user.role));
   return (
     <div className="oy fin">
       <div className="team-grid">
@@ -2453,6 +2532,8 @@ function AdminPage() {
   const [appearanceForm, setAppearanceForm] = useState({ theme: state.settings?.appearance?.theme || state.settings?.theme || "light" });
   const [settingsMessage, setSettingsMessage] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [importCandidate, setImportCandidate] = useState(null);
+  const [testingClaude, setTestingClaude] = useState(false);
 
   const saveCompany = () => {
     if (!companyForm.name.trim()) {
@@ -2493,9 +2574,54 @@ function AdminPage() {
     setSettingsMessage("Integration settings saved. Claude key is stored on this device only.");
   };
 
+  const testClaudeConnection = async () => {
+    setTestingClaude(true);
+    try {
+      const result = await askSiteForgeAi({
+        userMessage: "Reply with the word 'pong' only.",
+        projectContext: {},
+        apiKey: integrationsForm.anthropicApiKey.trim(),
+      });
+      if (result.source === "claude" && /pong/i.test(result.text || "")) {
+        setSettingsMessage("✓ Claude API key works.");
+      } else if (result.source === "claude-error") {
+        setSettingsMessage(result.text || "Claude API key test failed.");
+      } else {
+        setSettingsMessage("Key did not produce a Claude response. Check the key, model name, and that your account has API access.");
+      }
+    } catch (error) {
+      setSettingsMessage(`Claude API key test failed: ${error?.message || "Unknown error"}`);
+    } finally {
+      setTestingClaude(false);
+    }
+  };
+
   const saveAppearance = () => {
     actions.updateSettings("appearance", appearanceForm);
     setSettingsMessage("Theme preference saved.");
+  };
+
+  const validateImportShape = (payload) =>
+    payload &&
+    Array.isArray(payload.sites) &&
+    Array.isArray(payload.users) &&
+    Array.isArray(payload.approvals) &&
+    payload.session &&
+    payload.settings;
+
+  const handleImportFile = async (file) => {
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      if (!validateImportShape(parsed)) {
+        setSettingsMessage("Import file does not match SiteForge schema.");
+        return;
+      }
+      setImportCandidate(parsed);
+      setSettingsMessage("Import file validated. Confirm replacement to restore it.");
+    } catch (error) {
+      setSettingsMessage(`Import failed: ${error?.message || "Invalid JSON file."}`);
+    }
   };
 
   const clearAllData = () => {
@@ -2600,7 +2726,10 @@ function AdminPage() {
           </div>
           <div className="fa" style={{ justifyContent: "flex-start" }}>
             <Button tone="bt-p" onClick={saveIntegrations}>
-            Save Integration Settings
+              Save Integration Settings
+            </Button>
+            <Button onClick={testClaudeConnection} disabled={testingClaude}>
+              {testingClaude ? "Testing..." : "Test Connection"}
             </Button>
             <Button
               onClick={() => {
@@ -2658,6 +2787,24 @@ function AdminPage() {
             </div>
             <div className="linked-row">
               <div>
+                <div className="b sm">Import data</div>
+                <div className="xs ct3">Restore a previously exported SiteForge JSON file.</div>
+              </div>
+              <label className="bt small">
+                Import JSON
+                <input
+                  type="file"
+                  accept="application/json,.json"
+                  style={{ display: "none" }}
+                  onChange={(event) => {
+                    handleImportFile(event.target.files?.[0]);
+                    event.target.value = "";
+                  }}
+                />
+              </label>
+            </div>
+            <div className="linked-row">
+              <div>
                 <div className="b sm">Clear all local data</div>
                 <div className="xs ct3">Type DELETE to wipe IndexedDB and local browser settings.</div>
               </div>
@@ -2667,6 +2814,24 @@ function AdminPage() {
           </div>
         </Card>
       </div>
+      <Modal open={Boolean(importCandidate)} close={() => setImportCandidate(null)} title="Import SiteForge Data">
+        <div className="sm ct2">
+          Replace current state with the imported data? Current local data will be overwritten.
+        </div>
+        <div className="fa">
+          <Button onClick={() => setImportCandidate(null)}>Cancel</Button>
+          <Button
+            tone="bt-r"
+            onClick={() => {
+              actions.importState(importCandidate);
+              setImportCandidate(null);
+              setSettingsMessage("Imported SiteForge data restored.");
+            }}
+          >
+            Replace Current State
+          </Button>
+        </div>
+      </Modal>
     </div>
   );
 }

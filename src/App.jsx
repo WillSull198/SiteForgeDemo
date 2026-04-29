@@ -20,7 +20,7 @@ import PresencePage from "./pages/PresencePage";
 import SitePassportPage from "./pages/SitePassportPage";
 import SubcontractorPortal from "./pages/SubcontractorPortal";
 import WorkerMobileView from "./pages/WorkerMobileView";
-import { can, getNavForRole } from "./services/permissions";
+import { can, getNavForRole, mustHandUpForApproval, routeKindForRole } from "./services/permissions";
 import { SiteForgeProvider, useSiteForge } from "./services/siteforgeStore";
 
 const PAGE_TITLES = {
@@ -194,7 +194,7 @@ function Shell() {
   }, [actions, role, state.demo.mode, state.session.siteId]);
 
   useEffect(() => {
-    document.title = role === "Director" ? `${APP_CONFIG.appTitle} Boardroom` : `${APP_CONFIG.appTitle} · ${PAGE_TITLES[route.page] || route.page}`;
+    document.title = route.kind === "director" ? `${APP_CONFIG.appTitle} Boardroom` : `${APP_CONFIG.appTitle} · ${PAGE_TITLES[route.page] || route.page}`;
     document.body.dataset.role = role.toLowerCase().replace(/\s+/g, "-");
   }, [role, route.page]);
 
@@ -226,7 +226,6 @@ function Shell() {
   const isClient = route.kind === "client";
   const isWorker = route.kind === "worker";
   const isSubcontractor = route.kind === "subcontractor";
-  const isDirector = route.kind === "director";
   const navSections = useMemo(() => getNavForRole(role), [role]);
   const routeKey = `${route.kind || "internal"}:${route.page || "dash"}:${route.siteId || ""}:${route.entityId || ""}:${state.session.userId || ""}`;
 
@@ -263,7 +262,7 @@ function Shell() {
   const breadcrumbItems = useMemo(() => {
     if (isClient || isWorker || isSubcontractor) return [];
     const items = [];
-    if (role === "Director") {
+    if (route.kind === "director") {
       items.push({ label: "Portfolio", route: { kind: "director", page: "boardroom", siteId: null }, active: route.page === "boardroom" });
       if (route.siteId) {
         items.push({ label: state.sites.find((site) => site.id === route.siteId)?.name || route.siteId, route: { kind: "director", page: route.page, siteId: route.siteId } });
@@ -309,7 +308,7 @@ function Shell() {
     } else if (page === "clientflow") {
       const fallbackSource = state.problems.find((problem) => problem.siteId === state.session.siteId);
       if (fallbackSource) {
-        actions.createApprovalFromSource({ sourceType: "problem", sourceId: fallbackSource.id, approvalType: "Variation", handUp: role === "Supervisor" });
+        actions.createApprovalFromSource({ sourceType: "problem", sourceId: fallbackSource.id, approvalType: "Variation", handUp: mustHandUpForApproval(role) });
       }
     } else {
       actions.addTask({ title: quickForm.title, description: quickForm.description, trade: user.trade || "General" });
@@ -350,7 +349,7 @@ function Shell() {
             </h1>
             <p>Construction operating layer</p>
           </div>
-          {role !== "Director" ? (
+          {route.kind !== "director" ? (
             <div className="S-st" onClick={() => actions.navigate({ kind: "internal", siteId: state.session.siteId, page: "portfolio", entityId: null })}>
               <div className="sn">{renderIcon(Icons.briefcase, 12)} Portfolio View</div>
               <div className="sa">{state.sites.length} sites</div>
@@ -368,9 +367,9 @@ function Shell() {
                       className={`N ${route.page === item.page ? "on" : ""}`.trim()}
                       onClick={() =>
                         actions.navigate({
-                          kind: role === "Director" ? "director" : "internal",
+                          kind: routeKindForRole(role),
                           page: item.page,
-                          siteId: role === "Director" ? route.siteId : state.session.siteId,
+                          siteId: route.kind === "director" ? route.siteId : state.session.siteId,
                           entityId: null,
                         })
                       }
@@ -404,7 +403,7 @@ function Shell() {
             </div>
             <div className="tr">
               <RoleSelector value={role} onChange={actions.setRole} roles={["Supervisor", "Project Manager", "Contract Admin", "Director", "Subcontractor", "Client", "Worker"]} currentUser={user} />
-              {role !== "Director" ? (
+              {route.kind !== "director" ? (
                 <select className="role-select" value={state.session.siteId} onChange={(event) => actions.setSite(event.target.value)}>
                   {derived.accessibleSites.map((site) => (
                     <option key={site.id} value={site.id}>
@@ -449,7 +448,7 @@ function Shell() {
         </main>
       </div>
 
-      {(role === "Supervisor" || role === "Project Manager") && (
+      {(can(role, "tasks.create") || can(role, "problems.create")) && route.kind === "internal" && (
         <button className="mobile-fab" type="button" onClick={() => setQuickNewOpen(true)}>
           {renderIcon(Icons.plus, 18)} New
         </button>

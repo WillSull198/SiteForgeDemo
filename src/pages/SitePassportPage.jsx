@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import DataTable from "../components/DataTable";
 import FileDropZone from "../components/FileDropZone";
 import { useSiteForge } from "../services/siteforgeStore";
+import { routeKindForRole } from "../services/permissions";
 import { Icons } from "../components/icons";
 import { Badge, Button, Card, MetricGrid, Modal, QrBadge, Tabs } from "../components/ui";
 
@@ -14,8 +15,9 @@ const callNumber = (value) => {
 export default function SitePassportPage() {
   const { state, actions } = useSiteForge();
   const role = state.session.role;
+  const roleRouteKind = routeKindForRole(role);
   const user = state.users.find((entry) => entry.id === state.session.userId);
-  const [tab, setTab] = useState(role === "Subcontractor" ? "passport" : "admin");
+  const [tab, setTab] = useState(roleRouteKind === "subcontractor" ? "passport" : "admin");
   const [scanOpen, setScanOpen] = useState(false);
   const [uploadingPassportId, setUploadingPassportId] = useState(null);
   const [selectedPassportId, setSelectedPassportId] = useState(
@@ -113,7 +115,7 @@ export default function SitePassportPage() {
     );
   };
 
-  if (!user && role === "Subcontractor") {
+  if (!user && roleRouteKind === "subcontractor") {
     return (
       <div className="oy fin">
         <div className="restricted">

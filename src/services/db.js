@@ -1,6 +1,6 @@
 /* SiteForge audit: Added the requested generic IndexedDB CRUD service. The app
-   still keeps its fast monolithic demo store, but this service gives upload,
-   photo, plan, settings, and future per-module records a clean persistent API. */
+   still keeps its fast monolithic demo store; this is the future per-record
+   store layer, with only PhotoUpload actively using it today. */
 
 const DB_NAME = "siteforge-v2";
 const DB_VERSION = 1;

@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import ContractViewer from "../components/ContractViewer";
 import { APP_CONFIG } from "../data/seedData";
 import { useSiteForge } from "../services/siteforgeStore";
+import { getBlob } from "../services/documentIntelligence";
 import { exportElementToPdf } from "../services/pdfService";
 import { Icons, renderIcon } from "../components/icons";
 import { Badge, Button, Modal } from "../components/ui";
@@ -73,6 +74,29 @@ export default function ClientPortalPage() {
   const pendingPacks = contracts.filter((pack) => pack.status !== "signed");
   const heroApprovalCount = approvals.filter((approval) => ["awaiting-client", "question", "changes-requested", "contract-awaiting-client"].includes(approval.status)).length;
   const availableSlots = state.pmAvailability.filter((slot) => !slot.booked);
+
+  const downloadContractPack = async (pack, fallbackElement, subtitle = "") => {
+    if (pack?.executedPdfBlobId) {
+      const blob = await getBlob(pack.executedPdfBlobId);
+      if (blob) {
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `${pack.docId}.pdf`;
+        anchor.click();
+        URL.revokeObjectURL(url);
+        return;
+      }
+    }
+    if (fallbackElement) {
+      await exportElementToPdf({
+        element: fallbackElement,
+        filename: `${pack.docId}.pdf`,
+        title: pack.docId,
+        subtitle,
+      });
+    }
+  };
 
   if (!client || !site) {
     return (
@@ -384,14 +408,7 @@ export default function ClientPortalPage() {
                   tone="bt-p"
                   onClick={async () => {
                     const node = document.querySelector(".contract-viewer");
-                    if (node) {
-                      await exportElementToPdf({
-                        element: node,
-                        filename: `${selectedContract.docId}.pdf`,
-                        title: selectedContract.docId,
-                        subtitle: `${selectedContract.template} · ${selectedContract.status}`,
-                      });
-                    }
+                    await downloadContractPack(selectedContract, node, `${selectedContract.template} · ${selectedContract.status}`);
                   }}
                 >
                   Download PDF
@@ -427,14 +444,7 @@ export default function ClientPortalPage() {
                         tone="bt-p"
                         onClick={async (event) => {
                           const node = event.currentTarget.closest(".client-feed-item");
-                          if (node) {
-                            await exportElementToPdf({
-                              element: node,
-                              filename: `${pack.docId}.pdf`,
-                              title: pack.docId,
-                              subtitle: pack.template,
-                            });
-                          }
+                          await downloadContractPack(pack, node, pack.template);
                         }}
                       >
                         Download PDF

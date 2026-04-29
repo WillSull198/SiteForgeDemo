@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import AIBlock from "../components/AIBlock";
 import DataTable from "../components/DataTable";
 import { useSiteForge } from "../services/siteforgeStore";
-import { can } from "../services/permissions";
+import { can, canSeeAllSites, mustHandUpForApproval } from "../services/permissions";
 import { Icons, renderIcon } from "../components/icons";
 import {
   Badge,
@@ -17,6 +17,7 @@ import {
 } from "../components/ui";
 
 const CREATE_OPTIONS = [
+  { value: "blank", label: "Type a fresh approval (no source)" },
   { value: "problem", label: "Problem / Issue" },
   { value: "diary", label: "Diary weather event" },
   { value: "rfi", label: "RFI" },
@@ -39,9 +40,16 @@ const analyticsAging = (approval, currentNow = Date.now()) => {
 };
 
 const defaultForm = {
-  sourceType: "problem",
+  sourceType: "blank",
   sourceId: "",
   approvalType: "Variation",
+  title: "",
+  clientId: "",
+  description: "",
+  reason: "",
+  costImpact: "",
+  timeImpactDays: "",
+  templateId: "",
 };
 
 export default function ClientFlowPage() {
@@ -64,7 +72,7 @@ export default function ClientFlowPage() {
   const siteApprovals = useMemo(
     () =>
       state.approvals
-        .filter((approval) => (role === "Director" ? true : approval.siteId === siteId))
+        .filter((approval) => (canSeeAllSites(role) ? true : approval.siteId === siteId))
         .sort((left, right) => (right.sentAt || right.timeline?.[0]?.at || "").localeCompare(left.sentAt || left.timeline?.[0]?.at || "")),
     [role, siteId, state.approvals],
   );
@@ -84,7 +92,7 @@ export default function ClientFlowPage() {
     if (routeEntityId) {
       setSelectedId(routeEntityId);
       const routed = state.approvals.find((approval) => approval.id === routeEntityId);
-      if (routed?.siteId && routed.siteId !== siteId && role !== "Director") {
+      if (routed?.siteId && routed.siteId !== siteId && !canSeeAllSites(role)) {
         actions.setSite(routed.siteId);
       }
     }
@@ -101,12 +109,26 @@ export default function ClientFlowPage() {
       safety: state.safety.filter((entry) => entry.type === "critical" || entry.type === "incident"),
     };
     return (collections[form.sourceType] || [])
-      .filter((item) => item.siteId === siteId || role === "Director")
+      .filter((item) => item.siteId === siteId || canSeeAllSites(role))
       .map((item) => ({
         id: item.id,
         label: item.title || item.item || item.number || item.topic || item.date,
       }));
   }, [form.sourceType, role, siteId, state]);
+
+  const clientOptions = useMemo(() => {
+    const allowedSiteIds = canSeeAllSites(role) ? state.sites.map((site) => site.id) : [siteId];
+    const clientIds = new Set(state.sites.filter((site) => allowedSiteIds.includes(site.id)).map((site) => site.clientId).filter(Boolean));
+    return state.clients.filter((client) => clientIds.has(client.id) || canSeeAllSites(role));
+  }, [role, siteId, state.clients, state.sites]);
+
+  const templateOptions = useMemo(
+    () =>
+      state.contractTemplates.filter(
+        (template) => template.status !== "archived" && (!template.type || template.type === form.approvalType || (form.approvalType === "Variation" && /variation/i.test(template.type))),
+      ),
+    [form.approvalType, state.contractTemplates],
+  );
 
   const metrics = useMemo(() => {
     const awaiting = siteApprovals.filter((approval) => approval.status === "awaiting-client").length;
@@ -124,12 +146,29 @@ export default function ClientFlowPage() {
   }, [siteApprovals]);
 
   const createApproval = () => {
-    if (!form.sourceId || !canCreateApproval) return;
+    if (!canCreateApproval) return;
+    if (form.sourceType === "blank") {
+      if (!form.title.trim() || !form.clientId || !form.description.trim() || !form.reason.trim() || form.costImpact === "") return;
+      actions.createApprovalFromBlank({
+        approvalType: form.approvalType,
+        clientId: form.clientId,
+        title: form.title.trim(),
+        description: form.description.trim(),
+        reason: form.reason.trim(),
+        costImpact: form.costImpact,
+        timeImpactDays: form.timeImpactDays,
+        templateId: form.templateId || null,
+      });
+      setCreateOpen(false);
+      setForm(defaultForm);
+      return;
+    }
+    if (!form.sourceId) return;
     actions.createApprovalFromSource({
       sourceType: form.sourceType,
       sourceId: form.sourceId,
       approvalType: form.approvalType,
-      handUp: role === "Supervisor",
+      handUp: mustHandUpForApproval(role),
     });
     setCreateOpen(false);
     setForm(defaultForm);
@@ -354,7 +393,7 @@ export default function ClientFlowPage() {
                       <div className="mt" style={{ maxHeight: 220 }}>
                         {(selected.messageThread || []).length ? (
                           selected.messageThread.map((entry) => (
-                            <div key={entry.id} className={`mm ${entry.role === "Client" ? "them" : "me"}`}>
+                            <div key={entry.id} className={`mm ${String(entry.role).toLowerCase() === "client" ? "them" : "me"}`}>
                               <div className="mf">{entry.by}</div>
                               <div>{entry.body}</div>
                               <div className="mt2">{entry.at}</div>
@@ -549,17 +588,68 @@ export default function ClientFlowPage() {
             </select>
           </div>
         </div>
-        <div className="ff">
-          <label>Source Record</label>
-          <select value={form.sourceId} onChange={(event) => setForm((current) => ({ ...current, sourceId: event.target.value }))}>
-            <option value="">Select source</option>
-            {sourceOptions.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        {form.sourceType === "blank" ? (
+          <>
+            <div className="g2">
+              <div className="ff">
+                <label>Title</label>
+                <input value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} placeholder="e.g. Waterproofing upgrade" />
+              </div>
+              <div className="ff">
+                <label>Client</label>
+                <select value={form.clientId} onChange={(event) => setForm((current) => ({ ...current, clientId: event.target.value }))}>
+                  <option value="">Select client</option>
+                  {clientOptions.map((client) => (
+                    <option key={client.id} value={client.id}>
+                      {client.primaryContact || client.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="ff">
+              <label>Description</label>
+              <textarea value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} placeholder="Describe the client-facing variation or approval request." />
+            </div>
+            <div className="ff">
+              <label>Reason</label>
+              <textarea value={form.reason} onChange={(event) => setForm((current) => ({ ...current, reason: event.target.value }))} placeholder="Why this approval is required." />
+            </div>
+            <div className="g2">
+              <div className="ff">
+                <label>Estimated cost</label>
+                <input type="number" value={form.costImpact} onChange={(event) => setForm((current) => ({ ...current, costImpact: event.target.value }))} />
+              </div>
+              <div className="ff">
+                <label>Time impact days</label>
+                <input type="number" value={form.timeImpactDays} onChange={(event) => setForm((current) => ({ ...current, timeImpactDays: event.target.value }))} />
+              </div>
+            </div>
+            <div className="ff">
+              <label>Template</label>
+              <select value={form.templateId} onChange={(event) => setForm((current) => ({ ...current, templateId: event.target.value }))}>
+                <option value="">Auto select best template</option>
+                {templateOptions.map((template) => (
+                  <option key={template.id} value={template.id}>
+                    {template.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </>
+        ) : (
+          <div className="ff">
+            <label>Source Record</label>
+            <select value={form.sourceId} onChange={(event) => setForm((current) => ({ ...current, sourceId: event.target.value }))}>
+              <option value="">Select source</option>
+              {sourceOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <div className="fa">
           <Button onClick={() => setCreateOpen(false)}>Cancel</Button>
           <Button tone="bt-p" icon={Icons.plus} onClick={createApproval}>

@@ -2,10 +2,26 @@ import { useEffect, useMemo, useState } from "react";
 import ContractViewer from "../components/ContractViewer";
 import FileDropZone from "../components/FileDropZone";
 import { useSiteForge } from "../services/siteforgeStore";
+import { getBlob } from "../services/documentIntelligence";
 import { exportElementToPdf } from "../services/pdfService";
 import { can } from "../services/permissions";
 import { Icons } from "../components/icons";
 import { Badge, Button, Card, Modal, Tabs } from "../components/ui";
+
+const KNOWN_MERGE_TOKENS = [
+  "project.name",
+  "client.name",
+  "builder.name",
+  "builder.abn",
+  "site.address",
+  "approval.cost",
+  "approval.days",
+  "approval.summary",
+  "approval.reason",
+  "approval.number",
+  "signature.client",
+  "date.today",
+];
 
 export default function ContractStudio() {
   const { state, actions } = useSiteForge();
@@ -25,6 +41,7 @@ export default function ContractStudio() {
     sourceContent: "",
   });
   const [clauseForm, setClauseForm] = useState({ title: "", text: "", tags: "commercial" });
+  const [tokenAliases, setTokenAliases] = useState({});
 
   const templates = state.contractTemplates;
   const selectedTemplate = templates.find((template) => template.id === selectedTemplateId) || templates[0];
@@ -50,6 +67,7 @@ export default function ContractStudio() {
 
   useEffect(() => {
     setTemplateDraft(selectedTemplate?.sourceContent || selectedTemplate?.clauses?.join("\n") || "");
+    setTokenAliases(selectedTemplate?.tokenAliases || {});
   }, [selectedTemplate]);
 
   const buildPrintNode = (pack) => {
@@ -97,6 +115,18 @@ export default function ContractStudio() {
   };
 
   const downloadContractPdf = async (pack) => {
+    if (pack?.executedPdfBlobId) {
+      const blob = await getBlob(pack.executedPdfBlobId);
+      if (blob) {
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `${pack.docId}.pdf`;
+        anchor.click();
+        URL.revokeObjectURL(url);
+        return;
+      }
+    }
     const activeNode = document.querySelector(".contract-viewer");
     const useActiveNode = activeNode && selectedContract?.docId === pack.docId;
     const node = useActiveNode ? activeNode : buildPrintNode(pack);
@@ -228,7 +258,11 @@ export default function ContractStudio() {
               description="Drop DOCX, TXT, MD or PDF templates. Merge fields will be detected automatically and saved for reuse."
               onFiles={async (files) => {
                 if (files?.length) {
-                  await actions.uploadTemplateFiles(files);
+                  const templateIds = await actions.uploadTemplateFiles(files);
+                  if (templateIds?.[0]) {
+                    setSelectedTemplateId(templateIds[0]);
+                    setTab("templates");
+                  }
                 }
               }}
             />
@@ -251,12 +285,45 @@ export default function ContractStudio() {
             {selectedTemplate ? (
               <>
                 <div className="client-copy">{selectedTemplate.branding}</div>
-                <div className="fx" style={{ gap: 6, flexWrap: "wrap", marginTop: 10 }}>
-                  {(selectedTemplate.mergeTokens || []).map((token) => (
-                    <span className="tag" key={token}>
-                      {`{{${token}}}`}
-                    </span>
-                  ))}
+                <div className="list-stack" style={{ marginTop: 10 }}>
+                  {(selectedTemplate.mergeTokens || []).length ? (
+                    (selectedTemplate.mergeTokens || []).map((token) => {
+                      const mapped = tokenAliases[token] || token;
+                      const known = KNOWN_MERGE_TOKENS.includes(mapped);
+                      return (
+                        <div className="linked-row" key={token}>
+                          <div>
+                            <div className="b sm">{`{{${token}}}`}</div>
+                            <div className="xs ct3">{known ? `Maps to ${mapped}` : "Unknown token - map before activating"}</div>
+                          </div>
+                          <div className="fx" style={{ gap: 6 }}>
+                            <Badge tone={known ? "passed" : "high"}>{known ? "Matched" : "Needs mapping"}</Badge>
+                            <select
+                              className="inline-input"
+                              value={tokenAliases[token] || (KNOWN_MERGE_TOKENS.includes(token) ? token : "")}
+                              onChange={(event) =>
+                                setTokenAliases((current) => {
+                                  const next = { ...current };
+                                  if (event.target.value) next[token] = event.target.value;
+                                  else delete next[token];
+                                  return next;
+                                })
+                              }
+                            >
+                              <option value="">Leave unresolved</option>
+                              {KNOWN_MERGE_TOKENS.map((knownToken) => (
+                                <option key={knownToken} value={knownToken}>
+                                  {knownToken}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="xs ct3">No merge tokens detected in this template.</div>
+                  )}
                 </div>
                 <div className="ff" style={{ marginTop: 12 }}>
                   <label>Template body</label>
@@ -274,6 +341,8 @@ export default function ContractStudio() {
                         sourceContent: templateDraft,
                         clauses: templateDraft.split("\n").filter(Boolean),
                         branding: selectedTemplate.branding,
+                        tokenAliases,
+                        status: "active",
                       })
                     }
                   >

@@ -17,8 +17,10 @@ import {
 } from "./aiDraftService";
 import { appendAuditEntry, exportAuditCsv, verifyAuditChain } from "./auditTrail";
 import { buildContractSummary, generateDraft, signContract } from "./contractService";
-import { diffPlans, parseTemplate, removeFileEverywhere, uploadFile, uploadSeededTextFile, buildTemplatePreviewContent } from "./documentIntelligence";
+import { generateSignedContractPdfBlob } from "./pdfService";
+import { diffPlans, parseTemplate, removeFileEverywhere, uploadFile, uploadSeededTextFile, buildTemplatePreviewContent, putBlob } from "./documentIntelligence";
 import { dispatchNotificationEvent } from "./notificationEngine";
+import { canSeeAllSites, routeKindForRole } from "./permissions";
 
 const SiteForgeContext = createContext(null);
 
@@ -283,8 +285,8 @@ function buildHash(route) {
 
 function getDefaultRouteForRole(role, state) {
   const base = cloneState(DEFAULT_ROLE_PAGES[role] || DEFAULT_ROLE_PAGES.Supervisor);
-  if (role === "Client") {
-    const clientUser = state?.users?.find((user) => user.role === "Client" && user.id === DEFAULT_ROLE_USERS.Client);
+  if (routeKindForRole(role) === "client") {
+    const clientUser = state?.users?.find((user) => routeKindForRole(user.role) === "client" && user.id === DEFAULT_ROLE_USERS.Client);
     base.clientId = clientUser?.clientId || "c1";
   }
   if (base.kind === "internal") {
@@ -311,10 +313,10 @@ function getCurrentSite(state) {
 }
 
 function getAccessibleSiteIds(state, role, userId) {
-  if (role === "Director" || role === "Contract Admin") {
+  if (canSeeAllSites(role)) {
     return state.sites.map((site) => site.id);
   }
-  if (role === "Client") {
+  if (routeKindForRole(role) === "client") {
     const user = state.users.find((item) => item.id === userId);
     return user?.siteIds || [];
   }
@@ -358,13 +360,8 @@ function normaliseState(state) {
   if (route.kind === "internal" && !accessibleSiteIds.includes(route.siteId)) {
     route.siteId = fallbackSiteId;
   }
-  if (role === "Director" && route.kind !== "director") {
-    next.session.route = getDefaultRouteForRole(role, next);
-  } else if (role === "Client" && route.kind !== "client") {
-    next.session.route = getDefaultRouteForRole(role, next);
-  } else if (role === "Worker" && route.kind !== "worker") {
-    next.session.route = getDefaultRouteForRole(role, next);
-  } else if (role === "Subcontractor" && route.kind !== "subcontractor") {
+  const expectedRouteKind = routeKindForRole(role);
+  if (["director", "client", "worker", "subcontractor"].includes(expectedRouteKind) && route.kind !== expectedRouteKind) {
     next.session.route = getDefaultRouteForRole(role, next);
   } else if (INTERNAL_ROLES.has(role) && route.kind !== "internal") {
     next.session.route = getDefaultRouteForRole(role, next);
@@ -630,7 +627,7 @@ function buildSearchResults(state, query) {
       label: (item) => item.name,
       haystack: (item) => [item.name, item.role, item.trade, item.company],
       route: (item) =>
-        item.role === "Client"
+        routeKindForRole(item.role) === "client"
           ? { kind: "client", clientId: item.clientId, page: "home", entityId: null }
           : { kind: "internal", siteId: item.siteIds?.[0] || "s1", page: "team", entityId: item.id },
     },
@@ -723,6 +720,48 @@ function nextScopedNumber(state, collectionName, siteId, prefix, field = "number
     return Number.isFinite(value) ? Math.max(max, value) : max;
   }, 0);
   return `${prefix}-${String(highest + 1).padStart(3, "0")}`;
+}
+
+function inferTemplateType(name = "") {
+  if (/rain|eot|extension/i.test(name)) return "Rain Day";
+  if (/delay/i.test(name)) return "Delay Notice";
+  if (/selection|upgrade/i.test(name)) return "Selection Upgrade";
+  if (/variation|vo[\s-]/i.test(name)) return "Variation";
+  return "Variation";
+}
+
+function firstMeaningfulLine(text = "", fallback = "Uploaded template") {
+  return (text.split(/\n+/).map((line) => line.trim()).find(Boolean) || fallback).slice(0, 100);
+}
+
+function clausesFromText(text = "") {
+  const clauses = text
+    .split(/\n{2,}/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return clauses.length ? clauses : [text.trim()].filter(Boolean);
+}
+
+function inferTokenAlias(token = "") {
+  const normalised = token.toLowerCase().replace(/[_\s-]+/g, ".");
+  const aliases = {
+    client: "client.name",
+    "client.name": "client.name",
+    cost: "approval.cost",
+    "estimated.cost": "approval.cost",
+    "estimated_cost": "approval.cost",
+    date: "date.today",
+    "date.issued": "date.today",
+    "project.name": "site.name",
+    "project.address": "site.address",
+    "site.address": "site.address",
+    "builder.name": "builder.name",
+    "builder.abn": "builder.abn",
+    "variation.number": "approval.number",
+    "variation.description": "approval.summary",
+    "time.impact.days": "approval.days",
+  };
+  return aliases[normalised] || "";
 }
 
 function ensureVariationForApproval(state, approval) {
@@ -931,7 +970,7 @@ function materialiseContractTemplate(contractPack, approval, state) {
   }
 
   const mergeData = getApprovalMergeData(state, approval);
-  const preview = buildTemplatePreviewContent(template.sourceContent, mergeData);
+  const preview = buildTemplatePreviewContent(template.sourceContent, mergeData, template.tokenAliases || {});
   contractPack.content = {
     sections: preview.sections,
     mergeData,
@@ -1409,6 +1448,51 @@ export function SiteForgeProvider({ children }) {
     [setState, state.session.route],
   );
 
+  const persistExecutedPdf = useCallback(
+    async (payload) => {
+      if (!payload?.contractPack?.docId) return;
+      try {
+        const blob = await generateSignedContractPdfBlob(payload);
+        const blobId = `executed-pdf-${payload.contractPack.docId}`;
+        await putBlob(blobId, blob);
+        mutate((next, helpers) => {
+          const pack = next.contractPacks.find((entry) => entry.docId === payload.contractPack.docId);
+          const document = next.documents.find((entry) => entry.contractPackId === payload.contractPack.docId);
+          if (pack) {
+            pack.executedPdfBlobId = blobId;
+            pack.pdfArchiveLabel = `${pack.docId}.pdf`;
+          }
+          if (document) {
+            document.fileId = blobId;
+            document.fileName = `${payload.contractPack.docId}.pdf`;
+            document.mimeType = "application/pdf";
+            document.immutable = true;
+          }
+          helpers.addAudit({
+            action: "contract.executed-pdf-stored",
+            entityType: "contractPack",
+            entityId: payload.contractPack.docId,
+            before: null,
+            after: { executedPdfBlobId: blobId },
+            siteId: payload.contractPack.siteId,
+          });
+        });
+      } catch (error) {
+        mutate((next, helpers) => {
+          helpers.addAudit({
+            action: "contract.executed-pdf-failed",
+            entityType: "contractPack",
+            entityId: payload.contractPack.docId,
+            before: null,
+            after: { error: error?.message || "PDF generation failed" },
+            siteId: payload.contractPack.siteId,
+          });
+        });
+      }
+    },
+    [mutate],
+  );
+
   useEffect(() => {
     if (typeof window !== "undefined") {
       window.__siteforgeNow = state.demo?.simulatedNow || nowStamp();
@@ -1423,7 +1507,8 @@ export function SiteForgeProvider({ children }) {
 
   useEffect(() => {
     if (!state.demo?.mode) return undefined;
-    const timer = window.setInterval(() => {
+    let timer = null;
+    const fireDemoEvent = () => {
       mutate((next, helpers) => {
         if (!next.demo.queuedEvents.length) return;
         const event = next.demo.queuedEvents.shift();
@@ -1444,9 +1529,12 @@ export function SiteForgeProvider({ children }) {
           route: next.session.route,
         });
       });
-    }, 26000);
+      const nextDelay = 26000 + Math.floor(Math.random() * 28000);
+      timer = window.setTimeout(fireDemoEvent, nextDelay);
+    };
+    timer = window.setTimeout(fireDemoEvent, 26000 + Math.floor(Math.random() * 28000));
 
-    return () => window.clearInterval(timer);
+    return () => window.clearTimeout(timer);
   }, [mutate, state.demo?.mode]);
 
   const actions = useMemo(
@@ -1455,6 +1543,11 @@ export function SiteForgeProvider({ children }) {
       resetDemo() {
         setState(createInitialStore());
         window.location.hash = buildHash(DEFAULT_ROLE_PAGES.Supervisor);
+      },
+      importState(importedState) {
+        const imported = normaliseState(migrateLegacyState(cloneState(importedState)));
+        setState(imported);
+        window.location.hash = buildHash(imported.session?.route || DEFAULT_ROLE_PAGES.Supervisor);
       },
       setRole(role) {
         setState((previous) => {
@@ -1869,7 +1962,7 @@ export function SiteForgeProvider({ children }) {
             summary: aiDraft.summary,
             reason: aiDraft.reason,
             recommendation: aiDraft.recommendation,
-            status: handUp || helpers.actor.role === "Supervisor" ? "draft" : "draft",
+            status: "draft",
             priority: source.priority || "medium",
             sourceType,
             sourceId,
@@ -1916,6 +2009,87 @@ export function SiteForgeProvider({ children }) {
             siteId,
           });
         });
+      },
+      createApprovalFromBlank({ approvalType = "Variation", clientId, title, description, reason, costImpact = 0, timeImpactDays = 0, templateId = null }) {
+        let targetRoute = null;
+        mutate((next, helpers) => {
+          const siteId = next.session.siteId;
+          const site = next.sites.find((item) => item.id === siteId) || next.sites[0];
+          const client = next.clients.find((item) => item.id === clientId) || next.clients.find((item) => item.id === site?.clientId) || next.clients[0];
+          if (!site || !client) return;
+          const numericCost = Number(costImpact || 0);
+          const numericDays = Number(timeImpactDays || 0);
+          const portalToken = uuid();
+          const approval = {
+            id: randomId("ap"),
+            number: nextScopedNumber(next, "approvals", site.id, "CF"),
+            siteId: site.id,
+            clientId: client.id,
+            type: approvalType,
+            title: title || `${approvalType} approval`,
+            summary: description || "",
+            reason: reason || "",
+            recommendation: "Recommended for issue to client for review and signature.",
+            status: "draft",
+            priority: "medium",
+            sourceType: "manual",
+            sourceId: null,
+            createdBy: helpers.actor.id,
+            ownerId: site.pmId || helpers.actor.id,
+            sentAt: null,
+            dueAt: addDays(formatDate(), 3),
+            viewedAt: null,
+            costImpact: numericCost,
+            timeImpact: numericDays,
+            templateId,
+            linkedRecords: [],
+            attachments: [],
+            aiDraft: {
+              summary: description || "",
+              reason: reason || "",
+              recommendation: "Recommended for issue to client for review and signature.",
+              costImpact: numericCost,
+              timeImpact: numericDays,
+            },
+            timeline: [],
+            messageThread: [],
+            contractPackId: null,
+            portalToken,
+            portalUrl: `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${portalToken}`,
+          };
+          helpers.appendTimeline(approval, {
+            type: "created",
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            text: `${helpers.actor.role} created a fresh approval draft.`,
+          });
+          next.approvals.unshift(approval);
+          const variation = helpers.ensureVariation(approval);
+          if (variation) {
+            upsertLinkedRecord(variation, buildLink("approval", approval, site.id));
+            upsertLinkedRecord(approval, buildLink("variation", variation, site.id));
+          }
+          helpers.addAudit({
+            action: "approval.create.blank",
+            entityType: "approval",
+            entityId: approval.id,
+            before: null,
+            after: { status: approval.status, type: approval.type, costImpact: approval.costImpact },
+            siteId: site.id,
+          });
+          helpers.emit({
+            eventType: "approval.created",
+            title: `Approval draft created - ${approval.number}`,
+            body: approval.title,
+            siteId: site.id,
+            entityType: "approval",
+            entityId: approval.id,
+            recipients: getRecipientsForRoles(next, ["Project Manager", "Contract Admin"]),
+            route: { kind: "internal", siteId: site.id, page: "clientflow", entityId: approval.id },
+          });
+          targetRoute = { kind: "internal", siteId: site.id, page: "clientflow", entityId: approval.id };
+        });
+        if (targetRoute) navigate(targetRoute);
       },
       updateApprovalDraft(approvalId, patch) {
         mutate((next, helpers) => {
@@ -2411,15 +2585,25 @@ export function SiteForgeProvider({ children }) {
           });
         });
       },
-      signClientContract(contractId, name) {
+      async signClientContract(contractId, name) {
+        let pdfPayload = null;
         mutate((next, helpers) => {
           const contractPack = next.contractPacks.find((item) => item.docId === contractId);
           if (!contractPack) return;
           const approval = next.approvals.find((item) => item.id === contractPack.approvalId);
+          const client = next.clients.find((item) => item.id === approval?.clientId);
           finaliseClientSignedContract(next, helpers, contractPack, approval, name);
+          pdfPayload = {
+            contractPack: cloneState(contractPack),
+            approval: cloneState(approval),
+            builder: cloneState(next.company || next.settings?.company || APP_CONFIG.builder),
+            client: cloneState(client || {}),
+          };
         });
+        await persistExecutedPdf(pdfPayload);
       },
-      approveAndSignApproval(approvalId, signerName, note = "") {
+      async approveAndSignApproval(approvalId, signerName, note = "") {
+        let pdfPayload = null;
         mutate((next, helpers) => {
           const approval = next.approvals.find((item) => item.id === approvalId);
           if (!approval) return;
@@ -2481,7 +2665,14 @@ export function SiteForgeProvider({ children }) {
             });
           }
           finaliseClientSignedContract(next, helpers, contractPack, approval, signerName || client?.primaryContact || "Client");
+          pdfPayload = {
+            contractPack: cloneState(contractPack),
+            approval: cloneState(approval),
+            builder: cloneState(next.company || next.settings?.company || APP_CONFIG.builder),
+            client: cloneState(client || {}),
+          };
         });
+        await persistExecutedPdf(pdfPayload);
       },
       archiveContract(contractId) {
         mutate((next, helpers) => {
@@ -2866,9 +3057,14 @@ export function SiteForgeProvider({ children }) {
         });
       },
       createVariationFromDiary(diaryId, payload) {
+        let targetRoute = null;
         mutate((next, helpers) => {
           const diary = next.diary.find((entry) => entry.id === diaryId);
           if (!diary) return;
+          const site = next.sites.find((entry) => entry.id === diary.siteId) || next.sites[0];
+          const client = next.clients.find((entry) => entry.id === site?.clientId) || next.clients[0];
+          const numericValue = Number(payload.value || 0);
+          const numericDays = Number(payload.days || 0);
           const variation = {
             id: randomId("var"),
             siteId: diary.siteId,
@@ -2878,8 +3074,8 @@ export function SiteForgeProvider({ children }) {
             sourceId: diary.id,
             status: "submitted",
             priority: payload.priority || "medium",
-            value: Number(payload.value || 0),
-            days: Number(payload.days || 0),
+            value: numericValue,
+            days: numericDays,
             description: payload.description || diary.summary,
             reason: payload.reason || diary.delays || "Diary event changed the recoverable scope or programme basis.",
             templateId: payload.templateId || next.settings?.contractDefaults?.standardVariationTemplate || null,
@@ -2892,6 +3088,76 @@ export function SiteForgeProvider({ children }) {
           };
           next.variations.unshift(variation);
           upsertLinkedRecord(diary, buildLink("variation", variation, diary.siteId));
+          if (payload.releaseToClient !== false && site && client) {
+            const portalToken = uuid();
+            const approvalStatus = payload.sendImmediately === false ? "draft" : "awaiting-client";
+            const approval = {
+              id: randomId("ap"),
+              number: nextScopedNumber(next, "approvals", diary.siteId, "CF"),
+              siteId: diary.siteId,
+              clientId: client.id,
+              type: "Variation",
+              title: variation.title,
+              summary: variation.description,
+              reason: variation.reason,
+              recommendation: "Recommended for issue to client for review and signature.",
+              status: approvalStatus,
+              priority: variation.priority,
+              sourceType: "variation",
+              sourceId: variation.id,
+              createdBy: helpers.actor.id,
+              ownerId: site.pmId || helpers.actor.id,
+              sentAt: approvalStatus === "awaiting-client" ? nowStamp() : null,
+              dueAt: addDays(formatDate(), 3),
+              viewedAt: null,
+              costImpact: numericValue,
+              timeImpact: numericDays,
+              templateId: variation.templateId,
+              linkedRecords: [buildLink("diary", diary, diary.siteId), buildLink("variation", variation, diary.siteId)],
+              attachments: buildSourceAttachments(variation),
+              aiDraft: {
+                summary: variation.description,
+                reason: variation.reason,
+                recommendation: "Recommended for issue to client for review and signature.",
+                costImpact: numericValue,
+                timeImpact: numericDays,
+              },
+              timeline: [],
+              messageThread: [],
+              contractPackId: null,
+              portalToken,
+              portalUrl: `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${portalToken}`,
+            };
+            helpers.appendTimeline(approval, {
+              type: approvalStatus === "awaiting-client" ? "sent" : "created",
+              actor: actorName(helpers.actor),
+              role: helpers.actor.role,
+              text: approvalStatus === "awaiting-client" ? "Diary variation issued to the client portal." : "Diary variation prepared as a ClientFlow draft.",
+            });
+            next.approvals.unshift(approval);
+            variation.clientApprovalId = approval.id;
+            upsertLinkedRecord(variation, buildLink("approval", approval, diary.siteId));
+            upsertLinkedRecord(diary, buildLink("approval", approval, diary.siteId));
+            helpers.addAudit({
+              action: approvalStatus === "awaiting-client" ? "approval.send.from_diary" : "approval.create.from_diary",
+              entityType: "approval",
+              entityId: approval.id,
+              before: null,
+              after: { status: approval.status, variationId: variation.id, costImpact: approval.costImpact },
+              siteId: diary.siteId,
+            });
+            helpers.emit({
+              eventType: "approval.created",
+              title: `${approval.number} created from diary variation`,
+              body: approvalStatus === "awaiting-client" ? `${approval.title} is awaiting client approval and signature.` : `${approval.title} is ready for PM review.`,
+              siteId: diary.siteId,
+              entityType: "approval",
+              entityId: approval.id,
+              recipients: getRecipientsForRoles(next, ["Project Manager", "Contract Admin"]),
+              route: { kind: "internal", siteId: diary.siteId, page: "clientflow", entityId: approval.id },
+            });
+            targetRoute = { kind: "internal", siteId: diary.siteId, page: "clientflow", entityId: approval.id };
+          }
           helpers.addAudit({
             action: "diary.convert_to_variation",
             entityType: "variation",
@@ -2911,6 +3177,7 @@ export function SiteForgeProvider({ children }) {
             route: { kind: "internal", siteId: diary.siteId, page: "vos", entityId: variation.id },
           });
         });
+        if (targetRoute) navigate(targetRoute);
       },
       addSafetyRecord(payload) {
         mutate((next, helpers) => {
@@ -3911,6 +4178,7 @@ export function SiteForgeProvider({ children }) {
       },
       async uploadTemplateFiles(fileList) {
         const incoming = Array.from(fileList || []);
+        const uploadedTemplateIds = [];
         for (const file of incoming) {
           const metadata = await uploadFile({
             file,
@@ -3918,26 +4186,38 @@ export function SiteForgeProvider({ children }) {
             siteId: state.session.siteId,
             entityType: "template",
           });
+          const extracted = metadata.extractedText || metadata.seedContent || "";
+          const templateParse = parseTemplate(extracted);
+          const templateId = randomId("tpl");
+          const tokenAliases = Object.fromEntries(
+            templateParse.tokens
+              .map((token) => [token, inferTokenAlias(token)])
+              .filter(([, alias]) => alias),
+          );
+          uploadedTemplateIds.push(templateId);
           setState((previous) => {
             const next = cloneState(previous);
-            const templateParse = parseTemplate(metadata.extractedText || metadata.seedContent || "");
             next.files.records.unshift(metadata);
             next.contractTemplates.unshift({
-              id: randomId("tpl"),
-              type: "Variation",
+              id: templateId,
+              type: inferTemplateType(metadata.name),
               name: metadata.name.replace(/\.[^.]+$/, ""),
               version: "v1",
-              status: "active",
-              branding: "Uploaded template",
-              clauses: ["Use uploaded template body for contract generation."],
+              status: "draft",
+              branding: firstMeaningfulLine(extracted, "Uploaded template pending review"),
+              classification: metadata.classification,
+              clauses: clausesFromText(extracted),
               versionHistory: [{ id: randomId("tplh"), version: "v1", at: nowStamp(), by: actorName(getCurrentUser(next)) }],
               mergeTokens: templateParse.tokens,
+              tokenAliases,
               sourceFileId: metadata.id,
-              sourceContent: metadata.extractedText || metadata.seedContent || "",
+              sourceContent: extracted,
             });
+            next.ui.activeTemplateId = templateId;
             return normaliseState(next);
           });
         }
+        return uploadedTemplateIds;
       },
       createTemplate(payload) {
         mutate((next, helpers) => {
@@ -4219,7 +4499,7 @@ export function SiteForgeProvider({ children }) {
         return exportAuditCsv(state.auditTrail);
       },
     }),
-    [mutate, navigate, setState, state],
+    [mutate, navigate, persistExecutedPdf, setState, state],
   );
 
   const derived = useMemo(() => {
@@ -4229,7 +4509,7 @@ export function SiteForgeProvider({ children }) {
     const accessibleSiteIds = getAccessibleSiteIds(state, state.session.role, state.session.userId);
     const accessibleSites = state.sites.filter((site) => accessibleSiteIds.includes(site.id));
     const notificationsForUser = state.notifications.items.filter((item) => {
-      if (state.session.role === "Client") {
+      if (routeKindForRole(state.session.role) === "client") {
         return item.recipientId === currentClient.id || item.recipientId === state.session.userId;
       }
       return item.recipientId === state.session.userId || item.recipientRole === state.session.role;

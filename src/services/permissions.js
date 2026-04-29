@@ -71,6 +71,22 @@ export function canAny(role, permissions = []) {
   return permissions.some((permission) => can(role, permission));
 }
 
+export function canSeeAllSites(role) {
+  return ["Director", "Contract Admin"].includes(role);
+}
+
+export function routeKindForRole(role) {
+  if (role === "Director") return "director";
+  if (role === "Client") return "client";
+  if (role === "Worker") return "worker";
+  if (role === "Subcontractor") return "subcontractor";
+  return "internal";
+}
+
+export function mustHandUpForApproval(role) {
+  return role === "Supervisor";
+}
+
 export function getNavForRole(role) {
   if (role === "Director") {
     return [

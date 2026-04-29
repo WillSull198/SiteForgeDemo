@@ -4,6 +4,7 @@
 
 import { useMemo, useState } from "react";
 import { askSiteForgeAi } from "../services/aiService";
+import { mustHandUpForApproval, routeKindForRole } from "../services/permissions";
 import { useSiteForge } from "../services/siteforgeStore";
 import { Icons, renderIcon } from "./icons";
 import { Button, Badge } from "./ui";
@@ -23,7 +24,7 @@ function buildSuggestions(state, derived, actions) {
       title: `${overdueProblems.length} problems are still open`,
       body: "Raise a client approval from the oldest open issue to preserve recovery leverage.",
       actionLabel: "Raise Approval",
-      onClick: () => actions.createApprovalFromSource({ sourceType: "problem", sourceId: overdueProblems[0].id, approvalType: "Variation", handUp: state.session.role === "Supervisor" }),
+      onClick: () => actions.createApprovalFromSource({ sourceType: "problem", sourceId: overdueProblems[0].id, approvalType: "Variation", handUp: mustHandUpForApproval(state.session.role) }),
     });
   }
 
@@ -67,7 +68,7 @@ function buildSuggestions(state, derived, actions) {
       title: "No urgent AI suggestions right now",
       body: "The current site data looks balanced. You can still open ClientFlow, Procurement, or QA to push the next action.",
       actionLabel: "Open Dashboard",
-      onClick: () => actions.navigate({ kind: state.session.role === "Director" ? "director" : "internal", siteId, page: "dash", entityId: null }),
+      onClick: () => actions.navigate({ kind: routeKindForRole(state.session.role), siteId, page: "dash", entityId: null }),
     });
   }
 
@@ -131,7 +132,7 @@ export default function AIAssistantDrawer({ open, onClose }) {
           <div className="ai-chat-log">
             {chat.map((entry) => (
               <div className={`ai-chat-msg ${entry.role}`} key={entry.id}>
-                <div className="xs ct3">{entry.role === "user" ? "You" : `SiteForge AI · ${entry.source}`}</div>
+                <div className="xs ct3">{String(entry.role).toLowerCase() === "user" ? "You" : `SiteForge AI · ${entry.source}`}</div>
                 <div className="sm">{entry.text}</div>
               </div>
             ))}

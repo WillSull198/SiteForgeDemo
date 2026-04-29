@@ -328,7 +328,16 @@ export function extractFields(classification, text = "", name = "") {
 }
 
 export function parseMergeTokens(text = "") {
-  return [...new Set([...text.matchAll(/\{\{\s*([a-z0-9_.-]+)\s*\}\}/gi)].map((match) => match[1]))];
+  return [
+    ...new Set([
+      ...[...text.matchAll(/\{\{\s*([a-z0-9_.-]+)\s*\}\}/gi)].map((match) => match[1]),
+      ...[...text.matchAll(/\[([a-z0-9_\s.-]+)\]/gi)].map((match) => match[1].trim().toLowerCase().replace(/\s+/g, ".")),
+      ...[...text.matchAll(/__([A-Z0-9_]+)__/g)].map((match) => match[1].toLowerCase().replace(/_/g, ".")),
+      ...[...text.matchAll(/\b(PROJECT_NAME|CLIENT_NAME|CLIENT|BUILDER_NAME|BUILDER_ABN|SITE_ADDRESS|PROJECT_ADDRESS|VARIATION_NUMBER|VARIATION_DESCRIPTION|ESTIMATED_COST|TIME_IMPACT_DAYS|DATE|DATE_ISSUED)\b/g)].map((match) =>
+        match[1].toLowerCase().replace(/_/g, "."),
+      ),
+    ]),
+  ];
 }
 
 export function parseTemplate(fileRecord) {
@@ -353,17 +362,34 @@ export function diffPlans(oldRecord, newRecord) {
   };
 }
 
-export function buildTemplatePreviewContent(templateText, mergeData = {}) {
+export function buildTemplatePreviewContent(templateText, mergeData = {}, tokenAliases = {}) {
   const tokens = parseMergeTokens(templateText);
   let content = templateText;
   const unresolved = [];
+  const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   tokens.forEach((token) => {
-    const replacement = token.split(".").reduce((acc, key) => (acc ? acc[key] : undefined), mergeData);
+    const canonicalToken = tokenAliases[token] || token;
+    const replacement = Object.prototype.hasOwnProperty.call(mergeData, canonicalToken)
+      ? mergeData[canonicalToken]
+      : canonicalToken.split(".").reduce((acc, key) => (acc ? acc[key] : undefined), mergeData);
+    const tokenPattern = escapeRegExp(token);
+    const bracketPattern = token.split(".").map(escapeRegExp).join("\\s+");
+    const legacyCapsPattern = escapeRegExp(token.replace(/\./g, "_").toUpperCase());
+    const patterns = [
+      new RegExp(`\\{\\{\\s*${tokenPattern}\\s*\\}\\}`, "g"),
+      new RegExp(`\\[\\s*${bracketPattern}\\s*\\]`, "gi"),
+      new RegExp(`__${escapeRegExp(token.replace(/\./g, "_").toUpperCase())}__`, "g"),
+      new RegExp(`\\b${legacyCapsPattern}\\b`, "g"),
+    ];
     if (replacement === undefined || replacement === null || replacement === "") {
       unresolved.push(token);
-      content = content.replaceAll(new RegExp(`\\{\\{\\s*${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\}\\}`, "g"), `[[${token}]]`);
+      patterns.forEach((pattern) => {
+        content = content.replaceAll(pattern, `[[${canonicalToken}]]`);
+      });
     } else {
-      content = content.replaceAll(new RegExp(`\\{\\{\\s*${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\}\\}`, "g"), String(replacement));
+      patterns.forEach((pattern) => {
+        content = content.replaceAll(pattern, String(replacement));
+      });
     }
   });
   const clauses = content

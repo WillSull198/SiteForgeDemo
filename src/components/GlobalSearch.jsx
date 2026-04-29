@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { routeKindForRole } from "../services/permissions";
 import { Icons, renderIcon } from "./icons";
 
 const ROLE_ORDER = ["Supervisor", "Project Manager", "Contract Admin", "Director", "Subcontractor", "Client", "Worker"];
 
 function buildCommands(role, query = "") {
   const q = query.trim().toLowerCase();
+  const routeKind = routeKindForRole(role);
+  const directorRoute = routeKind === "director";
   const commands = [
-    { id: "cmd-create-task", title: "Create task", subtitle: "Open Tasks workspace", action: { type: "navigate", route: { kind: role === "Director" ? "director" : "internal", page: role === "Director" ? "boardroom" : "tasks", siteId: "s1", entityId: null } } },
-    { id: "cmd-clientflow", title: "Go to ClientFlow", subtitle: "Navigate to approvals", action: { type: "navigate", route: { kind: role === "Director" ? "director" : "internal", page: role === "Director" ? "commercial-risk" : "clientflow", siteId: "s1", entityId: null } } },
+    { id: "cmd-create-task", title: "Create task", subtitle: "Open Tasks workspace", action: { type: "navigate", route: { kind: routeKind, page: directorRoute ? "boardroom" : "tasks", siteId: "s1", entityId: null } } },
+    { id: "cmd-clientflow", title: "Go to ClientFlow", subtitle: "Navigate to approvals", action: { type: "navigate", route: { kind: routeKind, page: directorRoute ? "commercial-risk" : "clientflow", siteId: "s1", entityId: null } } },
     { id: "cmd-board", title: "Generate board report", subtitle: "Run the current board report action", action: { type: "board-report" } },
     { id: "cmd-demo", title: "Toggle demo mode", subtitle: "Switch between demo and live modes", action: { type: "demo" } },
     ...ROLE_ORDER.map((entry) => ({

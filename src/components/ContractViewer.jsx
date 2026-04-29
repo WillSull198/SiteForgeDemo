@@ -1,11 +1,24 @@
 import { useMemo, useState } from "react";
 import { Icons, renderIcon } from "./icons";
 import { exportElementToPdf } from "../services/pdfService";
-import { can } from "../services/permissions";
+import { getBlob } from "../services/documentIntelligence";
+import { can, routeKindForRole } from "../services/permissions";
 import { Button } from "./ui";
 
 const downloadContract = async (contractPack) => {
   if (!contractPack) return;
+  if (contractPack.executedPdfBlobId) {
+    const blob = await getBlob(contractPack.executedPdfBlobId);
+    if (blob) {
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${contractPack.docId}.pdf`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+  }
   const node = document.querySelector(".contract-viewer");
   if (!node) return;
   await exportElementToPdf({
@@ -158,7 +171,7 @@ export default function ContractViewer({
                     <input type="checkbox" checked={clientAck} onChange={(event) => setClientAck(event.target.checked)} />
                     I confirm I have read and understand this contract.
                   </label>
-                  {role === "Client" && contractPack.status === "contract-awaiting-client" ? (
+                  {routeKindForRole(role) === "client" && contractPack.status === "contract-awaiting-client" ? (
                     <Button
                       small
                       tone="bt-p"

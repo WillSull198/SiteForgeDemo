@@ -44,6 +44,7 @@ export async function askSiteForgeAi({ userMessage, projectContext, apiKey }) {
         "Content-Type": "application/json",
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
@@ -58,7 +59,11 @@ Be concise, practical, and commercially sharp.`,
     });
 
     if (!response.ok) {
-      throw new Error(`Claude request failed with ${response.status}`);
+      const errorText = await response.text().catch(() => "");
+      return {
+        text: `Claude request failed with HTTP ${response.status}${errorText ? `: ${errorText.slice(0, 400)}` : ""}`,
+        source: "claude-error",
+      };
     }
     const data = await response.json();
     return {
@@ -67,8 +72,8 @@ Be concise, practical, and commercially sharp.`,
     };
   } catch (error) {
     return {
-      text: `${localFallback(userMessage, projectContext)}\n\nAI note: Claude could not be reached from this browser session, so SiteForge used its local drafting engine instead.`,
-      source: "local-fallback",
+      text: `Claude request failed: ${error?.message || "Unknown browser/API error"}`,
+      source: "claude-error",
     };
   }
 }
