@@ -15,8 +15,9 @@ import {
   summariseDiary,
   summariseRevision,
 } from "./aiDraftService";
-import { appendAuditEntry, exportAuditCsv, verifyAuditChain } from "./auditTrail";
+import { createAuditEntry, exportAuditCsv, verifyAuditChain } from "./auditTrail";
 import { buildContractSummary, generateDraft, signContract } from "./contractService";
+import { Audit, bootstrapLocalDataLayer } from "./data";
 import { generateSignedContractPdfBlob } from "./pdfService";
 import { diffPlans, parseTemplate, removeFileEverywhere, uploadFile, uploadSeededTextFile, buildTemplatePreviewContent, putBlob } from "./documentIntelligence";
 import { dispatchNotificationEvent } from "./notificationEngine";
@@ -32,6 +33,14 @@ const DEFAULT_ROLE_USERS = {
   Subcontractor: "u_sub_1",
   Client: "u_client_1",
   Worker: "u_worker_1",
+};
+
+const DEFAULT_ORG = {
+  id: "org-default",
+  name: APP_CONFIG.builder.name,
+  slug: "default",
+  plan: "demo",
+  createdAt: "2026-01-01T00:00:00.000Z",
 };
 
 const DEFAULT_ROLE_PAGES = {
@@ -96,7 +105,6 @@ const cloneState = (value) => {
   return JSON.parse(JSON.stringify(value));
 };
 
-const randomId = (prefix) => `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
 const uuid = () => {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
   if (typeof crypto !== "undefined" && crypto.getRandomValues) {
@@ -104,8 +112,9 @@ const uuid = () => {
       (Number(char) ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (Number(char) / 4)))).toString(16),
     );
   }
-  return randomId("uuid");
+  return `id-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 };
+const randomId = (prefix) => `${prefix}-${uuid()}`;
 
 const getRuntimeNow = () => {
   if (typeof window !== "undefined" && window.__siteforgeNow) {
@@ -213,17 +222,17 @@ const createInitialStore = () => {
       const raw = window.localStorage.getItem(legacyKey);
       if (!raw) continue;
       const parsed = JSON.parse(raw);
-      return migrateLegacyState({
+      return normaliseState(migrateLegacyState({
         ...parsed,
         session: { ...defaultSession(), ...(parsed.session || {}) },
         ui: { ...defaultUi(), ...(parsed.ui || {}) },
-      });
+      }));
     } catch (error) {
       console.warn("Failed to migrate legacy SiteForge state", error);
     }
   }
 
-  return base;
+  return normaliseState(base);
 };
 
 function parseHash(hash = "") {
@@ -324,6 +333,44 @@ function getAccessibleSiteIds(state, role, userId) {
   return user?.siteIds?.length ? user.siteIds : state.sites.map((site) => site.id);
 }
 
+function withOrgId(record, orgId) {
+  return record && typeof record === "object" ? { ...record, orgId: record.orgId || orgId } : record;
+}
+
+function scopeOrgRecords(next) {
+  const orgId = next.org?.id || DEFAULT_ORG.id;
+  [
+    "sites",
+    "clients",
+    "users",
+    "approvals",
+    "documents",
+    "diary",
+    "problems",
+    "rfis",
+    "tasks",
+    "qa",
+    "safety",
+    "procurement",
+    "variations",
+    "variationRegister",
+    "contractPacks",
+    "contractTemplates",
+    "notifications.items",
+    "auditTrail",
+  ].forEach((path) => {
+    const parts = path.split(".");
+    const target = parts.length === 1 ? next : next[parts[0]];
+    const key = parts[parts.length - 1];
+    if (Array.isArray(target?.[key])) {
+      target[key] = target[key].map((record) => withOrgId(record, orgId));
+    }
+  });
+  if (Array.isArray(next.files?.records)) {
+    next.files.records = next.files.records.map((record) => withOrgId(record, orgId));
+  }
+}
+
 function normaliseState(state) {
   const next = state;
   const role = next.session.role || "Supervisor";
@@ -331,6 +378,33 @@ function normaliseState(state) {
   const accessibleSiteIds = getAccessibleSiteIds(next, role, userId);
   const fallbackSiteId = accessibleSiteIds[0] || next.sites[0]?.id || "s1";
   const route = next.session.route || getDefaultRouteForRole(role, next);
+
+  next.org = {
+    ...DEFAULT_ORG,
+    ...(next.org || {}),
+    settings: {
+      ...(next.org?.settings || {}),
+      company: next.settings?.company || next.company || APP_CONFIG.builder,
+      contractDefaults: next.settings?.contractDefaults || {},
+    },
+  };
+  next.device = {
+    ...(next.device || {}),
+    settings: {
+      ...(next.device?.settings || {}),
+      appearance: next.settings?.appearance || { theme: next.settings?.theme || "light" },
+      integrations: next.settings?.integrations || {},
+    },
+  };
+  next.user = {
+    ...(next.user || {}),
+    settings: {
+      ...(next.user?.settings || {}),
+      profile: next.settings?.profile || {},
+      notifications: next.settings?.notifications || {},
+    },
+  };
+  scopeOrgRecords(next);
 
   next.demo = {
     ...(next.demo || {}),
@@ -671,7 +745,7 @@ function buildSearchResults(state, query) {
 
 function getRecipientsForRoles(state, roles) {
   return roles
-    .map((role) => state.users.filter((user) => user.role === role))
+    .map((targetRole) => state.users.filter((user) => targetRole === user.role))
     .flat()
     .map((user) => ({ user }));
 }
@@ -1286,7 +1360,7 @@ function createHelpers(prev, next) {
   const helpers = {
     actor,
     addAudit({ action, entityType, entityId, before = null, after = null, siteId = null }) {
-      next.auditTrail = appendAuditEntry(next.auditTrail, {
+      const entry = createAuditEntry({
         actor: actor.name,
         actorRole: actor.role,
         action,
@@ -1295,7 +1369,12 @@ function createHelpers(prev, next) {
         before,
         after,
         siteId,
-      }).slice(0, 600);
+      });
+      entry.orgId = next.org?.id || DEFAULT_ORG.id;
+      next.auditTrail = [entry, ...(next.auditTrail || [])].slice(0, 600);
+      Audit.create(entry).catch((error) => {
+        console.warn("Failed to persist audit entry", error);
+      });
     },
     emit({ eventType, title, body, siteId = null, entityType = null, entityId = null, recipients = [], route = null }) {
       const result = dispatchNotificationEvent({
@@ -1356,6 +1435,15 @@ function createHelpers(prev, next) {
 
 export function SiteForgeProvider({ children }) {
   const [state, setState] = usePersistentState(APP_CONFIG.storageKey, createInitialStore);
+  const dataLayerBootstrapped = useRef(false);
+
+  useEffect(() => {
+    if (dataLayerBootstrapped.current) return;
+    dataLayerBootstrapped.current = true;
+    bootstrapLocalDataLayer(state).catch((error) => {
+      console.warn("Failed to bootstrap SiteForge data layer", error);
+    });
+  }, [state]);
 
   useEffect(() => {
     const onHashChange = () => {
@@ -1689,6 +1777,16 @@ export function SiteForgeProvider({ children }) {
           next.settings[section] = { ...(next.settings[section] || {}), ...patch };
           if (section === "company") {
             next.company = { ...(next.company || APP_CONFIG.builder), ...patch };
+            next.org.settings.company = { ...(next.org.settings.company || {}), ...patch };
+          }
+          if (section === "contractDefaults") {
+            next.org.settings.contractDefaults = { ...(next.org.settings.contractDefaults || {}), ...patch };
+          }
+          if (section === "appearance" || section === "integrations") {
+            next.device.settings[section] = { ...(next.device.settings[section] || {}), ...patch };
+          }
+          if (section === "profile" || section === "notifications") {
+            next.user.settings[section] = { ...(next.user.settings[section] || {}), ...patch };
           }
           helpers.addAudit({
             action: `settings.${section}.update`,
@@ -3653,6 +3751,13 @@ export function SiteForgeProvider({ children }) {
           runTimedAutomationSweep(next, helpers);
         });
       },
+      async verifyIndexedAuditChain() {
+        const result = await Audit.verify();
+        mutate((next) => {
+          next.ui.auditVerification = result;
+        });
+        return result;
+      },
       updateEntity(type, entityId, patch) {
         mutate((next, helpers) => {
           const { path, collection } = getCollectionRef(next, type);
@@ -4532,7 +4637,7 @@ export function SiteForgeProvider({ children }) {
       openApprovals,
       currentContract,
       currentApproval,
-      auditVerification: verifyAuditChain(state.auditTrail),
+      auditVerification: state.ui.auditVerification || verifyAuditChain(state.auditTrail),
       search: (query) => buildSearchResults(state, query),
       resolveRecord: (type, id) => findInCollection(state, type, id),
       weeklyClientSummary: summariseDiary(state.diary.filter((entry) => entry.siteId === currentClient.siteId)),

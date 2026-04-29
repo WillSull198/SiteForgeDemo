@@ -88,7 +88,7 @@ export function mustHandUpForApproval(role) {
 }
 
 export function getNavForRole(role) {
-  if (role === "Director") {
+  if (routeKindForRole(role) === "director") {
     return [
       {
         section: "BOARDROOM",

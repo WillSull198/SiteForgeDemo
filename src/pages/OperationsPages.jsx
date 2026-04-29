@@ -2511,25 +2511,38 @@ function ReportsPage() {
 
 function AdminPage() {
   const { actions, derived, state } = useSiteForge();
+  const currentUser = derived.currentUser;
   const deviceApiKey = typeof window !== "undefined" ? window.localStorage.getItem("siteforge-anthropic-key") || "" : "";
   const [companyForm, setCompanyForm] = useState({
-    name: state.settings?.company?.name || state.company?.name || "",
-    legalName: state.settings?.company?.legalName || state.company?.legalName || "",
-    abn: state.settings?.company?.abn || state.company?.abn || "",
-    address: state.settings?.company?.address || state.company?.address || "",
-    phone: state.settings?.company?.phone || state.company?.phone || "",
-    email: state.settings?.company?.email || state.company?.email || "",
-    website: state.settings?.company?.website || state.company?.website || "",
-    defaultContractType: state.settings?.contractDefaults?.defaultContractType || "HIA",
-    logoDataUrl: state.settings?.company?.logoDataUrl || "",
+    name: state.org?.settings?.company?.name || state.settings?.company?.name || state.company?.name || "",
+    legalName: state.org?.settings?.company?.legalName || state.settings?.company?.legalName || state.company?.legalName || "",
+    abn: state.org?.settings?.company?.abn || state.settings?.company?.abn || state.company?.abn || "",
+    address: state.org?.settings?.company?.address || state.settings?.company?.address || state.company?.address || "",
+    phone: state.org?.settings?.company?.phone || state.settings?.company?.phone || state.company?.phone || "",
+    email: state.org?.settings?.company?.email || state.settings?.company?.email || state.company?.email || "",
+    website: state.org?.settings?.company?.website || state.settings?.company?.website || state.company?.website || "",
+    defaultContractType: state.org?.settings?.contractDefaults?.defaultContractType || state.settings?.contractDefaults?.defaultContractType || "HIA",
+    logoDataUrl: state.org?.settings?.company?.logoDataUrl || state.settings?.company?.logoDataUrl || "",
   });
   const [integrationsForm, setIntegrationsForm] = useState({
     anthropicApiKey: deviceApiKey,
-    aiModel: state.settings?.integrations?.aiModel || "claude-sonnet-4-20250514",
-    buildxactApiKey: state.settings?.integrations?.buildxactApiKey || "",
-    buildxactWorkspaceId: state.settings?.integrations?.buildxactWorkspaceId || "",
+    aiModel: state.device?.settings?.integrations?.aiModel || state.settings?.integrations?.aiModel || "claude-sonnet-4-20250514",
+    buildxactApiKey: state.device?.settings?.integrations?.buildxactApiKey || state.settings?.integrations?.buildxactApiKey || "",
+    buildxactWorkspaceId: state.device?.settings?.integrations?.buildxactWorkspaceId || state.settings?.integrations?.buildxactWorkspaceId || "",
   });
-  const [appearanceForm, setAppearanceForm] = useState({ theme: state.settings?.appearance?.theme || state.settings?.theme || "light" });
+  const [appearanceForm, setAppearanceForm] = useState({ theme: state.device?.settings?.appearance?.theme || state.settings?.appearance?.theme || state.settings?.theme || "light" });
+  const [userForm, setUserForm] = useState({
+    displayName: state.user?.settings?.profile?.displayName || currentUser?.name || "",
+    role: state.user?.settings?.profile?.role || currentUser?.role || state.session.role,
+    email: state.user?.settings?.profile?.email || currentUser?.email || "",
+    phone: state.user?.settings?.profile?.phone || currentUser?.phone || "",
+  });
+  const [notificationForm, setNotificationForm] = useState({
+    inApp: state.user?.settings?.notifications?.inApp ?? true,
+    email: state.user?.settings?.notifications?.email ?? true,
+    teams: state.user?.settings?.notifications?.teams ?? false,
+    quietHours: state.user?.settings?.notifications?.quietHours ?? false,
+  });
   const [settingsMessage, setSettingsMessage] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [importCandidate, setImportCandidate] = useState(null);
@@ -2601,6 +2614,20 @@ function AdminPage() {
     setSettingsMessage("Theme preference saved.");
   };
 
+  const saveUserSettings = () => {
+    if (!userForm.displayName.trim()) {
+      setSettingsMessage("Display name is required.");
+      return;
+    }
+    if (userForm.email && !validEmail(userForm.email)) {
+      setSettingsMessage("User email format is invalid.");
+      return;
+    }
+    actions.updateSettings("profile", userForm);
+    actions.updateSettings("notifications", notificationForm);
+    setSettingsMessage("User profile and notification preferences saved.");
+  };
+
   const validateImportShape = (payload) =>
     payload &&
     Array.isArray(payload.sites) &&
@@ -2641,8 +2668,11 @@ function AdminPage() {
   return (
     <div className="oy fin">
       {settingsMessage ? <div className="notice-banner mb8">{settingsMessage}</div> : null}
+      <div className="notice-banner mb8">
+        Settings are split for backend readiness: organisation settings sync across the company, device settings stay local to this browser, and user settings follow the signed-in person.
+      </div>
       <div className="g2 mb8">
-        <Card title="Company Settings" icon={Icons.briefcase}>
+        <Card title="Organisation Settings" icon={Icons.briefcase}>
           <div className="g2">
             <div className="ff">
               <label>Trading name</label>
@@ -2706,7 +2736,7 @@ function AdminPage() {
             Save Company Settings
           </Button>
         </Card>
-        <Card title="Integration Settings" icon={Icons.zap}>
+        <Card title="Device Settings: Integrations" icon={Icons.zap}>
           <div className="ff">
             <label>Claude API key</label>
             <input type="password" value={integrationsForm.anthropicApiKey} onChange={(event) => setIntegrationsForm((current) => ({ ...current, anthropicApiKey: event.target.value }))} />
@@ -2744,7 +2774,7 @@ function AdminPage() {
         </Card>
       </div>
       <div className="g2">
-        <Card title="Appearance" icon={Icons.eye}>
+        <Card title="Device Settings: Appearance" icon={Icons.eye}>
           <div className="ff">
             <label>Theme</label>
             <select value={appearanceForm.theme} onChange={(event) => setAppearanceForm({ theme: event.target.value })}>
@@ -2754,6 +2784,41 @@ function AdminPage() {
             </select>
           </div>
           <Button tone="bt-p" onClick={saveAppearance}>Save Theme</Button>
+        </Card>
+        <Card title="User Settings" icon={Icons.users}>
+          <div className="g2">
+            <div className="ff">
+              <label>Display name</label>
+              <input value={userForm.displayName} onChange={(event) => setUserForm((current) => ({ ...current, displayName: event.target.value }))} />
+            </div>
+            <div className="ff">
+              <label>Role</label>
+              <select value={userForm.role} onChange={(event) => setUserForm((current) => ({ ...current, role: event.target.value }))}>
+                {["Supervisor", "Project Manager", "Contract Admin", "Director", "Subcontractor", "Client", "Worker"].map((role) => (
+                  <option key={role}>{role}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="g2">
+            <div className="ff">
+              <label>Email</label>
+              <input value={userForm.email} onChange={(event) => setUserForm((current) => ({ ...current, email: event.target.value }))} />
+            </div>
+            <div className="ff">
+              <label>Phone</label>
+              <input value={userForm.phone} onChange={(event) => setUserForm((current) => ({ ...current, phone: event.target.value }))} />
+            </div>
+          </div>
+          <div className="fx" style={{ gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+            {["inApp", "email", "teams", "quietHours"].map((key) => (
+              <label className="sig-check" key={key}>
+                <input type="checkbox" checked={Boolean(notificationForm[key])} onChange={(event) => setNotificationForm((current) => ({ ...current, [key]: event.target.checked }))} />
+                {key === "inApp" ? "In-app" : key === "quietHours" ? "Quiet hours" : key}
+              </label>
+            ))}
+          </div>
+          <Button tone="bt-p" onClick={saveUserSettings}>Save User Settings</Button>
         </Card>
         <Card title="Demo Controls" icon={Icons.gear}>
           <div className="sm ct2">Reset the demo data back to the seeded construction scenario at any time.</div>
@@ -2974,7 +3039,7 @@ function AuditPage() {
           >
             Export PDF
           </Button>
-          <Button tone="bt-p" onClick={() => actions.runSystemSweep()}>
+          <Button tone="bt-p" onClick={() => actions.verifyIndexedAuditChain()}>
             Verify Chain
           </Button>
         </div>

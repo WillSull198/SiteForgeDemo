@@ -22,6 +22,7 @@ import SubcontractorPortal from "./pages/SubcontractorPortal";
 import WorkerMobileView from "./pages/WorkerMobileView";
 import { can, getNavForRole, mustHandUpForApproval, routeKindForRole } from "./services/permissions";
 import { SiteForgeProvider, useSiteForge } from "./services/siteforgeStore";
+import { getSyncStatus, subscribeSyncStatus } from "./services/data";
 
 const PAGE_TITLES = {
   boardroom: "Boardroom",
@@ -123,6 +124,7 @@ function Shell() {
   });
   const [quickNewOpen, setQuickNewOpen] = useState(false);
   const [quickForm, setQuickForm] = useState({ title: "", description: "" });
+  const [syncStatus, setSyncStatus] = useState({ state: "synced", pending: 0, stuck: 0 });
   const company = state.settings?.company || state.company || APP_CONFIG.builder;
 
   useEffect(() => {
@@ -161,12 +163,14 @@ function Shell() {
           goPrefixTimerRef.current = null;
         }, 900);
       } else if (!isMeta && goPrefixRef.current === "g") {
+        const routeKind = routeKindForRole(role);
+        const directorRoute = routeKind === "director";
         const shortcuts = {
-          t: { kind: role === "Director" ? "director" : "internal", page: role === "Director" ? "boardroom" : "tasks", siteId: state.session.siteId },
-          p: { kind: role === "Director" ? "director" : "internal", page: role === "Director" ? "portfolio" : "probs", siteId: state.session.siteId },
-          c: { kind: role === "Director" ? "director" : "internal", page: role === "Director" ? "commercial-risk" : "clientflow", siteId: state.session.siteId },
-          d: { kind: role === "Director" ? "director" : "internal", page: role === "Director" ? "boardroom" : "dash", siteId: state.session.siteId },
-          a: { kind: role === "Director" ? "director" : "internal", page: role === "Director" ? "commercial-risk" : "clientflow", siteId: state.session.siteId },
+          t: { kind: routeKind, page: directorRoute ? "boardroom" : "tasks", siteId: state.session.siteId },
+          p: { kind: routeKind, page: directorRoute ? "portfolio" : "probs", siteId: state.session.siteId },
+          c: { kind: routeKind, page: directorRoute ? "commercial-risk" : "clientflow", siteId: state.session.siteId },
+          d: { kind: routeKind, page: directorRoute ? "boardroom" : "dash", siteId: state.session.siteId },
+          a: { kind: routeKind, page: directorRoute ? "commercial-risk" : "clientflow", siteId: state.session.siteId },
         };
         const target = shortcuts[event.key.toLowerCase()];
         if (target) {
@@ -222,6 +226,16 @@ function Shell() {
     }, 1800);
     return () => window.clearTimeout(timer);
   }, [showSplash]);
+
+  useEffect(() => {
+    let mounted = true;
+    getSyncStatus().then((status) => mounted && setSyncStatus(status));
+    const unsubscribe = subscribeSyncStatus((status) => mounted && setSyncStatus(status));
+    return () => {
+      mounted = false;
+      unsubscribe?.();
+    };
+  }, []);
 
   const isClient = route.kind === "client";
   const isWorker = route.kind === "worker";
@@ -433,6 +447,10 @@ function Shell() {
                 onMarkAllRead={actions.markAllNotificationsRead}
                 onNavigate={(targetRoute) => targetRoute && actions.navigate(targetRoute)}
               />
+              <span className={`sync-pill ${syncStatus.state}`} title={`${syncStatus.pending} pending, ${syncStatus.stuck} stuck`}>
+                <span className="sync-dot" />
+                {syncStatus.state === "synced" ? "Synced" : syncStatus.state === "syncing" ? "Syncing" : "Review"}
+              </span>
             </div>
           </div>
 
