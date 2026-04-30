@@ -50,6 +50,14 @@ const DEFAULT_ORG = {
   createdAt: "2026-01-01T00:00:00.000Z",
 };
 
+const DEFAULT_CLIENTFLOW_CHANNELS = {
+  inPortal: true,
+  email: true,
+  sms: false,
+  teams: false,
+  printPdf: true,
+};
+
 const DEFAULT_ROLE_PAGES = {
   Supervisor: { kind: "internal", siteId: "s1", page: "dash", entityId: null },
   "Project Manager": { kind: "internal", siteId: "s1", page: "dash", entityId: null },
@@ -122,6 +130,15 @@ const uuid = () => {
   return `id-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 };
 const randomId = (prefix) => `${prefix}-${uuid()}`;
+
+function hashString(value = "") {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `h-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
 
 const getRuntimeNow = () => {
   if (typeof window !== "undefined" && window.__siteforgeNow) {
@@ -422,12 +439,31 @@ function normaliseState(state) {
   if (!next.demo.userControlled) {
     next.demo.mode = false;
   }
+  next.settings = {
+    ...(next.settings || {}),
+    clientflow: {
+      channelsByType: {},
+      stallThresholdBusinessDays: 5,
+      escalationRecipients: ["Project Manager", "Director"],
+      ...(next.settings?.clientflow || {}),
+    },
+  };
 
   next.notifications = next.notifications || { items: [], eventLog: [] };
   next.notifications.items = Array.isArray(next.notifications.items) ? next.notifications.items.slice(0, 180) : [];
   next.notifications.eventLog = Array.isArray(next.notifications.eventLog) ? next.notifications.eventLog.slice(0, 240) : [];
   next.auditTrail = Array.isArray(next.auditTrail) ? next.auditTrail.slice(0, 600) : [];
   next.projectLogs = Array.isArray(next.projectLogs) ? next.projectLogs.slice(0, 240) : [];
+  next.approvalBundles = Array.isArray(next.approvalBundles) ? next.approvalBundles.slice(0, 120) : [];
+  next.approvals = Array.isArray(next.approvals)
+    ? next.approvals.map((approval) => ({
+        ...approval,
+        deliveryChannels: approval.deliveryChannels || DEFAULT_CLIENTFLOW_CHANNELS,
+        deliveryQueue: Array.isArray(approval.deliveryQueue) ? approval.deliveryQueue.slice(-40) : [],
+        complianceTrail: Array.isArray(approval.complianceTrail) ? approval.complianceTrail.slice(-160) : [],
+        portalAccessLog: Array.isArray(approval.portalAccessLog) ? approval.portalAccessLog.slice(-40) : [],
+      }))
+    : [];
   next.buildxact = {
     ...(next.buildxact || {}),
     readOnlyMode: Boolean(next.buildxact?.readOnlyMode),
@@ -880,6 +916,111 @@ function queueSignedApprovalBuildxactPush(state, approval, contractPack) {
   return variationQueue;
 }
 
+function getBrowserEvidence() {
+  return {
+    ip: "browser-demo",
+    ua: typeof navigator !== "undefined" ? navigator.userAgent : "SiteForge Browser",
+  };
+}
+
+function getDeliveryChannels(state, approval) {
+  return {
+    ...DEFAULT_CLIENTFLOW_CHANNELS,
+    ...(state.settings?.clientflow?.channelsByType?.[approval?.type] || {}),
+    ...(approval?.deliveryChannels || {}),
+  };
+}
+
+function buildDeliveryQueue(channels, issuedAt = nowStamp()) {
+  return Object.entries(channels)
+    .filter(([, enabled]) => Boolean(enabled))
+    .map(([channel]) => ({
+      id: randomId("delivery"),
+      channel,
+      status: channel === "inPortal" ? "available" : "queued",
+      queuedAt: issuedAt,
+      attempts: 0,
+      lastError: null,
+    }));
+}
+
+function appendApprovalComplianceEvent(approval, { event, actor = "System", role = "System", payload = {}, evidence = null }) {
+  if (!approval) return null;
+  const trail = approval.complianceTrail || [];
+  const previousHash = trail[trail.length - 1]?.hash || "GENESIS";
+  const timestamp = nowStamp();
+  const eventPayload = {
+    id: randomId("apce"),
+    approvalId: approval.id,
+    event,
+    actor,
+    role,
+    timestamp,
+    payload,
+    ...(evidence || getBrowserEvidence()),
+    previousHash,
+  };
+  eventPayload.hash = hashString(`${previousHash}:${event}:${actor}:${timestamp}:${JSON.stringify(payload)}`);
+  approval.complianceTrail = [...trail, eventPayload].slice(-160);
+  return eventPayload;
+}
+
+function verifyApprovalComplianceEvents(approval) {
+  const trail = approval?.complianceTrail || [];
+  let previousHash = "GENESIS";
+  for (const event of trail) {
+    const expected = hashString(`${previousHash}:${event.event}:${event.actor}:${event.timestamp}:${JSON.stringify(event.payload || {})}`);
+    if (event.previousHash !== previousHash || event.hash !== expected) {
+      return { status: "failed", count: trail.length, summary: `Compliance trail breaks at ${event.event}.` };
+    }
+    previousHash = event.hash;
+  }
+  return {
+    status: "verified",
+    count: trail.length,
+    summary: trail.length ? "Approval compliance trail is intact." : "No compliance events have been recorded yet.",
+  };
+}
+
+function prepareApprovalForClientIssue(state, approval, actor, { bulkId = null } = {}) {
+  const issuedAt = nowStamp();
+  const before = { status: approval.status, sentAt: approval.sentAt };
+  approval.status = "awaiting-client";
+  approval.sentAt = approval.sentAt || issuedAt;
+  approval.portalToken = approval.portalToken || uuid();
+  approval.portalUrl = `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${approval.portalToken}`;
+  approval.portalExpiresAt = approval.portalExpiresAt || addDays(formatDate(), 30);
+  approval.magicLink = {
+    token: approval.portalToken,
+    url: approval.portalUrl,
+    issuedAt,
+    expiresAt: approval.portalExpiresAt,
+    singleUse: true,
+    resendCount: Number(approval.magicLink?.resendCount || 0),
+  };
+  approval.portalAuth = {
+    emailVerificationRequired: true,
+    oneTimeCodeStatus: "queued",
+    sessionTimeoutMinutes: 30,
+    rememberDeviceAvailable: true,
+  };
+  approval.deliveryChannels = getDeliveryChannels(state, approval);
+  approval.deliveryQueue = buildDeliveryQueue(approval.deliveryChannels, issuedAt);
+  approval.bulkIssueId = bulkId || approval.bulkIssueId || null;
+  appendApprovalComplianceEvent(approval, {
+    event: "approval.sent",
+    actor: actorName(actor),
+    role: actor.role,
+    payload: {
+      status: approval.status,
+      portalExpiresAt: approval.portalExpiresAt,
+      channels: Object.keys(approval.deliveryChannels).filter((channel) => approval.deliveryChannels[channel]),
+      bulkId,
+    },
+  });
+  return before;
+}
+
 function nextScopedNumber(state, collectionName, siteId, prefix, field = "number") {
   const collection = Array.isArray(state[collectionName]) ? state[collectionName] : [];
   const matches = collection.filter((entry) => entry.siteId === siteId && String(entry[field] || "").startsWith(`${prefix}-`));
@@ -1188,6 +1329,12 @@ function createContractPackForApproval(next, approval, helpers, { autoRelease = 
       role: "System",
       text: "Contract pack auto-generated, builder signature recorded, and released for client e-signature.",
     });
+    appendApprovalComplianceEvent(approval, {
+      event: "contract.released-for-client",
+      actor: "System",
+      role: "System",
+      payload: { contractPackId: contractPack.docId },
+    });
   } else {
     contractPack.status = "contract-drafted";
     approval.status = "contract-drafted";
@@ -1196,6 +1343,12 @@ function createContractPackForApproval(next, approval, helpers, { autoRelease = 
       actor: "System",
       role: "System",
       text: "Contract pack generated and sent to Contract Studio review.",
+    });
+    appendApprovalComplianceEvent(approval, {
+      event: "contract.drafted",
+      actor: "System",
+      role: "System",
+      payload: { contractPackId: contractPack.docId },
     });
   }
 
@@ -1223,6 +1376,16 @@ function finaliseClientSignedContract(next, helpers, contractPack, approval, sig
       actor: signerName || client?.primaryContact || "Client",
       role: "Client",
       text: "Contract fully executed.",
+    });
+    appendApprovalComplianceEvent(approval, {
+      event: "contract.client-signed",
+      actor: signerName || client?.primaryContact || "Client",
+      role: "Client",
+      payload: {
+        contractPackId: contractPack.docId,
+        signedAt: contractPack.signatures?.client?.signedAt,
+        documentHash: contractPack.signatures?.client?.hash,
+      },
     });
   }
   updateSentiment(next, approval?.clientId, 10);
@@ -1351,16 +1514,32 @@ function runTimedAutomationSweep(next, helpers) {
 
   next.approvals.forEach((approval) => {
     if (!["awaiting-client", "question", "changes-requested", "contract-awaiting-client"].includes(approval.status)) return;
-    if (hoursSince(approval.sentAt, runtime) >= 48 && !approval.stalledNotifiedAt) {
+    const stalledHours = hoursSince(approval.sentAt, runtime);
+    const thresholdHours = Number(next.settings?.clientflow?.stallThresholdBusinessDays || 5) * 24;
+    const escalationLevel = stalledHours >= thresholdHours * 3 ? 3 : stalledHours >= thresholdHours * 2 ? 2 : stalledHours >= thresholdHours ? 1 : stalledHours >= 48 ? 0 : null;
+    if (escalationLevel !== null && Number(approval.stalledEscalationLevel ?? -1) < escalationLevel) {
+      approval.stalledEscalationLevel = escalationLevel;
+      approval.stalledEscalatedAt = runtimeStamp;
+      appendApprovalComplianceEvent(approval, {
+        event: "approval.stalled-escalation",
+        actor: "Automation",
+        role: "System",
+        payload: { escalationLevel, stalledHours: Math.round(stalledHours), thresholdHours },
+      });
+    }
+    if (stalledHours >= 48 && !approval.stalledNotifiedAt) {
       approval.stalledNotifiedAt = runtimeStamp;
       helpers.emit({
         eventType: "approval.stalled",
-        title: `Approval stalled - ${approval.title}`,
-        body: "No client response has been recorded in the last 48 hours.",
+        title: escalationLevel && escalationLevel >= 2 ? `Approval escalation - ${approval.title}` : `Approval stalled - ${approval.title}`,
+        body: escalationLevel && escalationLevel >= 2 ? "ClientFlow escalation threshold reached. PM and Director review recommended." : "No client response has been recorded in the last 48 hours.",
         siteId: approval.siteId,
         entityType: "approval",
         entityId: approval.id,
-        recipients: [...getRecipientsForRoles(next, ["Project Manager"]), ...getRecipientsForClient(next, approval.clientId)],
+        recipients: [
+          ...getRecipientsForRoles(next, escalationLevel && escalationLevel >= 2 ? ["Project Manager", "Director"] : ["Project Manager"]),
+          ...getRecipientsForClient(next, approval.clientId),
+        ],
         route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
       });
     }
@@ -2292,16 +2471,12 @@ export function SiteForgeProvider({ children }) {
         mutate((next, helpers) => {
           const approval = next.approvals.find((item) => item.id === approvalId);
           if (!approval) return;
-          const before = { status: approval.status, sentAt: approval.sentAt };
-          approval.status = "awaiting-client";
-          approval.sentAt = nowStamp();
-          approval.portalToken = approval.portalToken || uuid();
-          approval.portalUrl = `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${approval.portalToken}`;
+          const before = prepareApprovalForClientIssue(next, approval, helpers.actor);
           helpers.appendTimeline(approval, {
             type: "sent",
             actor: actorName(helpers.actor),
             role: helpers.actor.role,
-            text: "Approval sent to client portal and outbound channels.",
+            text: `Approval issued via ${Object.keys(approval.deliveryChannels || {}).filter((channel) => approval.deliveryChannels[channel]).join(", ")}.`,
           });
           helpers.addMessage(
             "approval",
@@ -2320,7 +2495,7 @@ export function SiteForgeProvider({ children }) {
           helpers.emit({
             eventType: "approval.created",
             title: `Approval sent - ${approval.title}`,
-            body: approval.summary,
+            body: `${approval.summary} Magic-link access expires ${approval.portalExpiresAt}.`,
             siteId: approval.siteId,
             entityType: "approval",
             entityId: approval.id,
@@ -2332,10 +2507,115 @@ export function SiteForgeProvider({ children }) {
           });
         });
       },
+      bulkIssueApprovals(approvalIds = []) {
+        mutate((next, helpers) => {
+          const ids = new Set(approvalIds);
+          const candidates = next.approvals.filter((approval) => ids.has(approval.id) && ["draft", "changes-requested", "question"].includes(approval.status));
+          if (!candidates.length) return;
+          const bulkId = randomId("bulk");
+          candidates.forEach((approval) => {
+            const before = prepareApprovalForClientIssue(next, approval, helpers.actor, { bulkId });
+            helpers.appendTimeline(approval, {
+              type: "bulk-sent",
+              actor: actorName(helpers.actor),
+              role: helpers.actor.role,
+              text: `Issued as part of bulk run ${bulkId}.`,
+            });
+            helpers.addAudit({
+              action: "approval.bulk-send",
+              entityType: "approval",
+              entityId: approval.id,
+              before,
+              after: { status: approval.status, bulkId },
+              siteId: approval.siteId,
+            });
+          });
+          helpers.emit({
+            eventType: "approval.created",
+            title: `${candidates.length} approvals bulk issued`,
+            body: `Bulk issue ${bulkId} queued delivery across ClientFlow channels.`,
+            siteId: next.session.siteId,
+            entityType: "bulkIssue",
+            entityId: bulkId,
+            recipients: getRecipientsForRoles(next, ["Project Manager", "Contract Admin"]),
+            route: { kind: "internal", siteId: next.session.siteId, page: "clientflow", entityId: candidates[0].id },
+          });
+        });
+      },
+      createApprovalBundle(approvalIds = []) {
+        mutate((next, helpers) => {
+          const approvals = next.approvals.filter((approval) => approvalIds.includes(approval.id));
+          if (approvals.length < 2) return;
+          const siteId = approvals[0].siteId;
+          const clientId = approvals[0].clientId;
+          const bundle = {
+            id: randomId("bundle"),
+            number: nextScopedNumber(next, "approvalBundles", siteId, "BND"),
+            siteId,
+            clientId,
+            title: `${approvals.length} linked ClientFlow approvals`,
+            approvalIds: approvals.map((approval) => approval.id),
+            status: "draft",
+            portalToken: uuid(),
+            portalUrl: `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${approvals[0].portalToken || approvals[0].id}`,
+            createdAt: nowStamp(),
+            createdBy: helpers.actor.id,
+          };
+          next.approvalBundles.unshift(bundle);
+          approvals.forEach((approval) => {
+            approval.bundleId = bundle.id;
+            appendApprovalComplianceEvent(approval, {
+              event: "approval.bundled",
+              actor: actorName(helpers.actor),
+              role: helpers.actor.role,
+              payload: { bundleId: bundle.id, bundleNumber: bundle.number },
+            });
+          });
+          helpers.addAudit({
+            action: "approval.bundle-create",
+            entityType: "approvalBundle",
+            entityId: bundle.id,
+            before: null,
+            after: { approvalIds: bundle.approvalIds },
+            siteId,
+          });
+        });
+      },
+      verifyApprovalComplianceTrail(approvalId) {
+        mutate((next) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval) return;
+          approval.complianceVerification = {
+            ...verifyApprovalComplianceEvents(approval),
+            verifiedAt: nowStamp(),
+          };
+          pushToast(next, {
+            tone: approval.complianceVerification.status === "verified" ? "success" : "critical",
+            title: approval.complianceVerification.status === "verified" ? "Compliance trail verified" : "Compliance trail warning",
+            body: approval.complianceVerification.summary,
+          });
+        });
+      },
       viewApproval(approvalId) {
         mutate((next, helpers) => {
           const approval = next.approvals.find((item) => item.id === approvalId);
           if (!approval) return;
+          const evidence = getBrowserEvidence();
+          approval.portalAccessLog = approval.portalAccessLog || [];
+          approval.portalAccessLog.push({
+            id: randomId("access"),
+            at: nowStamp(),
+            actor: "Client portal",
+            ...evidence,
+          });
+          approval.portalAccessLog = approval.portalAccessLog.slice(-40);
+          appendApprovalComplianceEvent(approval, {
+            event: "approval.viewed",
+            actor: "Client portal",
+            role: "Client",
+            evidence,
+            payload: { viewCount: approval.portalAccessLog.length },
+          });
           if (!approval.viewedAt) {
             approval.viewedAt = nowStamp();
             helpers.emit({
@@ -2494,6 +2774,14 @@ export function SiteForgeProvider({ children }) {
             });
             updateSentiment(next, approval.clientId, -2);
           }
+          if (["approve", "decline", "question", "change", "call"].includes(actionType)) {
+            appendApprovalComplianceEvent(approval, {
+              event: `client.${actionType}`,
+              actor: actor.name,
+              role: "Client",
+              payload: { note: note || "", status: approval.status },
+            });
+          }
         });
       },
       markApprovalInternal(approvalId, status, note = "") {
@@ -2515,6 +2803,12 @@ export function SiteForgeProvider({ children }) {
             actor: actorName(helpers.actor),
             role: helpers.actor.role,
             text: note || `Approval marked ${status} internally.`,
+          });
+          appendApprovalComplianceEvent(approval, {
+            event: `internal.${status}`,
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            payload: { note, status },
           });
           helpers.addAudit({
             action: `approval.${status}.internal`,
@@ -4317,6 +4611,9 @@ export function SiteForgeProvider({ children }) {
         mutate((next, helpers) => {
           const approval = next.approvals.find((entry) => entry.id === approvalId);
           if (!approval) return;
+          const before = { status: approval.status, sentAt: approval.sentAt };
+          prepareApprovalForClientIssue(next, approval, helpers.actor);
+          approval.magicLink.resendCount = Number(approval.magicLink?.resendCount || 0) + 1;
           approval.sentAt = nowStamp();
           approval.status = "awaiting-client";
           approval.stalledNotifiedAt = null;
@@ -4324,7 +4621,15 @@ export function SiteForgeProvider({ children }) {
             type: "resent",
             actor: actorName(helpers.actor),
             role: helpers.actor.role,
-            text: "Approval resent to client.",
+            text: `Approval resent to client across ${Object.keys(approval.deliveryChannels || {}).filter((channel) => approval.deliveryChannels[channel]).join(", ")}.`,
+          });
+          helpers.addAudit({
+            action: "approval.resend",
+            entityType: "approval",
+            entityId: approval.id,
+            before,
+            after: { status: approval.status, sentAt: approval.sentAt, resendCount: approval.magicLink.resendCount },
+            siteId: approval.siteId,
           });
           helpers.emit({
             eventType: "approval.created",

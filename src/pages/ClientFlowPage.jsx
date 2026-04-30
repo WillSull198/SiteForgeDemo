@@ -68,6 +68,7 @@ export default function ClientFlowPage() {
   const [selectedId, setSelectedId] = useState(routeEntityId || derived.currentApproval?.id || state.approvals[0]?.id || null);
   const [message, setMessage] = useState("");
   const [form, setForm] = useState(defaultForm);
+  const [bulkSelectedIds, setBulkSelectedIds] = useState([]);
 
   const siteApprovals = useMemo(
     () =>
@@ -80,6 +81,11 @@ export default function ClientFlowPage() {
   const selected = useMemo(
     () => siteApprovals.find((approval) => approval.id === selectedId) || siteApprovals[0] || null,
     [selectedId, siteApprovals],
+  );
+
+  const bulkSelectedApprovals = useMemo(
+    () => siteApprovals.filter((approval) => bulkSelectedIds.includes(approval.id)),
+    [bulkSelectedIds, siteApprovals],
   );
 
   useEffect(() => {
@@ -184,12 +190,61 @@ export default function ClientFlowPage() {
     }, {});
   }, [siteApprovals, state.clients]);
 
+  const communicationHub = useMemo(() => {
+    return Object.entries(groupedByClient).map(([clientName, approvals]) => ({
+      clientName,
+      approvals,
+      messages: approvals
+        .flatMap((approval) => (approval.messageThread || []).map((messageEntry) => ({ ...messageEntry, approvalTitle: approval.title, approvalId: approval.id })))
+        .sort((left, right) => String(right.at || "").localeCompare(String(left.at || ""))),
+      lastContact: approvals
+        .flatMap((approval) => approval.messageThread || [])
+        .sort((left, right) => String(right.at || "").localeCompare(String(left.at || "")))[0]?.at,
+    }));
+  }, [groupedByClient]);
+
+  const siteBundles = useMemo(
+    () => (state.approvalBundles || []).filter((bundle) => (canSeeAllSites(role) ? true : bundle.siteId === siteId)),
+    [role, siteId, state.approvalBundles],
+  );
+
   const analytics = useMemo(() => {
     return ["0-7 days", "7-14 days", "14-30 days", "30+ days"].map((bucket) => ({
       bucket,
       count: siteApprovals.filter((approval) => analyticsAging(approval, currentNow) === bucket && !["signed", "declined"].includes(approval.status)).length,
     }));
   }, [currentNow, siteApprovals]);
+
+  const operationalAnalytics = useMemo(() => {
+    const signed = siteApprovals.filter((approval) => approval.status === "signed");
+    const issued = siteApprovals.filter((approval) => approval.sentAt);
+    const recoverable = siteApprovals.filter((approval) => Number(approval.costImpact || 0) > 0);
+    const averageResponseHours = issued.length
+      ? Math.round(
+          issued.reduce((sum, approval) => {
+            const sent = Date.parse(String(approval.sentAt || "").replace(" ", "T"));
+            const terminal = Date.parse(String(approval.timeline?.find((entry) => ["signed", "approved", "declined"].includes(entry.type))?.at || approval.viewedAt || approval.sentAt).replace(" ", "T"));
+            return sum + Math.max(0, (terminal - sent) / 36e5);
+          }, 0) / issued.length,
+        )
+      : 0;
+    return {
+      averageResponseHours,
+      approvalRate: issued.length ? Math.round((siteApprovals.filter((approval) => ["approved", "signed"].includes(approval.status)).length / issued.length) * 100) : 0,
+      recoveredValue: signed.reduce((sum, approval) => sum + Number(approval.costImpact || 0), 0),
+      pendingValue: siteApprovals.filter((approval) => ["awaiting-client", "question", "changes-requested"].includes(approval.status)).reduce((sum, approval) => sum + Number(approval.costImpact || 0), 0),
+      timeToRecoverHours: signed.length
+        ? Math.round(
+            signed.reduce((sum, approval) => {
+              const created = Date.parse(String(approval.timeline?.[0]?.at || approval.sentAt || "").replace(" ", "T"));
+              const signedAt = Date.parse(String(approval.timeline?.find((entry) => entry.type === "signed")?.at || approval.sentAt || "").replace(" ", "T"));
+              return sum + Math.max(0, (signedAt - created) / 36e5);
+            }, 0) / signed.length,
+          )
+        : 0,
+      recoverableCount: recoverable.length,
+    };
+  }, [siteApprovals]);
 
   if (!canView) {
     return <div className="restricted">This role cannot access the internal ClientFlow workspace.</div>;
@@ -208,6 +263,8 @@ export default function ClientFlowPage() {
             { value: "inbox", label: "Client Inbox View" },
             { value: "stalled", label: "Stalled Approvals" },
             { value: "analytics", label: "Analytics" },
+            { value: "bundles", label: "Bundles" },
+            { value: "comms", label: "Comms Hub" },
           ]}
         />
         {canCreateApproval ? (
@@ -222,6 +279,25 @@ export default function ClientFlowPage() {
       {tab === "dashboard" ? (
         <div className="g32">
           <Card title="Approvals Register" icon={Icons.flag}>
+            {bulkSelectedIds.length ? (
+              <div className="linked-row" style={{ marginBottom: 10 }}>
+                <div>
+                  <div className="b sm">{bulkSelectedIds.length} approvals selected</div>
+                  <div className="xs ct3">Bulk issue sends eligible drafts in one controlled ClientFlow run.</div>
+                </div>
+                <div className="fx" style={{ gap: 6 }}>
+                  <Button small tone="bt-p" onClick={() => actions.bulkIssueApprovals(bulkSelectedIds)}>
+                    Issue selected
+                  </Button>
+                  <Button small onClick={() => actions.createApprovalBundle(bulkSelectedIds)}>
+                    Create bundle
+                  </Button>
+                  <Button small onClick={() => setBulkSelectedIds([])}>
+                    Clear
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             <DataTable
               storageKey={`clientflow-register-${role}-${siteId}`}
               rows={siteApprovals}
@@ -272,6 +348,13 @@ export default function ClientFlowPage() {
                 },
               ]}
               rowActions={[
+                {
+                  label: "Select",
+                  onClick: (approval) =>
+                    setBulkSelectedIds((current) =>
+                      current.includes(approval.id) ? current.filter((id) => id !== approval.id) : [...current, approval.id],
+                    ),
+                },
                 { label: "Open", onClick: (approval) => setSelectedId(approval.id) },
                 {
                   label: "Send",
@@ -376,6 +459,11 @@ export default function ClientFlowPage() {
                     {selected.portalUrl ? (
                       <Card title="Client Portal Link" icon={Icons.link} className="mb8">
                         <div className="sm ct2" style={{ wordBreak: "break-all" }}>{selected.portalUrl}</div>
+                        {selected.magicLink ? (
+                          <div className="xs ct3" style={{ marginTop: 6 }}>
+                            Single-use magic link expires {selected.magicLink.expiresAt}. Email verification and 30-minute portal timeout are enabled.
+                          </div>
+                        ) : null}
                         <div className="fa" style={{ justifyContent: "flex-start", marginTop: 10 }}>
                           <Button small tone="bt-p" onClick={() => navigator.clipboard?.writeText(selected.portalUrl)}>
                             Copy Link
@@ -386,6 +474,23 @@ export default function ClientFlowPage() {
                         </div>
                       </Card>
                     ) : null}
+                    <Card title="Delivery Channels" icon={Icons.send} className="mb8">
+                      <div className="list-stack">
+                        {(selected.deliveryQueue || []).length ? (
+                          selected.deliveryQueue.map((delivery) => (
+                            <div className="linked-row" key={delivery.id}>
+                              <div>
+                                <div className="b sm">{delivery.channel}</div>
+                                <div className="xs ct3">Queued {delivery.queuedAt}</div>
+                              </div>
+                              <Badge tone={delivery.status === "available" || delivery.status === "sent" ? "passed" : "medium"}>{delivery.status}</Badge>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="ct3 sm">Delivery channels are prepared when the approval is sent.</div>
+                        )}
+                      </div>
+                    </Card>
                   </div>
 
                   <div>
@@ -421,6 +526,28 @@ export default function ClientFlowPage() {
 
                     <Card title="Status Timeline" icon={Icons.clock} className="mb8">
                       <Timeline entries={(selected.timeline || []).map((entry) => ({ actor: entry.actor, role: entry.role, at: entry.at, text: entry.text }))} />
+                    </Card>
+
+                    <Card title="Compliance Trail" icon={Icons.shield} className="mb8">
+                      <div className="list-stack">
+                        {(selected.complianceTrail || []).slice(-6).reverse().map((event) => (
+                          <div className="linked-row" key={event.id}>
+                            <div>
+                              <div className="b sm">{event.event}</div>
+                              <div className="xs ct3">{event.actor} · {event.timestamp}</div>
+                              <div className="xs mono ct3">{event.hash}</div>
+                            </div>
+                            <Badge tone="passed">hashed</Badge>
+                          </div>
+                        ))}
+                        {!(selected.complianceTrail || []).length ? <div className="ct3 sm">No compliance events have been recorded yet.</div> : null}
+                      </div>
+                      <div className="fa" style={{ justifyContent: "flex-start", marginTop: 10 }}>
+                        <Button small onClick={() => actions.verifyApprovalComplianceTrail(selected.id)}>
+                          Verify trail
+                        </Button>
+                        {selected.complianceVerification ? <Badge tone={selected.complianceVerification.status === "verified" ? "passed" : "critical"}>{selected.complianceVerification.status}</Badge> : null}
+                      </div>
                     </Card>
 
                     <LinkedRecordsPanel records={selected.linkedRecords} resolveRecord={derived.resolveRecord} />
@@ -508,6 +635,28 @@ export default function ClientFlowPage() {
       {tab === "analytics" ? (
         <div className="g23">
           <Card title="Approval Analytics" icon={Icons.bar}>
+            <div className="g2" style={{ marginBottom: 12 }}>
+              <div className="si b">
+                <div className="sl">Avg response</div>
+                <div className="sv">{operationalAnalytics.averageResponseHours}h</div>
+                <div className="ss">Sent to first terminal action</div>
+              </div>
+              <div className="si b">
+                <div className="sl">Time to recover</div>
+                <div className="sv">{operationalAnalytics.timeToRecoverHours}h</div>
+                <div className="ss">Source event to signed approval</div>
+              </div>
+              <div className="si b">
+                <div className="sl">Pending value</div>
+                <div className="sv">${Math.round(operationalAnalytics.pendingValue).toLocaleString()}</div>
+                <div className="ss">Awaiting client response</div>
+              </div>
+              <div className="si b">
+                <div className="sl">Approval rate</div>
+                <div className="sv">{operationalAnalytics.approvalRate}%</div>
+                <div className="ss">Issued approvals approved or signed</div>
+              </div>
+            </div>
             <div className="g2">
               {analytics.map((row) => (
                 <div className="si b" key={row.bucket}>
@@ -561,6 +710,78 @@ export default function ClientFlowPage() {
               </div>
             </div>
           </Card>
+        </div>
+      ) : null}
+
+      {tab === "bundles" ? (
+        <div className="g2">
+          <Card title="Approval Bundles" icon={Icons.link}>
+            <div className="list-stack">
+              {siteBundles.length ? (
+                siteBundles.map((bundle) => {
+                  const approvals = siteApprovals.filter((approval) => bundle.approvalIds.includes(approval.id));
+                  const signed = approvals.filter((approval) => approval.status === "signed").length;
+                  const declined = approvals.filter((approval) => approval.status === "declined").length;
+                  const status = declined ? "partial" : signed === approvals.length ? "all signed" : "in progress";
+                  return (
+                    <div className="act" key={bundle.id}>
+                      <div style={{ flex: 1 }}>
+                        <div className="b sm">{bundle.number} · {bundle.title}</div>
+                        <div className="xs ct3">{approvals.length} approvals · {state.clients.find((client) => client.id === bundle.clientId)?.name}</div>
+                        <div className="sm ct2" style={{ marginTop: 4 }}>
+                          Single operational package for related commercial approvals from the same site event.
+                        </div>
+                      </div>
+                      <div className="tr">
+                        <Badge tone={status === "all signed" ? "passed" : status === "partial" ? "high" : "medium"}>{status}</Badge>
+                        <div className="xs ct3">{bundle.createdAt}</div>
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="ct3 sm empty">Select two or more approvals in the register, then choose "Create bundle".</div>
+              )}
+            </div>
+          </Card>
+          <Card title="Bundle Rules" icon={Icons.shield}>
+            <div className="list-stack">
+              <div className="linked-row"><span>One portal package can represent variation + EOT + clarification.</span><Badge tone="passed">operational</Badge></div>
+              <div className="linked-row"><span>Each approval keeps its own signature and hash trail.</span><Badge tone="passed">auditable</Badge></div>
+              <div className="linked-row"><span>Buildxact receives signed outcomes individually.</span><Badge tone="medium">cost boundary</Badge></div>
+            </div>
+          </Card>
+        </div>
+      ) : null}
+
+      {tab === "comms" ? (
+        <div className="g2">
+          {communicationHub.map((thread) => (
+            <Card title={thread.clientName} icon={Icons.chat} key={thread.clientName}>
+              <div className="linked-row" style={{ marginBottom: 10 }}>
+                <div>
+                  <div className="b sm">{thread.approvals.length} approvals</div>
+                  <div className="xs ct3">Last contact {thread.lastContact || "No messages yet"}</div>
+                </div>
+                <Badge tone={thread.messages.length ? "medium" : "low"}>{thread.messages.length} messages</Badge>
+              </div>
+              <div className="list-stack">
+                {thread.messages.slice(0, 8).map((entry) => (
+                  <div className="act" key={entry.id}>
+                    <div style={{ flex: 1 }}>
+                      <div className="b sm">{entry.by}</div>
+                      <div className="xs ct3">{entry.approvalTitle} · {entry.at}</div>
+                      <div className="sm ct2" style={{ marginTop: 4 }}>{entry.body}</div>
+                    </div>
+                    <Button small onClick={() => setSelectedId(entry.approvalId)}>
+                      Open
+                    </Button>
+                  </div>
+                ))}
+                {!thread.messages.length ? <div className="ct3 sm empty">No client messages yet.</div> : null}
+              </div>
+            </Card>
+          ))}
         </div>
       ) : null}
 

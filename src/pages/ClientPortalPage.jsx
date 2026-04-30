@@ -74,6 +74,10 @@ export default function ClientPortalPage() {
   const pendingPacks = contracts.filter((pack) => pack.status !== "signed");
   const heroApprovalCount = approvals.filter((approval) => ["awaiting-client", "question", "changes-requested", "contract-awaiting-client"].includes(approval.status)).length;
   const availableSlots = state.pmAvailability.filter((slot) => !slot.booked);
+  const linkExpired =
+    selectedApproval?.portalExpiresAt &&
+    Date.parse(`${selectedApproval.portalExpiresAt}T23:59:59`) < Date.now() &&
+    !["signed", "declined"].includes(selectedApproval.status);
 
   const downloadContractPack = async (pack, fallbackElement, subtitle = "") => {
     if (pack?.executedPdfBlobId) {
@@ -108,6 +112,19 @@ export default function ClientPortalPage() {
             <Button tone="bt-p" onClick={() => actions.resetDemo()} style={{ marginTop: 12 }}>
               Reset Demo State
             </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (linkExpired) {
+    return (
+      <div className="client-shell">
+        <div className="client-page">
+          <div className="client-panel">
+            <h3>Approval link expired</h3>
+            <div className="client-copy">For security, this ClientFlow magic link has expired. Please ask the builder to resend the approval.</div>
           </div>
         </div>
       </div>
