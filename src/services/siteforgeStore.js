@@ -3859,12 +3859,226 @@ export function SiteForgeProvider({ children }) {
           });
         });
       },
-      scanPassport(siteId, passportId) {
+      completePassportInduction(passportId, { typedName = "", quizScore = 100, videoWatched = true } = {}) {
         mutate((next, helpers) => {
           const passport = next.passports.records.find((item) => item.id === passportId);
           if (!passport) return;
-          const result = passport.blockedReasons.length ? "blocked" : "granted";
-          const reason = passport.blockedReasons[0] || "All documents current";
+          const before = { inductionStatus: passport.inductionStatus, blockedReasons: passport.blockedReasons };
+          passport.inductionStatus = quizScore >= 80 && videoWatched ? "complete" : "pending";
+          passport.inductionCompletedAt = passport.inductionStatus === "complete" ? nowStamp() : null;
+          passport.inductionSignature = passport.inductionStatus === "complete"
+            ? { signerName: typedName || passport.person, signedAt: nowStamp(), quizScore, videoWatched }
+            : null;
+          passport.docs = passport.docs || [];
+          const inductionDoc = passport.docs.find((doc) => doc.label.toLowerCase().includes("induction"));
+          if (inductionDoc) {
+            inductionDoc.status = passport.inductionStatus === "complete" ? "complete" : "pending";
+          } else if (passport.inductionStatus === "complete") {
+            passport.docs.unshift({ id: randomId("pd"), label: "Site induction", status: "complete" });
+          }
+          passport.blockedReasons = (passport.blockedReasons || []).filter((reason) => !reason.toLowerCase().includes("induction"));
+          if (passport.inductionStatus !== "complete") {
+            passport.blockedReasons.unshift("Induction incomplete");
+          }
+          helpers.addAudit({
+            action: "passport.induction-complete",
+            entityType: "passport",
+            entityId: passport.id,
+            before,
+            after: { inductionStatus: passport.inductionStatus, quizScore, by: typedName || passport.person },
+            siteId: passport.siteId,
+          });
+        });
+      },
+      acknowledgeDailyBrief(passportId, typedName = "") {
+        mutate((next, helpers) => {
+          const passport = next.passports.records.find((item) => item.id === passportId);
+          if (!passport) return;
+          passport.dailyBriefAcknowledgements = passport.dailyBriefAcknowledgements || [];
+          passport.dailyBriefAcknowledgements.unshift({
+            id: randomId("brief"),
+            siteId: passport.siteId,
+            by: typedName || passport.person,
+            at: nowStamp(),
+            brief: next.passports.siteAccess.find((entry) => entry.siteId === passport.siteId)?.dailyBrief || "",
+          });
+          passport.dailyBriefAcknowledgements = passport.dailyBriefAcknowledgements.slice(0, 30);
+          helpers.addAudit({
+            action: "passport.daily-brief-ack",
+            entityType: "passport",
+            entityId: passport.id,
+            before: null,
+            after: { by: typedName || passport.person },
+            siteId: passport.siteId,
+          });
+        });
+      },
+      acknowledgeSwms(passportId, swmsId, typedName = "") {
+        mutate((next, helpers) => {
+          const passport = next.passports.records.find((item) => item.id === passportId);
+          const swms = next.swms.find((item) => item.id === swmsId);
+          if (!passport || !swms) return;
+          swms.acknowledgedBy = swms.acknowledgedBy || [];
+          if (!swms.acknowledgedBy.includes(passport.userId)) {
+            swms.acknowledgedBy.push(passport.userId);
+          }
+          passport.acknowledgements = passport.acknowledgements || [];
+          passport.acknowledgements.unshift({
+            id: randomId("ack"),
+            label: `${swms.title} acknowledged`,
+            done: true,
+            by: typedName || passport.person,
+            at: nowStamp(),
+          });
+          const swmsDoc = passport.docs.find((doc) => doc.label.toLowerCase().includes("swms"));
+          if (swmsDoc) swmsDoc.status = "complete";
+          passport.blockedReasons = (passport.blockedReasons || []).filter((reason) => !reason.toLowerCase().includes("swms"));
+          helpers.addAudit({
+            action: "passport.swms-ack",
+            entityType: "passport",
+            entityId: passport.id,
+            before: null,
+            after: { swmsId, by: typedName || passport.person },
+            siteId: passport.siteId,
+          });
+        });
+      },
+      addPassportTicket(passportId, { label, expiresOn, number = "", attachmentFileId = null } = {}) {
+        mutate((next, helpers) => {
+          const passport = next.passports.records.find((item) => item.id === passportId);
+          if (!passport || !label || !expiresOn) return;
+          passport.tickets = passport.tickets || [];
+          const ticket = {
+            id: randomId("ticket"),
+            name: label,
+            number,
+            issuedDate: formatDate(),
+            expiryDate: expiresOn,
+            attachmentFileId,
+          };
+          passport.tickets.unshift(ticket);
+          passport.licences = [...new Set([...(passport.licences || []), label])];
+          next.passports.expiringTickets.unshift({
+            id: randomId("tick"),
+            userId: passport.userId,
+            passportId: passport.id,
+            label,
+            expiresOn,
+            fileId: attachmentFileId,
+            notifications: [],
+          });
+          passport.blockedReasons = (passport.blockedReasons || []).filter((reason) => !reason.toLowerCase().includes(label.toLowerCase()));
+          helpers.addAudit({
+            action: "passport.ticket-add",
+            entityType: "passport",
+            entityId: passport.id,
+            before: null,
+            after: ticket,
+            siteId: passport.siteId,
+          });
+        });
+      },
+      setPassportBlock(passportId, { reason, severity = "suspended", duration = "24h" } = {}) {
+        mutate((next, helpers) => {
+          const passport = next.passports.records.find((item) => item.id === passportId);
+          if (!passport || !reason?.trim()) return;
+          const before = { blockedReasons: passport.blockedReasons };
+          const label = `Manual block: ${reason.trim()}`;
+          passport.blockedReasons = [...new Set([...(passport.blockedReasons || []), label])];
+          passport.blockHistory = passport.blockHistory || [];
+          passport.blockHistory.unshift({
+            id: randomId("block"),
+            reason: reason.trim(),
+            severity,
+            duration,
+            by: actorName(helpers.actor),
+            at: nowStamp(),
+            active: true,
+          });
+          helpers.addAudit({
+            action: "passport.block",
+            entityType: "passport",
+            entityId: passport.id,
+            before,
+            after: { blockedReasons: passport.blockedReasons, severity, duration },
+            siteId: passport.siteId,
+          });
+          helpers.emit({
+            eventType: "passport.access-denied",
+            title: `Passport blocked - ${passport.person}`,
+            body: reason.trim(),
+            siteId: passport.siteId,
+            entityType: "passport",
+            entityId: passport.id,
+            recipients: getRecipientsForRoles(next, ["Supervisor", "Project Manager"]),
+            route: { kind: "internal", siteId: passport.siteId, page: "passport", entityId: passport.id },
+          });
+        });
+      },
+      clearPassportBlock(passportId, reason = "") {
+        mutate((next, helpers) => {
+          const passport = next.passports.records.find((item) => item.id === passportId);
+          if (!passport) return;
+          const before = { blockedReasons: passport.blockedReasons };
+          passport.blockedReasons = (passport.blockedReasons || []).filter((entry) => !entry.toLowerCase().startsWith("manual block:"));
+          passport.blockHistory = (passport.blockHistory || []).map((entry) => entry.active ? { ...entry, active: false, clearedAt: nowStamp(), clearedBy: actorName(helpers.actor), clearReason: reason } : entry);
+          helpers.addAudit({
+            action: "passport.unblock",
+            entityType: "passport",
+            entityId: passport.id,
+            before,
+            after: { blockedReasons: passport.blockedReasons, reason },
+            siteId: passport.siteId,
+          });
+        });
+      },
+      issueVisitorPassport({ siteId, name, company, phone, escort = "" } = {}) {
+        mutate((next, helpers) => {
+          if (!name?.trim()) return;
+          const visitorId = randomId("visitor");
+          const passport = {
+            id: randomId("pass"),
+            siteId: siteId || next.session.siteId,
+            userId: visitorId,
+            person: name.trim(),
+            companyId: `visitor-${visitorId}`,
+            company: company || "Visitor",
+            phone,
+            role: "Visitor",
+            trade: "Visitor",
+            permissions: ["Emergency", "Daily Brief"],
+            inductionStatus: "complete",
+            inductionCompletedAt: nowStamp(),
+            visitorPass: { issuedAt: nowStamp(), validForDate: formatDate(), escort, qrCode: `VIS-${uuid().slice(0, 8).toUpperCase()}` },
+            licences: [],
+            insuranceStatus: "n/a",
+            docs: [{ id: randomId("pd"), label: "Visitor induction", status: "complete" }],
+            blockedReasons: escort ? [] : ["Escort not assigned"],
+            acknowledgements: [{ id: randomId("ack"), label: "Escorted access only", done: Boolean(escort), by: escort || "" }],
+          };
+          next.passports.records.unshift(passport);
+          helpers.addAudit({
+            action: "passport.visitor-issue",
+            entityType: "passport",
+            entityId: passport.id,
+            before: null,
+            after: { person: passport.person, escort },
+            siteId: passport.siteId,
+          });
+        });
+      },
+      scanPassport(siteId, passportId, options = {}) {
+        mutate((next, helpers) => {
+          const passport = next.passports.records.find((item) => item.id === passportId);
+          if (!passport) return;
+          const expiredTicket = (next.passports.expiringTickets || []).find((ticket) => ticket.passportId === passport.id && daysUntil(ticket.expiresOn) < 0);
+          const reasons = [
+            ...(passport.blockedReasons || []),
+            passport.inductionStatus !== "complete" ? "Induction incomplete" : null,
+            expiredTicket ? `${expiredTicket.label} expired` : null,
+          ].filter(Boolean);
+          const result = reasons.length ? "blocked" : "granted";
+          const reason = reasons[0] || "All documents current";
           next.passports.scanLog.unshift({
             id: randomId("scan"),
             siteId,
@@ -3872,7 +4086,12 @@ export function SiteForgeProvider({ children }) {
             at: nowStamp(),
             result,
             reason,
+            method: options.method || "manual",
+            gpsVerified: Boolean(options.gpsVerified),
+            distanceMeters: options.distanceMeters ?? null,
+            qrValue: options.qrValue || null,
           });
+          next.passports.scanLog = next.passports.scanLog.slice(0, 220);
           next.presence.events.unshift({
             id: randomId("pe"),
             siteId,
@@ -3880,8 +4099,26 @@ export function SiteForgeProvider({ children }) {
             at: nowStamp(),
             signal: "sign-in",
             state: result === "granted" ? "captured" : "blocked",
-            note: reason,
+            note: `${reason}${options.gpsVerified ? " · GPS verified" : options.distanceMeters ? ` · ${options.distanceMeters}m from site` : ""}`,
           });
+          next.presence.events = next.presence.events.slice(0, 260);
+          if (result === "granted") {
+            next.presence.records.unshift({
+              id: randomId("presence"),
+              siteId,
+              userId: passport.userId,
+              worker: passport.person,
+              company: passport.company,
+              status: "verified-on-site",
+              confidence: options.gpsVerified ? 98 : 82,
+              start: nowStamp(),
+              finish: null,
+              signals: [options.method || "manual", options.gpsVerified ? "gps" : "manual-location"],
+              anomalyFlags: options.gpsVerified ? [] : ["GPS not verified"],
+              supervisorNotes: reason,
+            });
+            next.presence.records = next.presence.records.slice(0, 200);
+          }
           if (result === "blocked") {
             helpers.emit({
               eventType: "passport.access-denied",
