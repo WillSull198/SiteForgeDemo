@@ -170,6 +170,66 @@ export async function generateSignedContractPdfBlob({ contractPack, approval, bu
   return doc.output("blob");
 }
 
+export async function generateTransmittalPdfBlob({ transmittal, documents = [], sender = "SiteForge", site = {} }) {
+  const { jsPDF } = await ensurePdfTooling();
+  if (!jsPDF) throw new Error("PDF tooling unavailable.");
+
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 18;
+  let y = margin;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(18);
+  doc.text("Document Transmittal", margin, y);
+  y += 8;
+  doc.setFontSize(11);
+  doc.text(transmittal.number || transmittal.id, margin, y);
+  y += 6;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.text(`Project: ${site.name || transmittal.siteId}`, margin, y);
+  y += 5;
+  doc.text(`From: ${sender}`, margin, y);
+  y += 5;
+  doc.text(`To: ${(transmittal.recipients || []).map((entry) => entry.name || entry.email || entry.id).join(", ") || "Recipients"}`, margin, y);
+  y += 5;
+  doc.text(`Purpose: ${transmittal.purpose}`, margin, y);
+  y += 8;
+
+  doc.setDrawColor(210, 210, 210);
+  doc.line(margin, y, pageWidth - margin, y);
+  y += 8;
+
+  doc.setFont("helvetica", "bold");
+  doc.text("Documents issued", margin, y);
+  y += 6;
+  doc.setFont("helvetica", "normal");
+  documents.forEach((document, index) => {
+    if (y > 270) {
+      doc.addPage();
+      y = margin;
+    }
+    const line = `${index + 1}. ${document.title} ${document.rev || ""} - ${document.category || "Document"}`;
+    doc.text(doc.splitTextToSize(line, pageWidth - margin * 2), margin, y);
+    y += 7;
+  });
+
+  y += 6;
+  doc.setFontSize(8);
+  doc.setTextColor(110, 115, 122);
+  doc.text("Recipient acknowledgement is recorded in SiteForge with timestamp and audit evidence.", margin, y);
+
+  const totalPages = doc.internal.getNumberOfPages();
+  for (let page = 1; page <= totalPages; page += 1) {
+    doc.setPage(page);
+    pageFooter(doc, page, totalPages, transmittal.number || "Transmittal");
+  }
+
+  return doc.output("blob");
+}
+
 export async function exportElementToPdf({
   element,
   filename = "siteforge-export.pdf",

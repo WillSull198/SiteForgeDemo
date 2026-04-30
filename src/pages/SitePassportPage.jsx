@@ -684,7 +684,7 @@ export default function SitePassportPage() {
 
           <Card title="Visitor Day Pass Register" icon={Icons.qr}>
             <div className="list-stack">
-              {sitePassports.filter((passport) => passport.role === "Visitor").map((passport) => (
+              {sitePassports.filter((passport) => ["Visitor"].includes(passport.role)).map((passport) => (
                 <div className="linked-row" key={passport.id}>
                   <div>
                     <div className="b sm">{passport.person}</div>

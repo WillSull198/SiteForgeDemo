@@ -1797,8 +1797,13 @@ function DocumentsPage() {
   const [planSearchSummary, setPlanSearchSummary] = useState("");
   const [planSearchSource, setPlanSearchSource] = useState("");
   const [annotation, setAnnotation] = useState({ locationRef: "", note: "" });
+  const [transmittalDraft, setTransmittalDraft] = useState({ purpose: "For Information", recipients: "" });
+  const [permitDraft, setPermitDraft] = useState({ title: "", authority: "", expiryDate: "" });
   const documents = state.documents.filter((document) => document.siteId === siteId && !document.archived);
   const archived = state.documents.filter((document) => document.siteId === siteId && document.archived);
+  const transmittals = (state.transmittals || []).filter((entry) => entry.siteId === siteId);
+  const permits = (state.permits || []).filter((entry) => entry.siteId === siteId);
+  const expiringDocuments = documents.filter((document) => document.expiryDate || document.retentionUntil).slice(0, 8);
   const selected = documents.find((document) => document.id === selectedId) || documents[0] || null;
   const selectedFile = selected?.fileId ? state.files.records.find((file) => file.id === selected.fileId) : null;
   const keywordPlanSearch = (query) => {
@@ -2000,9 +2005,14 @@ ${JSON.stringify(documentContext)}`,
                           {done ? (
                             <Badge tone="passed">Clear</Badge>
                           ) : (
-                            <Button small onClick={() => actions.addConversationMessage("document-reminder", selected.id, [userId], `Please acknowledge ${selected.title} ${selected.rev} before next site entry.`)}>
-                              Send Reminder
-                            </Button>
+                            <div className="fx" style={{ gap: 4 }}>
+                              <Button small tone="bt-p" onClick={() => actions.acknowledgeDocumentRevision(selected.id, userId)}>
+                                Mark Ack
+                              </Button>
+                              <Button small onClick={() => actions.addConversationMessage("document-reminder", selected.id, [userId], `Please acknowledge ${selected.title} ${selected.rev} before next site entry.`)}>
+                                Send Reminder
+                              </Button>
+                            </div>
                           )}
                         </div>
                       );
@@ -2039,7 +2049,15 @@ ${JSON.stringify(documentContext)}`,
                       Full PDF Viewer
                     </Button>
                   ) : null}
+                  <Button small onClick={() => actions.verifyDocumentIntegrity(selected.id)}>
+                    Verify Integrity
+                  </Button>
                 </div>
+                {selected.integrity ? (
+                  <div className="xs ct3" style={{ marginBottom: 8 }}>
+                    Integrity {selected.integrity.status} · {selected.integrity.hash} · {selected.integrity.verifiedAt}
+                  </div>
+                ) : null}
                 {previewHtml ? <div className="document-preview" dangerouslySetInnerHTML={{ __html: previewHtml }} /> : <div className="xs ct3">Open a PDF or uploaded image to preview it here.</div>}
               </div>
               <div className="mini-panel" style={{ marginTop: 12 }}>
@@ -2111,6 +2129,109 @@ ${JSON.stringify(documentContext)}`,
               </div>
             </Card>
           ) : null}
+
+          <Card title="Transmittals" icon={Icons.send} className="mb8">
+            <div className="mini-panel">
+              <div className="g2">
+                <div className="ff">
+                  <label>Purpose</label>
+                  <select value={transmittalDraft.purpose} onChange={(event) => setTransmittalDraft((current) => ({ ...current, purpose: event.target.value }))}>
+                    <option>For Information</option>
+                    <option>For Construction</option>
+                    <option>For Approval</option>
+                    <option>Superseded</option>
+                  </select>
+                </div>
+                <div className="ff">
+                  <label>Recipients</label>
+                  <input value={transmittalDraft.recipients} onChange={(event) => setTransmittalDraft((current) => ({ ...current, recipients: event.target.value }))} placeholder="Name/email, comma separated" />
+                </div>
+              </div>
+              <Button
+                small
+                tone="bt-p"
+                disabled={!selected}
+                onClick={() =>
+                  actions.createTransmittal({
+                    documentIds: selected ? [selected.id] : [],
+                    purpose: transmittalDraft.purpose,
+                    recipients: transmittalDraft.recipients
+                      .split(",")
+                      .map((entry) => entry.trim())
+                      .filter(Boolean)
+                      .map((name) => ({ name })),
+                  })
+                }
+              >
+                Create transmittal for selected document
+              </Button>
+            </div>
+            <div className="list-stack" style={{ marginTop: 10 }}>
+              {transmittals.slice(0, 6).map((transmittal) => (
+                <div className="linked-row" key={transmittal.id}>
+                  <div>
+                    <div className="b sm">{transmittal.number} · {transmittal.purpose}</div>
+                    <div className="xs ct3">{transmittal.documentIds.length} docs · {transmittal.createdAt}</div>
+                  </div>
+                  <div className="fx" style={{ gap: 4 }}>
+                    <Badge tone={transmittal.fileId ? "passed" : "medium"}>{transmittal.fileId ? "PDF" : "Queued"}</Badge>
+                    <Button small onClick={() => actions.acknowledgeTransmittal(transmittal.id)}>
+                      Acknowledge
+                    </Button>
+                  </div>
+                </div>
+              ))}
+              {!transmittals.length ? <div className="ct3 sm empty">No transmittals issued for this site yet.</div> : null}
+            </div>
+          </Card>
+
+          <Card title="Expiry, Retention & Permits" icon={Icons.shield} className="mb8">
+            <div className="list-stack">
+              {expiringDocuments.map((document) => (
+                <div className="linked-row" key={document.id}>
+                  <div>
+                    <div className="b sm">{document.title}</div>
+                    <div className="xs ct3">Retention until {document.retentionUntil || "not set"}{document.expiryDate ? ` · expires ${document.expiryDate}` : ""}</div>
+                  </div>
+                  <Badge tone={document.expiryDate ? "high" : "medium"}>{document.retentionCategory}</Badge>
+                </div>
+              ))}
+            </div>
+            <div className="mini-panel" style={{ marginTop: 12 }}>
+              <div className="g2">
+                <input className="inline-input" value={permitDraft.title} onChange={(event) => setPermitDraft((current) => ({ ...current, title: event.target.value }))} placeholder="Permit / approval name" />
+                <input className="inline-input" value={permitDraft.authority} onChange={(event) => setPermitDraft((current) => ({ ...current, authority: event.target.value }))} placeholder="Authority" />
+                <input className="inline-input" type="date" value={permitDraft.expiryDate} onChange={(event) => setPermitDraft((current) => ({ ...current, expiryDate: event.target.value }))} />
+              </div>
+              <div className="fa" style={{ justifyContent: "flex-start", marginTop: 8 }}>
+                <Button small tone="bt-p" onClick={() => {
+                  actions.createPermit({ ...permitDraft, documentId: selected?.id, siteId });
+                  setPermitDraft({ title: "", authority: "", expiryDate: "" });
+                }}>
+                  Add permit
+                </Button>
+                <Button small onClick={() => actions.runDocumentRetentionSweep()}>
+                  Run retention sweep
+                </Button>
+              </div>
+            </div>
+            <div className="list-stack" style={{ marginTop: 10 }}>
+              {permits.map((permit) => (
+                <div className="linked-row" key={permit.id}>
+                  <div>
+                    <div className="b sm">{permit.title}</div>
+                    <div className="xs ct3">{permit.authority} · expires {permit.expiryDate || "n/a"}</div>
+                  </div>
+                  <div className="fx" style={{ gap: 4 }}>
+                    <Badge tone={permit.status === "approved" ? "passed" : "high"}>{permit.status}</Badge>
+                    <Button small onClick={() => actions.updatePermitStatus(permit.id, permit.status === "approved" ? "required" : "approved")}>
+                      {permit.status === "approved" ? "Reopen" : "Approve"}
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
 
           <Card title="Photo Timeline" icon={Icons.camera} className="mb8">
             <div className="client-photo-row">

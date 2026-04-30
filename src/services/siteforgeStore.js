@@ -18,8 +18,8 @@ import {
 import { createAuditEntry, exportAuditCsv, verifyAuditChain } from "./auditTrail";
 import { buildContractSummary, generateDraft, signContract } from "./contractService";
 import { Audit, bootstrapLocalDataLayer } from "./data";
-import { generateSignedContractPdfBlob } from "./pdfService";
-import { diffPlans, parseTemplate, removeFileEverywhere, uploadFile, uploadSeededTextFile, buildTemplatePreviewContent, putBlob } from "./documentIntelligence";
+import { generateSignedContractPdfBlob, generateTransmittalPdfBlob } from "./pdfService";
+import { diffPlans, parseTemplate, removeFileEverywhere, uploadFile, uploadSeededTextFile, buildTemplatePreviewContent, getBlob, putBlob } from "./documentIntelligence";
 import { dispatchNotificationEvent } from "./notificationEngine";
 import { canSeeAllSites, routeKindForRole } from "./permissions";
 import {
@@ -454,6 +454,17 @@ function normaliseState(state) {
   next.notifications.eventLog = Array.isArray(next.notifications.eventLog) ? next.notifications.eventLog.slice(0, 240) : [];
   next.auditTrail = Array.isArray(next.auditTrail) ? next.auditTrail.slice(0, 600) : [];
   next.projectLogs = Array.isArray(next.projectLogs) ? next.projectLogs.slice(0, 240) : [];
+  next.transmittals = Array.isArray(next.transmittals) ? next.transmittals.slice(0, 160) : [];
+  next.permits = Array.isArray(next.permits) ? next.permits.slice(0, 160) : [];
+  next.documents = Array.isArray(next.documents)
+    ? next.documents.map((document) => ({
+        retentionCategory: document.retentionCategory || (document.category === "Contract Pack" ? "signed-contract" : "project-document"),
+        retentionUntil: document.retentionUntil || addDays(document.date || formatDate(), 2557),
+        expiryDate: document.expiryDate || null,
+        acknowledgements: Array.isArray(document.acknowledgements) ? document.acknowledgements : [],
+        ...document,
+      }))
+    : [];
   next.approvalBundles = Array.isArray(next.approvalBundles) ? next.approvalBundles.slice(0, 120) : [];
   next.approvals = Array.isArray(next.approvals)
     ? next.approvals.map((approval) => ({
@@ -5158,6 +5169,9 @@ export function SiteForgeProvider({ children }) {
             ],
             archived: false,
             fileId: metadata.id,
+            retentionCategory: metadata.classification === "Contract" ? "signed-contract" : "project-document",
+            retentionUntil: addDays(formatDate(), 2557),
+            expiryDate: metadata.parsedFields?.expiry || null,
             impactAnalysis: {
               oldDocumentId: existing?.id || null,
               summary: changeSummary.summary,
@@ -5194,6 +5208,17 @@ export function SiteForgeProvider({ children }) {
               linkedRecords: [buildLink("document", document, siteId)],
               clientVisible: false,
             });
+            const passport = next.passports.records.find((entry) => entry.userId === userId && entry.siteId === siteId);
+            if (passport) {
+              passport.blockedReasons = [...new Set([...(passport.blockedReasons || []), `${drawingNo} ${document.rev} not acknowledged`])];
+              passport.acknowledgements = passport.acknowledgements || [];
+              passport.acknowledgements.unshift({
+                id: randomId("ack"),
+                label: `${drawingNo} ${document.rev}`,
+                done: false,
+                documentId: document.id,
+              });
+            }
           });
           helpers.addAudit({
             action: "document.revision-upload",
@@ -5225,6 +5250,230 @@ export function SiteForgeProvider({ children }) {
             before: null,
             after: annotation,
             siteId: document.siteId,
+          });
+        });
+      },
+      acknowledgeDocumentRevision(documentId, userId = state.session.userId, name = "") {
+        mutate((next, helpers) => {
+          const document = next.documents.find((entry) => entry.id === documentId);
+          if (!document) return;
+          document.impactAnalysis = document.impactAnalysis || {};
+          document.impactAnalysis.acknowledgedBy = document.impactAnalysis.acknowledgedBy || [];
+          if (!document.impactAnalysis.acknowledgedBy.includes(userId)) {
+            document.impactAnalysis.acknowledgedBy.push(userId);
+          }
+          document.acknowledgements = document.acknowledgements || [];
+          document.acknowledgements.unshift({
+            id: randomId("docack"),
+            userId,
+            name: name || next.users.find((entry) => entry.id === userId)?.name || userId,
+            at: nowStamp(),
+          });
+          next.passports.records.forEach((passport) => {
+            if (passport.userId !== userId || passport.siteId !== document.siteId) return;
+            passport.blockedReasons = (passport.blockedReasons || []).filter((reason) => !reason.includes(document.drawingNumber) && !reason.includes(document.rev));
+            passport.acknowledgements = (passport.acknowledgements || []).map((ack) =>
+              ack.documentId === document.id || ack.label?.includes(document.drawingNumber)
+                ? { ...ack, done: true, by: name || passport.person, at: nowStamp() }
+                : ack,
+            );
+          });
+          helpers.addAudit({
+            action: "document.revision-ack",
+            entityType: "document",
+            entityId: document.id,
+            before: null,
+            after: { userId, name },
+            siteId: document.siteId,
+          });
+        });
+      },
+      async createTransmittal({ documentIds = [], recipients = [], purpose = "For Information" } = {}) {
+        let pdfPayload = null;
+        let transmittalId = null;
+        mutate((next, helpers) => {
+          const docs = next.documents.filter((document) => documentIds.includes(document.id));
+          if (!docs.length) return;
+          const siteId = docs[0].siteId || next.session.siteId;
+          const number = nextScopedNumber(next, "transmittals", siteId, "TR");
+          const transmittal = {
+            id: randomId("tr"),
+            number,
+            siteId,
+            from: actorName(helpers.actor),
+            recipients: recipients.length ? recipients : getRecipientsForClient(next, next.sites.find((site) => site.id === siteId)?.clientId).map((entry) => entry.client),
+            purpose,
+            documentIds: docs.map((doc) => doc.id),
+            status: "issued",
+            createdAt: nowStamp(),
+            acknowledgements: [],
+            fileId: null,
+          };
+          transmittalId = transmittal.id;
+          next.transmittals.unshift(transmittal);
+          next.documents.unshift({
+            id: randomId("doc"),
+            siteId,
+            title: `${number} document transmittal`,
+            drawingNumber: number,
+            rev: "Issued",
+            date: formatDate(),
+            category: "Transmittal",
+            clientVisible: true,
+            tags: ["transmittal", purpose],
+            linkedTaskIds: [],
+            revisionHistory: [{ rev: "Issued", date: formatDate(), by: actorName(helpers.actor) }],
+            archived: false,
+            fileId: null,
+            transmittalId: transmittal.id,
+            retentionCategory: "transmittal",
+            retentionUntil: addDays(formatDate(), 2557),
+          });
+          pdfPayload = {
+            transmittal: cloneState(transmittal),
+            documents: cloneState(docs),
+            sender: actorName(helpers.actor),
+            site: cloneState(next.sites.find((site) => site.id === siteId) || {}),
+          };
+          helpers.addAudit({
+            action: "document.transmittal-issue",
+            entityType: "transmittal",
+            entityId: transmittal.id,
+            before: null,
+            after: { documentIds: transmittal.documentIds, purpose },
+            siteId,
+          });
+        });
+        if (!pdfPayload || !transmittalId) return;
+        try {
+          const blob = await generateTransmittalPdfBlob(pdfPayload);
+          const blobId = `transmittal-pdf-${transmittalId}`;
+          await putBlob(blobId, blob);
+          mutate((next) => {
+            const transmittal = next.transmittals.find((entry) => entry.id === transmittalId);
+            const document = next.documents.find((entry) => entry.transmittalId === transmittalId);
+            if (transmittal) transmittal.fileId = blobId;
+            if (document) {
+              document.fileId = blobId;
+              document.fileName = `${transmittal?.number || transmittalId}.pdf`;
+              document.mimeType = "application/pdf";
+            }
+          });
+        } catch (error) {
+          mutate((next) => {
+            const transmittal = next.transmittals.find((entry) => entry.id === transmittalId);
+            if (transmittal) transmittal.pdfError = error?.message || "PDF generation failed";
+          });
+        }
+      },
+      acknowledgeTransmittal(transmittalId, recipientName = "") {
+        mutate((next, helpers) => {
+          const transmittal = next.transmittals.find((entry) => entry.id === transmittalId);
+          if (!transmittal) return;
+          transmittal.acknowledgements = transmittal.acknowledgements || [];
+          transmittal.acknowledgements.unshift({
+            id: randomId("track"),
+            by: recipientName || actorName(helpers.actor),
+            at: nowStamp(),
+          });
+          helpers.addAudit({
+            action: "document.transmittal-ack",
+            entityType: "transmittal",
+            entityId: transmittal.id,
+            before: null,
+            after: { by: recipientName || actorName(helpers.actor) },
+            siteId: transmittal.siteId,
+          });
+        });
+      },
+      async verifyDocumentIntegrity(documentId) {
+        const documentBefore = state.documents.find((entry) => entry.id === documentId);
+        let blobMarker = "no-blob";
+        if (documentBefore?.fileId) {
+          try {
+            const blob = await getBlob(documentBefore.fileId);
+            blobMarker = blob ? `${blob.size}:${blob.type}` : "missing-blob";
+          } catch {
+            blobMarker = "blob-read-error";
+          }
+        }
+        mutate((next) => {
+          const document = next.documents.find((entry) => entry.id === documentId);
+          if (!document) return;
+          const hash = hashString(`${document.id}:${document.title}:${document.rev}:${document.fileId || ""}:${blobMarker}`);
+          const previousHash = document.integrity?.hash;
+          document.integrity = {
+            hash,
+            previousHash,
+            status: !previousHash || previousHash === hash ? "verified" : "changed",
+            verifiedAt: nowStamp(),
+            blobMarker,
+          };
+          pushToast(next, {
+            tone: document.integrity.status === "verified" ? "success" : "warning",
+            title: document.integrity.status === "verified" ? "Document integrity verified" : "Document changed since last verification",
+            body: `${document.title} ${document.rev || ""}`,
+          });
+        });
+      },
+      createPermit(payload = {}) {
+        mutate((next, helpers) => {
+          const permit = {
+            id: randomId("permit"),
+            siteId: payload.siteId || next.session.siteId,
+            title: payload.title || "Required permit",
+            authority: payload.authority || "Council / regulator",
+            status: payload.status || "required",
+            expiryDate: payload.expiryDate || "",
+            documentId: payload.documentId || null,
+            requiredForPc: payload.requiredForPc !== false,
+            createdAt: nowStamp(),
+          };
+          next.permits.unshift(permit);
+          helpers.addAudit({
+            action: "document.permit-create",
+            entityType: "permit",
+            entityId: permit.id,
+            before: null,
+            after: permit,
+            siteId: permit.siteId,
+          });
+        });
+      },
+      updatePermitStatus(permitId, status) {
+        mutate((next, helpers) => {
+          const permit = next.permits.find((entry) => entry.id === permitId);
+          if (!permit) return;
+          const before = { status: permit.status };
+          permit.status = status;
+          permit.updatedAt = nowStamp();
+          helpers.addAudit({
+            action: "document.permit-status",
+            entityType: "permit",
+            entityId: permit.id,
+            before,
+            after: { status },
+            siteId: permit.siteId,
+          });
+        });
+      },
+      runDocumentRetentionSweep() {
+        mutate((next, helpers) => {
+          next.documents.forEach((document) => {
+            if (document.archived || !document.retentionUntil) return;
+            if (daysUntil(document.retentionUntil) < 0) {
+              document.archived = true;
+              document.archivedAt = nowStamp();
+              document.retentionArchived = true;
+              helpers.addAudit({
+                action: "document.retention-archive",
+                entityType: "document",
+                entityId: document.id,
+                before: null,
+                after: { retentionUntil: document.retentionUntil },
+                siteId: document.siteId,
+              });
+            }
           });
         });
       },
