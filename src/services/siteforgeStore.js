@@ -22,6 +22,13 @@ import { generateSignedContractPdfBlob } from "./pdfService";
 import { diffPlans, parseTemplate, removeFileEverywhere, uploadFile, uploadSeededTextFile, buildTemplatePreviewContent, putBlob } from "./documentIntelligence";
 import { dispatchNotificationEvent } from "./notificationEngine";
 import { canSeeAllSites, routeKindForRole } from "./permissions";
+import {
+  buildBuildxactPullSnapshot,
+  createAttachmentPayload,
+  createBuildxactSyncHistory,
+  createSignedApprovalPushPayload,
+  upsertByBuildxactId,
+} from "./integrations/buildxact/sync";
 
 const SiteForgeContext = createContext(null);
 
@@ -421,6 +428,60 @@ function normaliseState(state) {
   next.notifications.eventLog = Array.isArray(next.notifications.eventLog) ? next.notifications.eventLog.slice(0, 240) : [];
   next.auditTrail = Array.isArray(next.auditTrail) ? next.auditTrail.slice(0, 600) : [];
   next.projectLogs = Array.isArray(next.projectLogs) ? next.projectLogs.slice(0, 240) : [];
+  next.buildxact = {
+    ...(next.buildxact || {}),
+    readOnlyMode: Boolean(next.buildxact?.readOnlyMode),
+    lastSyncAt: next.buildxact?.lastSyncAt || next.buildxact?.connection?.lastTestedAt || null,
+    suppliers: Array.isArray(next.buildxact?.suppliers) ? next.buildxact.suppliers : [],
+    costCodes: Array.isArray(next.buildxact?.costCodes) ? next.buildxact.costCodes : [],
+    scheduleMilestones: Array.isArray(next.buildxact?.scheduleMilestones) ? next.buildxact.scheduleMilestones : [],
+    manualReview: Array.isArray(next.buildxact?.manualReview) ? next.buildxact.manualReview.slice(0, 80) : [],
+    webhookEndpoint:
+      next.buildxact?.webhookEndpoint ||
+      `${typeof window !== "undefined" ? window.location.origin : "https://yourapp.example.com"}/api/buildxact/webhook/siteforge`,
+    entitySync: {
+      projects: true,
+      clients: true,
+      suppliers: true,
+      costCodes: true,
+      schedule: true,
+      variations: true,
+      documents: true,
+      timeline: true,
+      ...(next.buildxact?.entitySync || next.buildxact?.toggles || {}),
+    },
+    toggles: {
+      projects: true,
+      clients: true,
+      suppliers: true,
+      costCodes: true,
+      schedule: true,
+      variations: true,
+      documents: true,
+      timeline: true,
+      ...(next.buildxact?.toggles || next.buildxact?.entitySync || {}),
+    },
+    syncFrequency: {
+      projects: "15 min",
+      clients: "15 min",
+      suppliers: "Daily",
+      costCodes: "Daily",
+      schedule: "15 min",
+      variations: "Immediate",
+      documents: "Immediate",
+      timeline: "Immediate",
+      ...(next.buildxact?.syncFrequency || {}),
+    },
+    queue: Array.isArray(next.buildxact?.queue) ? next.buildxact.queue.slice(0, 120) : [],
+    syncHistory: Array.isArray(next.buildxact?.syncHistory) ? next.buildxact.syncHistory.slice(0, 180) : [],
+    payloadPreviews: Array.isArray(next.buildxact?.payloadPreviews) ? next.buildxact.payloadPreviews.slice(0, 120) : [],
+    connection: {
+      status: "disconnected",
+      workspaceId: "bx-demo-qld",
+      apiKeyMasked: "",
+      ...(next.buildxact?.connection || {}),
+    },
+  };
   next.messages = Array.isArray(next.messages)
     ? next.messages.slice(0, 120).map((thread) => ({
         ...thread,
@@ -767,15 +828,22 @@ function appendProjectLog(state, siteId, title, body) {
 }
 
 function queueBuildxactSync(state, type, reference, siteId, payloadCurrent, payloadPrevious = null) {
+  const readOnly = Boolean(state.buildxact?.readOnlyMode);
   const queueItem = {
     id: randomId("bxq"),
+    resource: type,
+    action: "upsert",
     type,
     reference,
     siteId,
     payloadSize: `${Math.max(2, Math.round(JSON.stringify(payloadCurrent).length / 1000))} KB`,
-    status: "pending",
+    status: readOnly ? "read-only" : "pending",
+    attempts: 0,
+    createdAt: nowStamp(),
+    lastError: readOnly ? "Read-only mode enabled. Payload retained for preview only." : null,
   };
   state.buildxact.queue.unshift(queueItem);
+  state.buildxact.queue = state.buildxact.queue.slice(0, 120);
   state.buildxact.payloadPreviews.unshift({
     id: randomId("bxp"),
     type,
@@ -783,7 +851,33 @@ function queueBuildxactSync(state, type, reference, siteId, payloadCurrent, payl
     current: payloadCurrent,
     previous: payloadPrevious,
   });
+  state.buildxact.payloadPreviews = state.buildxact.payloadPreviews.slice(0, 120);
+  if (readOnly) {
+    state.buildxact.syncHistory.unshift(
+      createBuildxactSyncHistory({
+        type,
+        reference,
+        siteId,
+        status: "skipped",
+        payloadSize: queueItem.payloadSize,
+        error: "Read-only mode enabled.",
+      }),
+    );
+    state.buildxact.syncHistory = state.buildxact.syncHistory.slice(0, 180);
+  }
   return queueItem;
+}
+
+function queueSignedApprovalBuildxactPush(state, approval, contractPack) {
+  if (!approval || !contractPack) return null;
+  const site = state.sites.find((item) => item.id === approval.siteId);
+  const client = state.clients.find((item) => item.id === approval.clientId);
+  const costCode = (state.buildxact?.costCodes || []).find((item) => item.siteforgeTag === "variation") || null;
+  const variationPayload = createSignedApprovalPushPayload({ approval, site, client, contractPack, costCode });
+  const attachmentPayload = createAttachmentPayload({ approval, site, contractPack });
+  const variationQueue = queueBuildxactSync(state, "variation", approval.number || approval.id, approval.siteId, variationPayload, null);
+  queueBuildxactSync(state, "contractPack", contractPack.docId, approval.siteId, attachmentPayload, null);
+  return variationQueue;
 }
 
 function nextScopedNumber(state, collectionName, siteId, prefix, field = "number") {
@@ -1176,33 +1270,7 @@ function finaliseClientSignedContract(next, helpers, contractPack, approval, sig
       `Contract executed - ${approval.title}`,
       `Contract pack ${contractPack.docId} fully executed and archived for ${client?.name || "client"}.`,
     );
-    helpers.queueSync(
-      "contractPack",
-      contractPack.docId,
-      approval.siteId,
-      {
-        approvalId: approval.id,
-        siteCode: next.sites.find((site) => site.id === approval.siteId)?.code,
-        status: contractPack.status,
-        signedAt: contractPack.signatures.client?.signedAt,
-      },
-      null,
-    );
-    const linkedVariation = next.variations.find((variation) => variation.clientApprovalId === approval.id);
-    if (linkedVariation) {
-      helpers.queueSync(
-        "variation",
-        linkedVariation.number,
-        linkedVariation.siteId,
-        {
-          variationNumber: linkedVariation.number,
-          siteCode: next.sites.find((site) => site.id === linkedVariation.siteId)?.code,
-          status: "signed",
-          value: linkedVariation.value,
-        },
-        null,
-      );
-    }
+    queueSignedApprovalBuildxactPush(next, approval, contractPack);
   }
   helpers.emit({
     eventType: "contract.client-signed",
@@ -1546,6 +1614,7 @@ export function SiteForgeProvider({ children }) {
         mutate((next, helpers) => {
           const pack = next.contractPacks.find((entry) => entry.docId === payload.contractPack.docId);
           const document = next.documents.find((entry) => entry.contractPackId === payload.contractPack.docId);
+          const approval = next.approvals.find((entry) => entry.contractPackId === payload.contractPack.docId);
           if (pack) {
             pack.executedPdfBlobId = blobId;
             pack.pdfArchiveLabel = `${pack.docId}.pdf`;
@@ -1555,6 +1624,20 @@ export function SiteForgeProvider({ children }) {
             document.fileName = `${payload.contractPack.docId}.pdf`;
             document.mimeType = "application/pdf";
             document.immutable = true;
+          }
+          if (pack && approval && !next.buildxact?.readOnlyMode) {
+            queueBuildxactSync(
+              next,
+              "contractPackAttachment",
+              pack.docId,
+              approval.siteId,
+              createAttachmentPayload({
+                approval,
+                site: next.sites.find((item) => item.id === approval.siteId),
+                contractPack: pack,
+              }),
+              null,
+            );
           }
           helpers.addAudit({
             action: "contract.executed-pdf-stored",
@@ -3575,9 +3658,18 @@ export function SiteForgeProvider({ children }) {
         });
       },
       testBuildxactConnection() {
-        mutate((next) => {
+        mutate((next, helpers) => {
           next.buildxact.connection.status = "connected";
           next.buildxact.connection.lastTestedAt = nowStamp();
+          next.buildxact.lastSyncAt = next.buildxact.connection.lastTestedAt;
+          helpers.addAudit({
+            action: "buildxact.connection-test",
+            entityType: "integration",
+            entityId: "buildxact",
+            before: null,
+            after: { status: "connected" },
+            siteId: next.session.siteId,
+          });
         });
       },
       updateBuildxactSettings(patch) {
@@ -3586,9 +3678,91 @@ export function SiteForgeProvider({ children }) {
             ...next.buildxact,
             ...patch,
             toggles: { ...next.buildxact.toggles, ...(patch.toggles || {}) },
+            entitySync: { ...next.buildxact.entitySync, ...(patch.entitySync || patch.toggles || {}) },
             syncFrequency: { ...next.buildxact.syncFrequency, ...(patch.syncFrequency || {}) },
             connection: { ...next.buildxact.connection, ...(patch.connection || {}) },
           };
+        });
+      },
+      setBuildxactReadOnly(enabled) {
+        mutate((next, helpers) => {
+          next.buildxact.readOnlyMode = Boolean(enabled);
+          helpers.addAudit({
+            action: "buildxact.read-only-toggle",
+            entityType: "integration",
+            entityId: "buildxact",
+            before: null,
+            after: { readOnlyMode: next.buildxact.readOnlyMode },
+            siteId: next.session.siteId,
+          });
+        });
+      },
+      reconcileBuildxactNow() {
+        mutate((next, helpers) => {
+          const orgId = next.org?.id || DEFAULT_ORG.id;
+          const snapshot = buildBuildxactPullSnapshot({ orgId });
+          const toggles = next.buildxact.entitySync || next.buildxact.toggles || {};
+          const before = {
+            sites: next.sites.length,
+            clients: next.clients.length,
+            suppliers: next.buildxact.suppliers?.length || 0,
+            costCodes: next.buildxact.costCodes?.length || 0,
+          };
+
+          if (toggles.projects) {
+            next.sites = upsertByBuildxactId(next.sites, snapshot.sites);
+          }
+          if (toggles.clients) {
+            next.clients = upsertByBuildxactId(next.clients, snapshot.clients);
+          }
+          if (toggles.suppliers) {
+            next.buildxact.suppliers = snapshot.suppliers;
+          }
+          if (toggles.costCodes) {
+            next.buildxact.costCodes = snapshot.costCodes;
+          }
+          if (toggles.schedule) {
+            next.buildxact.scheduleMilestones = snapshot.scheduleMilestones;
+          }
+
+          next.buildxact.connection.status = "connected";
+          next.buildxact.lastSyncAt = nowStamp();
+          next.buildxact.syncHistory.unshift(
+            createBuildxactSyncHistory({
+              type: "pull",
+              reference: "buildxact-fixture-reconcile",
+              siteId: next.session.siteId,
+              status: "success",
+              payloadSize: `${snapshot.sites.length + snapshot.clients.length + snapshot.suppliers.length} records`,
+            }),
+          );
+          next.buildxact.payloadPreviews.unshift({
+            id: randomId("bxp"),
+            type: "pull",
+            reference: "buildxact-fixture-reconcile",
+            current: snapshot,
+            previous: before,
+          });
+          next.buildxact.syncHistory = next.buildxact.syncHistory.slice(0, 180);
+          next.buildxact.payloadPreviews = next.buildxact.payloadPreviews.slice(0, 120);
+          helpers.addAudit({
+            action: "buildxact.reconcile",
+            entityType: "integration",
+            entityId: "buildxact",
+            before,
+            after: {
+              sites: next.sites.length,
+              clients: next.clients.length,
+              suppliers: next.buildxact.suppliers.length,
+              costCodes: next.buildxact.costCodes.length,
+            },
+            siteId: next.session.siteId,
+          });
+          pushToast(next, {
+            tone: "info",
+            title: "Buildxact reconciled",
+            body: "Projects, clients, suppliers, cost codes, and schedule context were refreshed from the connector fixtures.",
+          });
         });
       },
       retryBuildxactSync(syncId) {
@@ -3632,8 +3806,27 @@ export function SiteForgeProvider({ children }) {
         mutate((next, helpers) => {
           const item = next.buildxact.queue.find((entry) => entry.id === queueId);
           if (!item) return;
+          if (item.status === "read-only" || next.buildxact.readOnlyMode) {
+            item.status = "read-only";
+            item.lastError = "Read-only mode enabled. Nothing was pushed to Buildxact.";
+            next.buildxact.syncHistory.unshift(
+              createBuildxactSyncHistory({
+                type: item.type,
+                reference: item.reference,
+                siteId: item.siteId,
+                status: "skipped",
+                payloadSize: item.payloadSize,
+                error: item.lastError,
+              }),
+            );
+            next.buildxact.syncHistory = next.buildxact.syncHistory.slice(0, 180);
+            return;
+          }
           const shouldFail = item.type.toLowerCase().includes("labour") || item.reference.toLowerCase().includes("pay");
           item.status = shouldFail ? "error" : "sent";
+          item.attempts = Number(item.attempts || 0) + 1;
+          item.lastAttemptAt = nowStamp();
+          item.lastError = shouldFail ? "Missing Buildxact cost code mapping for labour export." : null;
           const historyEntry = {
             id: randomId("bx"),
             type: item.type,
@@ -3646,7 +3839,19 @@ export function SiteForgeProvider({ children }) {
             error: shouldFail ? "Missing Buildxact cost code mapping for labour export." : undefined,
           };
           next.buildxact.syncHistory.unshift(historyEntry);
+          next.buildxact.syncHistory = next.buildxact.syncHistory.slice(0, 180);
           if (shouldFail) {
+            next.buildxact.manualReview.unshift({
+              id: randomId("bx-review"),
+              queueId: item.id,
+              type: item.type,
+              reference: item.reference,
+              siteId: item.siteId,
+              reason: historyEntry.error,
+              status: "manual-review",
+              createdAt: nowStamp(),
+            });
+            next.buildxact.manualReview = next.buildxact.manualReview.slice(0, 80);
             helpers.emit({
               eventType: "buildxact.sync-error",
               title: `Buildxact sync error - ${item.reference}`,

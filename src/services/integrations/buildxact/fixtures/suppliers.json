@@ -1,0 +1,26 @@
+[
+  {
+    "id": "bx-supplier-boral",
+    "name": "Boral Concrete Brisbane",
+    "trade": "Concrete",
+    "email": "dispatch.brisbane@boral.example.com",
+    "phone": "07 3000 1100",
+    "status": "active"
+  },
+  {
+    "id": "bx-supplier-steel",
+    "name": "Queensland Steel & Lintels",
+    "trade": "Structural Steel",
+    "email": "orders@qldsteel.example.com",
+    "phone": "07 3000 2200",
+    "status": "active"
+  },
+  {
+    "id": "bx-supplier-h2o",
+    "name": "H2O Plumbing Supplies",
+    "trade": "Plumbing",
+    "email": "trade@h2osupplies.example.com",
+    "phone": "07 3000 3300",
+    "status": "active"
+  }
+]

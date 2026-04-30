@@ -1,0 +1,23 @@
+[
+  {
+    "id": "bx-milestone-riv-frame",
+    "projectId": "bx-project-riv-01",
+    "name": "Frame complete",
+    "date": "2026-05-08",
+    "status": "in-progress"
+  },
+  {
+    "id": "bx-milestone-riv-lockup",
+    "projectId": "bx-project-riv-01",
+    "name": "Lock-up",
+    "date": "2026-06-12",
+    "status": "planned"
+  },
+  {
+    "id": "bx-milestone-nor-pc",
+    "projectId": "bx-project-nor-07",
+    "name": "Practical completion",
+    "date": "2026-08-28",
+    "status": "planned"
+  }
+]

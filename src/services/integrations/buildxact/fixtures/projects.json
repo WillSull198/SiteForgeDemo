@@ -1,0 +1,34 @@
+[
+  {
+    "id": "bx-project-riv-01",
+    "code": "RIV-01",
+    "name": "Riverside Residence",
+    "address": "42 River Road, West End QLD 4101",
+    "contractValue": 842000,
+    "contractType": "HIA",
+    "status": "active",
+    "client": {
+      "id": "bx-client-hargraves",
+      "name": "Hargraves Family",
+      "primaryContact": "Mia Hargraves",
+      "email": "mia.hargraves@example.com",
+      "phone": "0412 555 018"
+    }
+  },
+  {
+    "id": "bx-project-nor-07",
+    "code": "NOR-07",
+    "name": "Northshore Duplex",
+    "address": "18 MacArthur Avenue, Hamilton QLD 4007",
+    "contractValue": 1265000,
+    "contractType": "AS4000",
+    "status": "active",
+    "client": {
+      "id": "bx-client-vella",
+      "name": "Vella Developments",
+      "primaryContact": "Anthony Vella",
+      "email": "anthony.vella@example.com",
+      "phone": "0407 555 901"
+    }
+  }
+]

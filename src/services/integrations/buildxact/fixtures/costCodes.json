@@ -1,0 +1,23 @@
+[
+  {
+    "id": "bx-code-5600",
+    "code": "BX-5600",
+    "name": "Client Approved Variations",
+    "category": "Variations",
+    "siteforgeTag": "variation"
+  },
+  {
+    "id": "bx-code-6100",
+    "code": "BX-6100",
+    "name": "EOT / Delay Evidence",
+    "category": "Schedule",
+    "siteforgeTag": "eot"
+  },
+  {
+    "id": "bx-code-7200",
+    "code": "BX-7200",
+    "name": "Signed Contract Attachments",
+    "category": "Documents",
+    "siteforgeTag": "contractPack"
+  }
+]

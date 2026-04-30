@@ -5,6 +5,7 @@ import DataTable from "../components/DataTable";
 import { Badge, Button, Card, MetricGrid, Modal, RestrictedPanel, Tabs } from "../components/ui";
 import { useSiteForge } from "../services/siteforgeStore";
 import { can } from "../services/permissions";
+import { SYNC_ENTITY_TOGGLES } from "../services/integrations/buildxact/schemas";
 
 const copyJson = async (payload) => {
   if (!payload) return;
@@ -35,7 +36,7 @@ export default function IntegrationsPage() {
     { label: "Teams Events", value: state.notifications.eventLog.length, color: "b" },
     { label: "Queued Syncs", value: state.buildxact.queue.filter((item) => item.status === "pending").length, color: "a" },
     { label: "Sync Errors", value: state.buildxact.syncHistory.filter((item) => item.status === "error").length, color: "r" },
-    { label: "Buildxact", value: state.buildxact.connection.status, color: "g" },
+    { label: "Buildxact", value: state.buildxact.readOnlyMode ? "read-only" : state.buildxact.connection.status, color: "g" },
   ];
 
   const failedHistory = useMemo(() => state.buildxact.syncHistory.filter((item) => item.status === "error"), [state.buildxact.syncHistory]);
@@ -102,6 +103,11 @@ export default function IntegrationsPage() {
       {tab === "buildxact" ? (
         <div className="g32" style={{ marginTop: 10 }}>
           <Card title="Buildxact Settings" icon={Icons.gear}>
+            {state.buildxact.readOnlyMode ? (
+              <div className="callout warning" style={{ marginBottom: 12 }}>
+                Read-only mode is active. SiteForge will pull Buildxact context but signed variations and contract packs remain queued locally.
+              </div>
+            ) : null}
             <div className="g2">
               <div className="ff">
                 <label>Connection Status</label>
@@ -109,10 +115,16 @@ export default function IntegrationsPage() {
                   <div>
                     <div className="b sm">{state.buildxact.connection.status}</div>
                     <div className="xs ct3">Workspace {state.buildxact.connection.workspaceId}</div>
+                    <div className="xs ct3">Last sync {state.buildxact.lastSyncAt || "Not reconciled yet"}</div>
                   </div>
-                  <Button small tone="bt-p" onClick={() => actions.testBuildxactConnection()}>
-                    Test
-                  </Button>
+                  <div className="fx" style={{ gap: 6 }}>
+                    <Button small onClick={() => actions.testBuildxactConnection()}>
+                      Test
+                    </Button>
+                    <Button small tone="bt-p" onClick={() => actions.reconcileBuildxactNow()}>
+                      Reconcile now
+                    </Button>
+                  </div>
                 </div>
               </div>
               <div className="ff">
@@ -123,23 +135,45 @@ export default function IntegrationsPage() {
                 />
               </div>
             </div>
+            <div className="linked-row" style={{ marginTop: 10 }}>
+              <div>
+                <div className="b sm">Read-only mode</div>
+                <div className="xs ct3">Pull projects, clients, suppliers, cost codes, and schedule without pushing signed outcomes back.</div>
+              </div>
+              <label className="switch">
+                <input type="checkbox" checked={state.buildxact.readOnlyMode} onChange={(event) => actions.setBuildxactReadOnly(event.target.checked)} />
+                <span />
+              </label>
+            </div>
+            <div className="linked-row" style={{ marginTop: 10 }}>
+              <div>
+                <div className="b sm">Webhook endpoint</div>
+                <div className="xs ct3" style={{ wordBreak: "break-all" }}>{state.buildxact.webhookEndpoint}</div>
+              </div>
+              <Button small onClick={() => navigator.clipboard?.writeText(state.buildxact.webhookEndpoint)}>
+                Copy
+              </Button>
+            </div>
             <div className="g2">
-              {Object.entries(state.buildxact.toggles).map(([key, enabled]) => (
+              {Object.entries(SYNC_ENTITY_TOGGLES).map(([key, label]) => {
+                const enabled = Boolean((state.buildxact.entitySync || state.buildxact.toggles || {})[key]);
+                return (
                 <div className="linked-row" key={key}>
                   <div>
-                    <div className="b sm">{key}</div>
+                    <div className="b sm">{label}</div>
                     <div className="xs ct3">Sync frequency {state.buildxact.syncFrequency[key]}</div>
                   </div>
                   <label className="switch">
                     <input
                       type="checkbox"
                       checked={enabled}
-                      onChange={(event) => actions.updateBuildxactSettings({ toggles: { [key]: event.target.checked } })}
+                      onChange={(event) => actions.updateBuildxactSettings({ entitySync: { [key]: event.target.checked }, toggles: { [key]: event.target.checked } })}
                     />
                     <span />
                   </label>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </Card>
 
@@ -163,6 +197,10 @@ export default function IntegrationsPage() {
                 ]}
                 rowActions={[
                   {
+                    label: "Payload",
+                    onClick: (item) => setPayloadPreview(state.buildxact.payloadPreviews.find((payload) => payload.reference === item.reference) || null),
+                  },
+                  {
                     label: "Trigger",
                     onClick: (item) => actions.triggerSyncQueueItem(item.id),
                     when: (item) => item.status === "pending",
@@ -173,15 +211,22 @@ export default function IntegrationsPage() {
 
             <Card title="Cost Code Mapping" icon={Icons.box}>
               <div className="list-stack">
-                {APP_CONFIG.costCodes.map((code) => (
-                  <div className="linked-row" key={code.local}>
+                {(state.buildxact.costCodes.length ? state.buildxact.costCodes : APP_CONFIG.costCodes).map((code) => (
+                  <div className="linked-row" key={code.id || code.local}>
                     <div>
-                      <div className="b sm">{code.local}</div>
-                      <div className="xs ct3">{code.remote}</div>
+                      <div className="b sm">{code.code || code.local}</div>
+                      <div className="xs ct3">{code.name || code.remote}</div>
                     </div>
                     <Badge tone="passed">Mapped</Badge>
                   </div>
                 ))}
+              </div>
+            </Card>
+            <Card title="Buildxact Source Context" icon={Icons.grid} style={{ marginTop: 8 }}>
+              <div className="list-stack">
+                <div className="linked-row"><span>Suppliers</span><Badge tone="medium">{state.buildxact.suppliers.length}</Badge></div>
+                <div className="linked-row"><span>Cost codes</span><Badge tone="medium">{state.buildxact.costCodes.length}</Badge></div>
+                <div className="linked-row"><span>Schedule milestones</span><Badge tone="medium">{state.buildxact.scheduleMilestones.length}</Badge></div>
               </div>
             </Card>
           </div>
@@ -223,6 +268,20 @@ export default function IntegrationsPage() {
             <Button tone="bt-p" icon={Icons.shuffle} onClick={() => actions.retryAllFailedSyncs()} style={{ marginTop: 10 }}>
               Retry All Failed
             </Button>
+          ) : null}
+          {state.buildxact.manualReview?.length ? (
+            <Card title="Manual Review" icon={Icons.alert} style={{ marginTop: 10 }}>
+              <DataTable
+                storageKey="buildxact-manual-review"
+                rows={state.buildxact.manualReview}
+                columns={[
+                  { key: "type", label: "Type", filterable: true },
+                  { key: "reference", label: "Reference", filterable: true },
+                  { key: "reason", label: "Reason", filterable: true },
+                  { key: "createdAt", label: "Created", type: "date", filterable: true },
+                ]}
+              />
+            </Card>
           ) : null}
         </Card>
       ) : null}
