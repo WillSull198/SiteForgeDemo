@@ -1030,6 +1030,46 @@ body {
   padding: 2px 5px;
 }
 
+.empty-state {
+  align-items: center;
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  color: var(--text-secondary);
+  display: grid;
+  justify-items: center;
+  padding: 22px;
+  text-align: center;
+}
+
+.empty-state-icon {
+  color: var(--amber);
+  margin-bottom: 8px;
+}
+
+.empty-state-title {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.empty-state-copy {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-top: 4px;
+  max-width: 360px;
+}
+
+.empty-state-action {
+  margin-top: 12px;
+}
+
+.onboarding-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border-card);
+  border-radius: 14px;
+  padding: 18px;
+}
+
 .worker-header {
   display: flex;
   justify-content: space-between;

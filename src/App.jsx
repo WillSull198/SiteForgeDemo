@@ -23,6 +23,7 @@ import WorkerMobileView from "./pages/WorkerMobileView";
 import { can, getNavForRole, mustHandUpForApproval, routeKindForRole } from "./services/permissions";
 import { SiteForgeProvider, useSiteForge } from "./services/siteforgeStore";
 import { getSyncStatus, subscribeSyncStatus } from "./services/data";
+import { captureException, track } from "./services/observability";
 
 const PAGE_TITLES = {
   boardroom: "Boardroom",
@@ -86,7 +87,9 @@ class ViewBoundary extends Component {
     return { hasError: true };
   }
 
-  componentDidCatch() {}
+  componentDidCatch(error, info) {
+    captureException(error, { componentStack: info?.componentStack, boundary: "ViewBoundary" });
+  }
 
   render() {
     if (this.state.hasError) {
@@ -123,7 +126,9 @@ function Shell() {
     }
   });
   const [quickNewOpen, setQuickNewOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [quickForm, setQuickForm] = useState({ title: "", description: "" });
+  const [supportForm, setSupportForm] = useState({ subject: "", body: "" });
   const [syncStatus, setSyncStatus] = useState({ state: "synced", pending: 0, stuck: 0 });
   const [isOnline, setIsOnline] = useState(() => navigator.onLine);
   const [installPrompt, setInstallPrompt] = useState(null);
@@ -156,6 +161,7 @@ function Shell() {
         event.preventDefault();
         const roles = ["Supervisor", "Project Manager", "Contract Admin", "Director", "Subcontractor", "Client", "Worker"];
         actions.setRole(roles[Number(event.key) - 1]);
+        track("role.switched", { role: roles[Number(event.key) - 1], shortcut: true });
       }
       if (!isMeta && event.key.toLowerCase() === "g") {
         goPrefixRef.current = "g";
@@ -183,7 +189,7 @@ function Shell() {
       }
       if (!isMeta && event.key === "?") {
         event.preventDefault();
-        actions.toggleShortcuts();
+        setHelpOpen(true);
       }
       if (event.key === "Escape") {
         setQuickNewOpen(false);
@@ -477,12 +483,24 @@ function Shell() {
                 onMarkAllRead={actions.markAllNotificationsRead}
                 onNavigate={(targetRoute) => targetRoute && actions.navigate(targetRoute)}
               />
+              <Button small icon={Icons.help} onClick={() => setHelpOpen(true)}>
+                Help
+              </Button>
               <span className={`sync-pill ${syncStatus.state}`} title={`${syncStatus.pending} pending, ${syncStatus.stuck} stuck`}>
                 <span className="sync-dot" />
                 {!isOnline ? "Offline" : syncStatus.state === "synced" ? "Synced" : syncStatus.state === "syncing" ? "Syncing" : "Review"}
               </span>
             </div>
           </div>
+
+          {!state.onboarding?.completedTours?.includes(role) ? (
+            <div className="notice-banner" style={{ margin: "0 24px 12px" }}>
+              <b>{role} tour:</b> Use the sidebar to move through your role-specific workspace. ClientFlow recovers money, Passport controls access, and Reports stores operational PDFs.
+              <Button small style={{ marginLeft: 10 }} onClick={() => actions.markTourComplete(role)}>
+                Got it
+              </Button>
+            </div>
+          ) : null}
 
           <div className="C">
             <ViewBoundary
@@ -532,6 +550,75 @@ function Shell() {
           <Button tone="bt-p" onClick={submitQuickNew}>
             Create
           </Button>
+        </div>
+      </Modal>
+
+      <Modal open={!state.onboarding?.complete} close={() => actions.completeOnboarding("demo")} title="Welcome to SiteForge" wide>
+        <div className="g2">
+          <div className="onboarding-panel">
+            <div className="b md">Try the demo</div>
+            <div className="sm ct2">Explore SiteForge with realistic Australian construction data, including ClientFlow, Passport, Presence and Buildxact workflows.</div>
+            <Button tone="bt-p" onClick={() => actions.completeOnboarding("demo")} style={{ marginTop: 12 }}>
+              Start Demo
+            </Button>
+          </div>
+          <div className="onboarding-panel">
+            <div className="b md">Set up my company</div>
+            <div className="sm ct2">Add company details, ABN, logo, AI key and integration settings before creating your first real project.</div>
+            <Button
+              onClick={() => {
+                actions.completeOnboarding("real-account");
+                actions.navigate({ kind: "internal", siteId: state.session.siteId, page: "admin", entityId: null });
+              }}
+              style={{ marginTop: 12 }}
+            >
+              Set Up Company
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={helpOpen} close={() => setHelpOpen(false)} title="SiteForge Help" wide>
+        <div className="g2">
+          <div>
+            <div className="b sm mb8">Quick guide</div>
+            <div className="list-stack">
+              {[
+                ["ClientFlow", "Turn site events into signed client approvals."],
+                ["Site Passport", "Control access with induction, SWMS, tickets and COI evidence."],
+                ["Presence", "Use disclosed attendance only after the 14-day notice gate."],
+                ["Recovery Engine", "Find forgotten events that should become commercial recovery."],
+                ["Buildxact", "Keep cost, supplier and PO workflows in Buildxact; SiteForge syncs outcomes."],
+              ].map(([title, body]) => (
+                <div className="linked-row" key={title}>
+                  <div>
+                    <div className="b sm">{title}</div>
+                    <div className="xs ct3">{body}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div className="b sm mb8">Contact support</div>
+            <div className="ff">
+              <label>Subject</label>
+              <input value={supportForm.subject} onChange={(event) => setSupportForm((current) => ({ ...current, subject: event.target.value }))} />
+            </div>
+            <div className="ff">
+              <label>What do you need?</label>
+              <textarea value={supportForm.body} onChange={(event) => setSupportForm((current) => ({ ...current, body: event.target.value }))} />
+            </div>
+            <Button
+              tone="bt-p"
+              onClick={() => {
+                actions.submitSupportRequest(supportForm);
+                setSupportForm({ subject: "", body: "" });
+              }}
+            >
+              Queue Support Request
+            </Button>
+          </div>
         </div>
       </Modal>
 

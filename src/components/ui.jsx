@@ -37,6 +37,17 @@ export function Badge({ tone, children, className = "" }) {
   return <span className={`bg ${tone} ${className}`.trim()}>{children}</span>;
 }
 
+export function EmptyState({ icon, title = "Nothing here yet", description = "When records are created, they will appear here.", action = null }) {
+  return (
+    <div className="empty-state">
+      {icon ? <div className="empty-state-icon">{renderIcon(icon, 22)}</div> : null}
+      <div className="empty-state-title">{title}</div>
+      <div className="empty-state-copy">{description}</div>
+      {action ? <div className="empty-state-action">{action}</div> : null}
+    </div>
+  );
+}
+
 export function Button({ tone = "", small = false, icon, children, className = "", ...props }) {
   return (
     <button className={`bt ${tone} ${small ? "bt-s" : ""} ${className}`.trim()} {...props}>

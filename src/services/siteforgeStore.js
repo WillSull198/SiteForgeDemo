@@ -480,6 +480,25 @@ function normaliseState(state) {
         { id: "sched-compliance", reportType: "monthly-compliance", frequency: "monthly", day: "1", time: "07:00", recipients: ["Director"], enabled: true, lastQueuedAt: null },
       ];
   next.reportQueue = Array.isArray(next.reportQueue) ? next.reportQueue.slice(0, 80) : [];
+  next.onboarding = {
+    mode: "demo",
+    complete: Boolean(next.onboarding?.complete ?? true),
+    completedTours: Array.isArray(next.onboarding?.completedTours) ? next.onboarding.completedTours : [],
+    ...(next.onboarding || {}),
+  };
+  next.billing = {
+    plan: "Pro",
+    usage: {
+      storageMb: Math.round(((next.files?.records?.length || 0) + (next.documents?.length || 0)) * 0.8),
+      aiTokens: next.billing?.usage?.aiTokens || 0,
+      activeProjects: next.sites.filter((site) => site.status === "active").length,
+    },
+    ...(next.billing || {}),
+  };
+  next.help = {
+    supportQueue: Array.isArray(next.help?.supportQueue) ? next.help.supportQueue.slice(0, 40) : [],
+    ...(next.help || {}),
+  };
   next.documents = Array.isArray(next.documents)
     ? next.documents.map((document) => ({
         retentionCategory: document.retentionCategory || (document.category === "Contract Pack" ? "signed-contract" : "project-document"),
@@ -2357,6 +2376,51 @@ export function SiteForgeProvider({ children }) {
         const imported = normaliseState(migrateLegacyState(cloneState(importedState)));
         setState(imported);
         window.location.hash = buildHash(imported.session?.route || DEFAULT_ROLE_PAGES.Supervisor);
+      },
+      completeOnboarding(mode = "demo") {
+        mutate((next, helpers) => {
+          next.onboarding = {
+            ...(next.onboarding || {}),
+            complete: true,
+            mode,
+            completedAt: nowStamp(),
+          };
+          helpers.addAudit({
+            action: "onboarding.complete",
+            entityType: "onboarding",
+            entityId: mode,
+            before: null,
+            after: next.onboarding,
+            siteId: next.session.siteId,
+          });
+        });
+      },
+      markTourComplete(tour) {
+        mutate((next) => {
+          next.onboarding.completedTours = [...new Set([...(next.onboarding.completedTours || []), tour])];
+        });
+      },
+      submitSupportRequest(payload = {}) {
+        mutate((next, helpers) => {
+          const request = {
+            id: randomId("support"),
+            subject: payload.subject || "Support request",
+            body: payload.body || "",
+            status: "queued",
+            createdAt: nowStamp(),
+            userId: next.session.userId,
+          };
+          next.help.supportQueue.unshift(request);
+          helpers.addAudit({
+            action: "support.request",
+            entityType: "support",
+            entityId: request.id,
+            before: null,
+            after: request,
+            siteId: next.session.siteId,
+          });
+          pushToast(next, { tone: "medium", title: "Support request queued", body: "This will send once backend email is connected." });
+        });
       },
       setRole(role) {
         setState((previous) => {

@@ -19,6 +19,7 @@ import {
   Button,
   Card,
   DetailHeader,
+  EmptyState,
   LinkedRecordsPanel,
   MetricGrid,
   Modal,
@@ -2676,7 +2677,7 @@ function ReportsPage() {
                   </div>
                 ))
               ) : (
-                <div className="ct3 sm empty">No scheduled reports are queued for this site.</div>
+                <EmptyState icon={Icons.clock} title="No scheduled reports queued" description="Queued weekly and monthly operations reports will appear here before delivery." />
               )}
             </div>
           </Card>
@@ -2693,7 +2694,7 @@ function ReportsPage() {
                   </div>
                 ))
               ) : (
-                <div className="ct3 sm empty">Generate your first operations report to create a PDF artifact.</div>
+                <EmptyState icon={Icons.file} title="No report artifacts yet" description="Generate an operations report to store a durable PDF in Document Control." />
               )}
             </div>
           </Card>
@@ -3071,6 +3072,32 @@ function AdminPage() {
             </div>
             <Button tone="bt-r" onClick={clearAllData}>Clear All Data</Button>
           </div>
+        </Card>
+        <Card title="Billing & Subscription" icon={Icons.dollar}>
+          <div className="list-stack">
+            {[
+              ["Free", "$0/mo", "1 demo project, local-only data"],
+              ["Starter", "$49/mo", "Small builder operations layer"],
+              ["Pro", "$199/mo", "ClientFlow, Passport, Presence and integrations"],
+              ["Enterprise", "Contact", "Backend, SSO, compliance pack and custom retention"],
+            ].map(([plan, price, copy]) => (
+              <div className="linked-row" key={plan}>
+                <div>
+                  <div className="b sm">{plan} · {price}</div>
+                  <div className="xs ct3">{copy}</div>
+                </div>
+                <Badge tone={state.billing?.plan === plan ? "passed" : "medium"}>{state.billing?.plan === plan ? "current" : "upgrade"}</Badge>
+              </div>
+            ))}
+          </div>
+          <div className="mini-grid" style={{ marginTop: 12 }}>
+            <div className="mini-card"><span>Storage</span><b>{state.billing?.usage?.storageMb || 0}MB</b></div>
+            <div className="mini-card"><span>AI tokens</span><b>{state.billing?.usage?.aiTokens || 0}</b></div>
+            <div className="mini-card"><span>Active projects</span><b>{state.billing?.usage?.activeProjects || 0}</b></div>
+          </div>
+          <Button style={{ marginTop: 12 }} onClick={() => setSettingsMessage("Billing upgrade flow is scaffolded and waits for Stripe in Tier 12.")}>
+            Open Upgrade Page
+          </Button>
         </Card>
       </div>
       <Modal open={Boolean(importCandidate)} close={() => setImportCandidate(null)} title="Import SiteForge Data">

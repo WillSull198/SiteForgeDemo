@@ -2,9 +2,11 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { APP_CONFIG } from "./data/seedData";
+import { initObservability } from "./services/observability";
 import "./siteforge.css";
 
 document.title = APP_CONFIG.appTitle;
+initObservability();
 
 const PDFJS_VERSION = "3.11.174";
 
