@@ -31,9 +31,10 @@ export default function IntegrationsPage() {
   const canView = can(role, "integrations.view");
   const [tab, setTab] = useState("teams");
   const [payloadPreview, setPayloadPreview] = useState(null);
+  const [slashCommand, setSlashCommand] = useState("/siteforge approvals stalled");
 
   const metrics = [
-    { label: "Teams Events", value: state.notifications.eventLog.length, color: "b" },
+    { label: "Teams Events", value: state.teams?.outbound?.length || state.notifications.eventLog.length, color: "b" },
     { label: "Queued Syncs", value: state.buildxact.queue.filter((item) => item.status === "pending").length, color: "a" },
     { label: "Sync Errors", value: state.buildxact.syncHistory.filter((item) => item.status === "error").length, color: "r" },
     { label: "Buildxact", value: state.buildxact.readOnlyMode ? "read-only" : state.buildxact.connection.status, color: "g" },
@@ -60,20 +61,78 @@ export default function IntegrationsPage() {
 
       {tab === "teams" ? (
         <div className="g2">
+          <Card title="Teams Setup" icon={Icons.chat}>
+            <div className="linked-row">
+              <div>
+                <div className="b sm">{state.teams?.botName || "SiteForge Bot"}</div>
+                <div className="xs ct3">
+                  OAuth: {state.teams?.oauthStatus || "mocked"} · Tenant: {state.teams?.tenantName || "Demo Microsoft 365 Tenant"}
+                </div>
+              </div>
+              <div className="fx" style={{ gap: 6 }}>
+                <Badge tone={state.teams?.connected ? "passed" : "medium"}>{state.teams?.connected ? "connected" : "mock"}</Badge>
+                <Button small tone="bt-p" onClick={() => actions.connectTeamsMock()}>
+                  Connect to Teams
+                </Button>
+                <Button small onClick={() => actions.sendTeamsTestMessage()}>
+                  Send Test
+                </Button>
+              </div>
+            </div>
+            <div className="g2" style={{ marginTop: 12 }}>
+              {Object.entries(state.teams?.channelMap || {}).map(([eventType, channel]) => (
+                <label className="ff" key={eventType}>
+                  <span>{eventType}</span>
+                  <input value={channel} onChange={(event) => actions.updateTeamsChannelMap(eventType, event.target.value)} />
+                </label>
+              ))}
+            </div>
+          </Card>
+
+          <Card title="ChatOps Commands" icon={Icons.zap}>
+            <div className="mi" style={{ paddingLeft: 0, paddingRight: 0 }}>
+              <input value={slashCommand} onChange={(event) => setSlashCommand(event.target.value)} placeholder="/siteforge approvals stalled" />
+              <Button small tone="bt-p" onClick={() => actions.runTeamsSlashCommand(slashCommand)}>
+                Run
+              </Button>
+            </div>
+            <div className="list-stack" style={{ marginTop: 10 }}>
+              {(state.teams?.commandLog || []).slice(0, 5).map((entry) => (
+                <div className="linked-row" key={entry.id}>
+                  <div>
+                    <div className="b sm">{entry.command}</div>
+                    <div className="xs ct3">{entry.response.title} · {entry.at}</div>
+                    <div className="sm ct2" style={{ marginTop: 4, whiteSpace: "pre-wrap" }}>{entry.response.body}</div>
+                  </div>
+                  <Badge tone={entry.response.status === "error" ? "critical" : "passed"}>{entry.response.status}</Badge>
+                </div>
+              ))}
+              {!(state.teams?.commandLog || []).length ? <div className="ct3 sm empty">Run a slash command to preview ChatOps responses.</div> : null}
+            </div>
+          </Card>
+
           <Card title="Teams Notification Centre" icon={Icons.chat}>
             <DataTable
               storageKey="teams-event-log"
-              rows={state.notifications.eventLog}
+              rows={state.teams?.outbound || state.notifications.eventLog}
               columns={[
                 { key: "title", label: "Event", filterable: true },
-                { key: "channel", label: "Channel", filterable: true, options: [...new Set(state.notifications.eventLog.map((event) => event.channel))] },
+                { key: "eventType", label: "Type", filterable: true, options: [...new Set((state.teams?.outbound || []).map((event) => event.eventType))] },
+                { key: "channel", label: "Channel", filterable: true, options: [...new Set((state.teams?.outbound || []).map((event) => event.channel))] },
                 { key: "at", label: "At", filterable: true, type: "date" },
                 {
                   key: "status",
                   label: "Status",
                   filterable: true,
-                  options: [...new Set(state.notifications.eventLog.map((event) => event.status))],
-                  render: (value) => <Badge tone={value === "queued" ? "medium" : "passed"}>{value}</Badge>,
+                  options: [...new Set((state.teams?.outbound || []).map((event) => event.status))],
+                  render: (value) => <Badge tone={value === "error" ? "critical" : value === "queued" ? "medium" : "passed"}>{value}</Badge>,
+                },
+              ]}
+              rowActions={[
+                {
+                  label: "Payload",
+                  onClick: (event) => setPayloadPreview({ type: event.eventType || "teams", reference: event.id, current: event.payload || event, previous: null }),
+                  when: (event) => Boolean(event.payload),
                 },
               ]}
             />
@@ -93,6 +152,16 @@ export default function IntegrationsPage() {
                 {
                   label: "Escalate",
                   onClick: (approval) => actions.sendDirectorEscalation(approval.siteId, approval.title),
+                },
+                {
+                  label: "Teams Card",
+                  tone: "bt-p",
+                  onClick: (approval) => actions.queueTeamsApprovalCard(approval.id),
+                },
+                {
+                  label: "Teams Approve",
+                  tone: "bt-g",
+                  onClick: (approval) => actions.handleTeamsApprovalAction({ approvalId: approval.id, action: "approve", signerName: "Teams PM" }),
                 },
               ]}
             />

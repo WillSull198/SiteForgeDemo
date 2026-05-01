@@ -29,6 +29,7 @@ import {
   createSignedApprovalPushPayload,
   upsertByBuildxactId,
 } from "./integrations/buildxact/sync";
+import { DEFAULT_TEAMS_CHANNEL_MAP, buildTeamsApprovalDispatch, createTeamsEvent, handleTeamsSlashCommand } from "./integrations/teams/dispatcher";
 
 const SiteForgeContext = createContext(null);
 
@@ -542,6 +543,19 @@ function normaliseState(state) {
       apiKeyMasked: "",
       ...(next.buildxact?.connection || {}),
     },
+  };
+  next.teams = {
+    connected: false,
+    botName: "SiteForge Bot",
+    tenantName: "Demo Microsoft 365 Tenant",
+    oauthStatus: "mocked",
+    ...(next.teams || {}),
+    channelMap: {
+      ...DEFAULT_TEAMS_CHANNEL_MAP,
+      ...(next.teams?.channelMap || {}),
+    },
+    outbound: Array.isArray(next.teams?.outbound) ? next.teams.outbound.slice(0, 120) : [],
+    commandLog: Array.isArray(next.teams?.commandLog) ? next.teams.commandLog.slice(0, 80) : [],
   };
   next.presence = {
     ...(next.presence || {}),
@@ -1717,6 +1731,17 @@ function finaliseClientSignedContract(next, helpers, contractPack, approval, sig
       ],
       route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
     });
+    if (next.teams) {
+      const event = createTeamsEvent({
+        eventType: "approval.signed",
+        title: `Client signed ${approval.number || approval.id}`,
+        body: approval.title,
+        channel: next.teams.channelMap?.["approval.signed"] || "Builder PM Channel",
+        status: next.teams.connected ? "sent" : "queued",
+      });
+      next.teams.outbound.unshift({ id: randomId("teams"), ...event });
+      next.teams.outbound = next.teams.outbound.slice(0, 120);
+    }
   }
   return contractPack;
 }
@@ -2855,6 +2880,21 @@ export function SiteForgeProvider({ children }) {
             ],
             route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
           });
+          if (approval.deliveryChannels?.teams) {
+            const client = next.clients.find((item) => item.id === approval.clientId);
+            const channel = next.teams.channelMap?.["approval.sent"] || "Client Approvals";
+            const event = buildTeamsApprovalDispatch({
+              approval,
+              client,
+              builder: next.org?.settings?.company || APP_CONFIG.builder,
+              channel,
+            });
+            const record = { id: randomId("teams"), ...event, status: next.teams.connected ? "sent" : "queued" };
+            next.teams.outbound.unshift(record);
+            next.notifications.eventLog.unshift({ id: randomId("tel"), ...record });
+            next.teams.outbound = next.teams.outbound.slice(0, 120);
+            next.notifications.eventLog = next.notifications.eventLog.slice(0, 240);
+          }
         });
       },
       bulkIssueApprovals(approvalIds = []) {
@@ -4786,6 +4826,135 @@ export function SiteForgeProvider({ children }) {
             recipients: getRecipientsForRoles(next, ["Supervisor"]),
             route: { kind: "internal", siteId: next.session.siteId, page: "presence", entityId: flagged[0].id },
           });
+        });
+      },
+      connectTeamsMock() {
+        mutate((next, helpers) => {
+          const before = { connected: next.teams.connected, oauthStatus: next.teams.oauthStatus };
+          next.teams.connected = true;
+          next.teams.oauthStatus = "mock-connected";
+          next.teams.connectedAt = nowStamp();
+          next.teams.outbound.unshift(createTeamsEvent({
+            eventType: "teams.connected",
+            title: "Teams connection established",
+            body: "Mock Microsoft Teams action layer is ready for adaptive card dispatch.",
+            channel: "SiteForge Admin",
+            status: "sent",
+          }));
+          helpers.addAudit({
+            action: "teams.connect",
+            entityType: "integration",
+            entityId: "teams",
+            before,
+            after: { connected: true, oauthStatus: next.teams.oauthStatus },
+            siteId: next.session.siteId,
+          });
+          pushToast(next, { tone: "passed", title: "Teams connected", body: "Mock Teams action layer is ready." });
+        });
+      },
+      updateTeamsChannelMap(eventType, channel) {
+        mutate((next, helpers) => {
+          const before = { ...(next.teams.channelMap || {}) };
+          next.teams.channelMap = { ...(next.teams.channelMap || DEFAULT_TEAMS_CHANNEL_MAP), [eventType]: channel };
+          helpers.addAudit({
+            action: "teams.channel-map",
+            entityType: "integration",
+            entityId: "teams",
+            before,
+            after: next.teams.channelMap,
+            siteId: next.session.siteId,
+          });
+        });
+      },
+      sendTeamsTestMessage() {
+        mutate((next) => {
+          const event = createTeamsEvent({
+            eventType: "teams.test",
+            title: "SiteForge Teams test",
+            body: "If this were connected to the real bot, this message would appear in Microsoft Teams.",
+            channel: "PM Escalations",
+            status: next.teams.connected ? "sent" : "queued",
+          });
+          next.teams.outbound.unshift({ id: randomId("teams"), ...event });
+          next.notifications.eventLog.unshift({ id: randomId("tel"), ...event });
+          next.notifications.eventLog = next.notifications.eventLog.slice(0, 240);
+          pushToast(next, { tone: "medium", title: "Teams test queued", body: "Outbound log updated with a Teams test message." });
+        });
+      },
+      queueTeamsApprovalCard(approvalId) {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval) return;
+          const client = next.clients.find((item) => item.id === approval.clientId);
+          const channel = next.teams.channelMap?.["approval.sent"] || "Client Approvals";
+          const event = buildTeamsApprovalDispatch({
+            approval,
+            client,
+            builder: next.org?.settings?.company || APP_CONFIG.builder,
+            channel,
+          });
+          const record = { id: randomId("teams"), ...event, status: next.teams.connected ? "sent" : "queued" };
+          next.teams.outbound.unshift(record);
+          next.notifications.eventLog.unshift({ id: randomId("tel"), ...record });
+          next.teams.outbound = next.teams.outbound.slice(0, 120);
+          next.notifications.eventLog = next.notifications.eventLog.slice(0, 240);
+          helpers.addAudit({
+            action: "teams.approval-card",
+            entityType: "approval",
+            entityId: approval.id,
+            before: null,
+            after: { channel, status: record.status },
+            siteId: approval.siteId,
+          });
+        });
+      },
+      handleTeamsApprovalAction({ approvalId, action = "question", note = "", signerName = "Teams user" } = {}) {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval) return;
+          const before = { status: approval.status };
+          if (action === "approve") {
+            approval.status = "approved";
+            helpers.appendTimeline(approval, { type: "approved", actor: signerName, role: "Teams", text: "Approved from Microsoft Teams adaptive card." });
+          } else if (action === "decline") {
+            approval.status = "declined";
+            helpers.appendTimeline(approval, { type: "declined", actor: signerName, role: "Teams", text: note || "Declined from Microsoft Teams adaptive card." });
+          } else {
+            approval.status = "question";
+            approval.messageThread = approval.messageThread || [];
+            approval.messageThread.push({ id: randomId("msg"), by: signerName, role: "Teams", at: nowStamp(), body: note || "Question raised from Microsoft Teams." });
+            helpers.appendTimeline(approval, { type: "question", actor: signerName, role: "Teams", text: note || "Question raised from Microsoft Teams." });
+          }
+          helpers.addAudit({
+            action: `teams.approval-${action}`,
+            entityType: "approval",
+            entityId: approval.id,
+            before,
+            after: { status: approval.status },
+            siteId: approval.siteId,
+          });
+        });
+      },
+      runTeamsSlashCommand(command = "") {
+        mutate((next) => {
+          const response = handleTeamsSlashCommand(command, next);
+          const event = createTeamsEvent({
+            eventType: "teams.command",
+            title: response.title,
+            body: response.body,
+            channel: "ChatOps",
+            status: response.status === "error" ? "error" : "sent",
+          });
+          next.teams.commandLog.unshift({
+            id: randomId("cmd"),
+            command,
+            response,
+            at: nowStamp(),
+          });
+          next.teams.outbound.unshift({ id: randomId("teams"), ...event });
+          next.teams.commandLog = next.teams.commandLog.slice(0, 80);
+          next.teams.outbound = next.teams.outbound.slice(0, 120);
+          pushToast(next, { tone: response.status === "error" ? "critical" : "medium", title: response.title, body: response.body.slice(0, 120) });
         });
       },
       testBuildxactConnection() {
