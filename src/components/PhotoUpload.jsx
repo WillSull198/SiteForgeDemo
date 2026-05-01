@@ -33,6 +33,25 @@ async function blobToDataUrl(blob) {
   });
 }
 
+async function captureCurrentLocation() {
+  if (!navigator.geolocation) return null;
+  return new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (position) =>
+        resolve({
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          accuracy: position.coords.accuracy,
+          capturedAt: Date.now(),
+          source: "device-location",
+          embeddedLater: true,
+        }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 4500, maximumAge: 60000 },
+    );
+  });
+}
+
 export async function compressImage(file) {
   const bitmap = await createImageBitmap(file);
   const canvas = document.createElement("canvas");
@@ -84,6 +103,7 @@ export default function PhotoUpload({ onPhotosAdded, existingPhotos = [], onRemo
         const compressed = await compressImage(file);
         if (!compressed) throw new Error(`Could not process ${file.name}.`);
         const dataUrl = await blobToDataUrl(compressed);
+        const geo = await captureCurrentLocation();
         const record = await put("photos", {
           id: uuid(),
           filename: file.name,
@@ -92,6 +112,8 @@ export default function PhotoUpload({ onPhotosAdded, existingPhotos = [], onRemo
           mimeType: "image/jpeg",
           parentType,
           parentId,
+          geo,
+          takenAt: file.lastModified || Date.now(),
           caption: "",
           createdAt: Date.now(),
         });
@@ -126,11 +148,12 @@ export default function PhotoUpload({ onPhotosAdded, existingPhotos = [], onRemo
           const key = labelOnly ? `${photo}-${index}` : photo.id || photo.data || index;
           return (
             <button className="photo-thumb" key={key} type="button" onClick={() => !labelOnly && setLightbox(photo)}>
-              {labelOnly ? (
+          {labelOnly ? (
                 <span className="photo-label">{photo}</span>
               ) : (
                 <img src={photo.data || photo.thumbnailDataUrl} alt={photo.caption || photo.filename || "Uploaded site photo"} />
               )}
+              {!labelOnly && photo.geo ? <span className="photo-geo">GPS</span> : null}
               {onRemove && !labelOnly ? (
                 <span
                   className="photo-remove"

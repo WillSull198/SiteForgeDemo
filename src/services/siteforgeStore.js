@@ -475,6 +475,7 @@ function normaliseState(state) {
     ? next.reportSchedules.slice(0, 40)
     : [
         { id: "sched-weekly-ops", reportType: "weekly-site-operations", frequency: "weekly", day: "Friday", time: "18:00", recipients: ["PM"], enabled: true, lastQueuedAt: null },
+        { id: "sched-daily-ops", reportType: "daily-site-report", frequency: "daily", day: "Every day", time: "18:00", recipients: ["Supervisor", "PM"], enabled: true, lastQueuedAt: null },
         { id: "sched-clientflow", reportType: "weekly-clientflow", frequency: "weekly", day: "Friday", time: "18:00", recipients: ["PM", "Director"], enabled: true, lastQueuedAt: null },
         { id: "sched-compliance", reportType: "monthly-compliance", frequency: "monthly", day: "1", time: "07:00", recipients: ["Director"], enabled: true, lastQueuedAt: null },
       ];
@@ -1390,6 +1391,7 @@ function buildOperationsReport(state, reportType = "weekly-site-operations", sit
   const signed = approvals.filter((approval) => approval.status === "signed");
   const reportNames = {
     "weekly-site-operations": "Weekly Site Operations Report",
+    "daily-site-report": "Daily Site Report",
     "weekly-clientflow": "Weekly ClientFlow Recovery Report",
     "monthly-compliance": "Monthly Compliance Report",
     "monthly-safety": "Monthly Safety Report",
@@ -1410,6 +1412,17 @@ function buildOperationsReport(state, reportType = "weekly-site-operations", sit
       {
         heading: "Photos and evidence",
         lines: [`${state.files?.records?.filter((file) => file.siteId === targetSiteId && file.classification === "Photo / Site Image").length || 0} indexed site photos.`],
+      },
+    ],
+    "daily-site-report": [
+      {
+        heading: "Today on site",
+        lines: [
+          `${diary.filter((entry) => entry.date === formatDate()).length || diary.length} diary entries available for today's report context.`,
+          `${problems.filter((item) => item.status !== "closed").length} open problems.`,
+          `${state.tasks.filter((task) => task.siteId === targetSiteId && task.status === "done").length} completed tasks recorded.`,
+          `${state.files?.records?.filter((file) => file.siteId === targetSiteId && file.classification === "Photo / Site Image").length || 0} site photos indexed.`,
+        ],
       },
     ],
     "weekly-clientflow": [

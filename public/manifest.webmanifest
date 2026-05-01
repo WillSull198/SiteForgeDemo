@@ -1,0 +1,19 @@
+{
+  "name": "SiteForge Construction OS",
+  "short_name": "SiteForge",
+  "description": "Operations, compliance and commercial recovery layer for Australian builders.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#F7F6F2",
+  "theme_color": "#D97706",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/siteforge-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

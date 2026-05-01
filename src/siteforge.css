@@ -976,11 +976,58 @@ body {
 
 .worker-shell {
   min-height: 100vh;
-  padding: 16px;
+  padding: 16px 16px 86px;
   background:
     radial-gradient(circle at top left, rgba(245, 158, 11, 0.14), transparent 26%),
     var(--bg);
   color: var(--t1);
+}
+
+.worker-bottom-nav {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 80;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--border-card);
+  border-radius: 20px;
+  box-shadow: var(--shadow-lg);
+  padding: 8px;
+}
+
+.worker-bottom-nav button {
+  min-height: 48px;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--text-secondary);
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.worker-bottom-nav button.on,
+.worker-bottom-nav button:hover {
+  background: var(--amber-light);
+  color: var(--amber-text);
+}
+
+.photo-geo {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  border-radius: 999px;
+  background: var(--green-bg);
+  color: var(--green-text);
+  border: 1px solid var(--green-border);
+  font-size: 9px;
+  font-weight: 800;
+  padding: 2px 5px;
 }
 
 .worker-header {

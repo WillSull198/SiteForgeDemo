@@ -2588,6 +2588,7 @@ function ReportsPage() {
   const site = derived.currentSite;
   const siteMetric = derived.metrics.siteMetrics.find((metric) => metric.siteId === site.id);
   const reportTypes = [
+    ["daily-site-report", "Daily Site Report"],
     ["weekly-site-operations", "Weekly Site Operations"],
     ["weekly-clientflow", "Weekly ClientFlow"],
     ["monthly-compliance", "Monthly Compliance"],

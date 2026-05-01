@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useSiteForge } from "../services/siteforgeStore";
 import { Icons, renderIcon } from "../components/icons";
 import { Badge, Button, Modal } from "../components/ui";
@@ -17,8 +17,10 @@ export default function WorkerMobileView() {
   const [problemOpen, setProblemOpen] = useState(false);
   const [materialsOpen, setMaterialsOpen] = useState(false);
   const [voiceText, setVoiceText] = useState("");
+  const [listening, setListening] = useState(false);
   const [problemForm, setProblemForm] = useState({ title: "", priority: "medium", description: "" });
   const [materialsForm, setMaterialsForm] = useState({ item: "", quantity: "", urgency: "normal" });
+  const recognitionRef = useRef(null);
 
   const tasks = useMemo(() => state.tasks.filter((task) => task.assigneeId === user?.id && task.siteId === siteId).slice(0, 3), [siteId, state.tasks, user?.id]);
   const taskDetail = state.tasks.find((task) => task.id === route.entityId) || tasks[0];
@@ -36,6 +38,39 @@ export default function WorkerMobileView() {
 
   const openTask = (task) => {
     actions.navigate({ kind: "worker", userId: user.id, page: "task", entityId: task.id });
+  };
+
+  const startVoiceCapture = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      const transcript = "Lintel pack still missing on east wall. Crew is out of sequence and waiting on supplier confirmation.";
+      setVoiceText(transcript);
+      setProblemForm((current) => ({ ...current, description: transcript, title: current.title || "Supplier delay affecting east wall" }));
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognitionRef.current = recognition;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-AU";
+    let silenceTimer = null;
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results)
+        .map((result) => result[0]?.transcript || "")
+        .join(" ")
+        .trim();
+      setVoiceText(transcript);
+      setProblemForm((current) => ({ ...current, description: transcript, title: current.title || transcript.split(".")[0]?.slice(0, 70) || "Voice field note" }));
+      if (silenceTimer) window.clearTimeout(silenceTimer);
+      silenceTimer = window.setTimeout(() => recognition.stop(), 3000);
+    };
+    recognition.onend = () => {
+      if (silenceTimer) window.clearTimeout(silenceTimer);
+      setListening(false);
+    };
+    recognition.onerror = () => setListening(false);
+    setListening(true);
+    recognition.start();
   };
 
   if (!user || !site) {
@@ -72,6 +107,12 @@ export default function WorkerMobileView() {
           </button>
         </div>
       </div>
+      {!navigator.onLine ? (
+        <div className="worker-alert">
+          <strong>Offline mode</strong>
+          <span>Records save locally and sync when your connection returns.</span>
+        </div>
+      ) : null}
 
       {route.page === "task" && taskDetail ? (
         <div className="worker-page">
@@ -205,6 +246,9 @@ export default function WorkerMobileView() {
           </div>
 
           <div className="fx" style={{ gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+            <Button onClick={() => actions.navigate({ kind: "worker", userId: user.id, page: "home", entityId: null })} className="touch-button">
+              Pull-to-refresh
+            </Button>
             <Button icon={Icons.alert} onClick={() => setProblemOpen(true)} className="touch-button">
               Report Problem
             </Button>
@@ -224,13 +268,9 @@ export default function WorkerMobileView() {
           <Button
             tone="bt-p"
             icon={Icons.chat}
-            onClick={() => {
-              const transcript = "Lintel pack still missing on east wall. Crew is out of sequence and waiting on supplier confirmation.";
-              setVoiceText(transcript);
-              setProblemForm((current) => ({ ...current, description: transcript, title: current.title || "Supplier delay affecting east wall" }));
-            }}
+            onClick={startVoiceCapture}
           >
-            Generate Mock Transcript
+            {listening ? "Listening..." : "Start Voice Note"}
           </Button>
           {voiceText ? <div className="client-copy" style={{ marginTop: 8 }}>{voiceText}</div> : null}
         </div>
@@ -310,6 +350,21 @@ export default function WorkerMobileView() {
           </Button>
         </div>
       </Modal>
+
+      <nav className="worker-bottom-nav" aria-label="Worker navigation">
+        <button type="button" className={route.page === "home" || !route.page ? "on" : ""} onClick={() => actions.navigate({ kind: "worker", userId: user.id, page: "home", entityId: null })}>
+          {renderIcon(Icons.sun, 16)} Today
+        </button>
+        <button type="button" className={route.page === "tasks" ? "on" : ""} onClick={() => tasks[0] && openTask(tasks[0])}>
+          {renderIcon(Icons.check, 16)} Tasks
+        </button>
+        <button type="button" onClick={() => setProblemOpen(true)}>
+          {renderIcon(Icons.alert, 16)} Report
+        </button>
+        <button type="button" onClick={() => actions.navigate({ kind: "worker", userId: user.id, page: "emergency", entityId: null })}>
+          {renderIcon(Icons.shield, 16)} Profile
+        </button>
+      </nav>
     </div>
   );
 }

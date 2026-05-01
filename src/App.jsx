@@ -125,6 +125,8 @@ function Shell() {
   const [quickNewOpen, setQuickNewOpen] = useState(false);
   const [quickForm, setQuickForm] = useState({ title: "", description: "" });
   const [syncStatus, setSyncStatus] = useState({ state: "synced", pending: 0, stuck: 0 });
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+  const [installPrompt, setInstallPrompt] = useState(null);
   const company = state.settings?.company || state.company || APP_CONFIG.builder;
 
   useEffect(() => {
@@ -234,6 +236,22 @@ function Shell() {
     return () => {
       mounted = false;
       unsubscribe?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const updateOnline = () => setIsOnline(navigator.onLine);
+    const onInstallPrompt = (event) => {
+      event.preventDefault();
+      setInstallPrompt(event);
+    };
+    window.addEventListener("online", updateOnline);
+    window.addEventListener("offline", updateOnline);
+    window.addEventListener("beforeinstallprompt", onInstallPrompt);
+    return () => {
+      window.removeEventListener("online", updateOnline);
+      window.removeEventListener("offline", updateOnline);
+      window.removeEventListener("beforeinstallprompt", onInstallPrompt);
     };
   }, []);
 
@@ -433,6 +451,18 @@ function Shell() {
               <Button small tone={state.demo.mode ? "bt-p" : ""} icon={Icons.clock} onClick={() => actions.setDemoMode(!state.demo.mode)}>
                 {state.demo.mode ? "Demo Mode" : "Live Mode"}
               </Button>
+              {installPrompt ? (
+                <Button
+                  small
+                  icon={Icons.download}
+                  onClick={async () => {
+                    await installPrompt.prompt();
+                    setInstallPrompt(null);
+                  }}
+                >
+                  Install
+                </Button>
+              ) : null}
               <div className="wp">
                 {renderIcon(Icons.sun, 11)}
                 <span>Brisbane</span>
@@ -449,7 +479,7 @@ function Shell() {
               />
               <span className={`sync-pill ${syncStatus.state}`} title={`${syncStatus.pending} pending, ${syncStatus.stuck} stuck`}>
                 <span className="sync-dot" />
-                {syncStatus.state === "synced" ? "Synced" : syncStatus.state === "syncing" ? "Syncing" : "Review"}
+                {!isOnline ? "Offline" : syncStatus.state === "synced" ? "Synced" : syncStatus.state === "syncing" ? "Syncing" : "Review"}
               </span>
             </div>
           </div>
