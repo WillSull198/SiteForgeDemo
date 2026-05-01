@@ -1,7 +1,7 @@
 /* SiteForge audit: Removed console-only crash logging and connected saved company
    branding to the live shell header so Settings changes are visible immediately. */
 
-import { Component, useEffect, useMemo, useRef, useState } from "react";
+import { Component, Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import AIAssistantDrawer from "./components/AIAssistantDrawer";
 import Breadcrumbs from "./components/Breadcrumbs";
 import GlobalSearch from "./components/GlobalSearch";
@@ -10,16 +10,6 @@ import RoleSelector from "./components/RoleSelector";
 import { Icons, renderIcon } from "./components/icons";
 import { AccessDenied, Button, Modal } from "./components/ui";
 import { APP_CONFIG } from "./data/seedData";
-import ClientFlowPage from "./pages/ClientFlowPage";
-import ClientPortalPage from "./pages/ClientPortalPage";
-import ContractStudio from "./pages/ContractStudio";
-import DirectorBoardroom from "./pages/DirectorBoardroom";
-import IntegrationsPage from "./pages/IntegrationsPage";
-import OperationsPages from "./pages/OperationsPages";
-import PresencePage from "./pages/PresencePage";
-import SitePassportPage from "./pages/SitePassportPage";
-import SubcontractorPortal from "./pages/SubcontractorPortal";
-import WorkerMobileView from "./pages/WorkerMobileView";
 import { can, getNavForRole, mustHandUpForApproval, routeKindForRole } from "./services/permissions";
 import { SiteForgeProvider, useSiteForge } from "./services/siteforgeStore";
 import { getSyncStatus, subscribeSyncStatus } from "./services/data";
@@ -56,6 +46,26 @@ const PAGE_TITLES = {
   "commercial-risk": "Commercial Risk",
   "safety-record": "Safety Record",
 };
+
+const ClientFlowPage = lazy(() => import("./pages/ClientFlowPage"));
+const ClientPortalPage = lazy(() => import("./pages/ClientPortalPage"));
+const ContractStudio = lazy(() => import("./pages/ContractStudio"));
+const DirectorBoardroom = lazy(() => import("./pages/DirectorBoardroom"));
+const IntegrationsPage = lazy(() => import("./pages/IntegrationsPage"));
+const OperationsPages = lazy(() => import("./pages/OperationsPages"));
+const PresencePage = lazy(() => import("./pages/PresencePage"));
+const SitePassportPage = lazy(() => import("./pages/SitePassportPage"));
+const SubcontractorPortal = lazy(() => import("./pages/SubcontractorPortal"));
+const WorkerMobileView = lazy(() => import("./pages/WorkerMobileView"));
+
+function PageLoadingFallback() {
+  return (
+    <div className="page-loading-fallback">
+      <div className="spinner" />
+      <div className="sm ct2">Loading workspace...</div>
+    </div>
+  );
+}
 
 const PAGE_PERMISSIONS = {
   clientflow: "clientflow.view",
@@ -358,21 +368,27 @@ function Shell() {
   if (isClient) {
     return (
       <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Client")} onReset={actions.resetDemo}>
-        <ClientPortalPage />
+        <Suspense fallback={<PageLoadingFallback />}>
+          <ClientPortalPage />
+        </Suspense>
       </ViewBoundary>
     );
   }
   if (isWorker) {
     return (
       <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Worker")} onReset={actions.resetDemo}>
-        <WorkerMobileView />
+        <Suspense fallback={<PageLoadingFallback />}>
+          <WorkerMobileView />
+        </Suspense>
       </ViewBoundary>
     );
   }
   if (isSubcontractor) {
     return (
       <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Subcontractor")} onReset={actions.resetDemo}>
-        <SubcontractorPortal />
+        <Suspense fallback={<PageLoadingFallback />}>
+          <SubcontractorPortal />
+        </Suspense>
       </ViewBoundary>
     );
   }
@@ -508,7 +524,7 @@ function Shell() {
               onRecover={() => actions.setRole(role)}
               onReset={actions.resetDemo}
             >
-              {renderInternalPage()}
+              <Suspense fallback={<PageLoadingFallback />}>{renderInternalPage()}</Suspense>
             </ViewBoundary>
           </div>
         </main>

@@ -1070,6 +1070,29 @@ body {
   padding: 18px;
 }
 
+.page-loading-fallback {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+  min-height: 220px;
+}
+
+.spinner {
+  animation: spin 800ms linear infinite;
+  border: 3px solid var(--border);
+  border-top-color: var(--amber);
+  border-radius: 50%;
+  height: 28px;
+  width: 28px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .worker-header {
   display: flex;
   justify-content: space-between;

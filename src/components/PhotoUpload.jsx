@@ -33,6 +33,101 @@ async function blobToDataUrl(blob) {
   });
 }
 
+function readAscii(view, offset, length) {
+  let value = "";
+  for (let index = 0; index < length; index += 1) {
+    const code = view.getUint8(offset + index);
+    if (!code) break;
+    value += String.fromCharCode(code);
+  }
+  return value;
+}
+
+function ifdValueOffset(view, tiffStart, entryOffset, littleEndian, type, count) {
+  const typeSizes = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8 };
+  const byteLength = (typeSizes[type] || 1) * count;
+  const raw = view.getUint32(entryOffset + 8, littleEndian);
+  return byteLength <= 4 ? entryOffset + 8 : tiffStart + raw;
+}
+
+function readRational(view, offset, littleEndian) {
+  const numerator = view.getUint32(offset, littleEndian);
+  const denominator = view.getUint32(offset + 4, littleEndian);
+  return denominator ? numerator / denominator : 0;
+}
+
+function readIfdEntries(view, ifdOffset, littleEndian) {
+  const count = view.getUint16(ifdOffset, littleEndian);
+  return Array.from({ length: count }, (_, index) => ifdOffset + 2 + index * 12);
+}
+
+function readIfdValue(view, tiffStart, entryOffset, littleEndian) {
+  const tag = view.getUint16(entryOffset, littleEndian);
+  const type = view.getUint16(entryOffset + 2, littleEndian);
+  const count = view.getUint32(entryOffset + 4, littleEndian);
+  const offset = ifdValueOffset(view, tiffStart, entryOffset, littleEndian, type, count);
+  if (type === 2) return { tag, value: readAscii(view, offset, count) };
+  if (type === 3) return { tag, value: count === 1 ? view.getUint16(offset, littleEndian) : Array.from({ length: count }, (_, index) => view.getUint16(offset + index * 2, littleEndian)) };
+  if (type === 4) return { tag, value: count === 1 ? view.getUint32(offset, littleEndian) : Array.from({ length: count }, (_, index) => view.getUint32(offset + index * 4, littleEndian)) };
+  if (type === 5) return { tag, value: Array.from({ length: count }, (_, index) => readRational(view, offset + index * 8, littleEndian)) };
+  return { tag, value: null };
+}
+
+function dmsToDecimal(parts, ref) {
+  if (!Array.isArray(parts) || parts.length < 3) return null;
+  const decimal = Number(parts[0] || 0) + Number(parts[1] || 0) / 60 + Number(parts[2] || 0) / 3600;
+  return ["S", "W"].includes(String(ref || "").toUpperCase()) ? -decimal : decimal;
+}
+
+async function extractJpegExifGps(file) {
+  if (!/image\/jpe?g/i.test(file.type) && !/\.jpe?g$/i.test(file.name)) return null;
+  const buffer = await file.arrayBuffer();
+  const view = new DataView(buffer);
+  if (view.byteLength < 12 || view.getUint16(0, false) !== 0xffd8) return null;
+
+  let offset = 2;
+  while (offset + 4 < view.byteLength) {
+    if (view.getUint8(offset) !== 0xff) break;
+    const marker = view.getUint8(offset + 1);
+    const segmentLength = view.getUint16(offset + 2, false);
+    if (marker === 0xe1 && readAscii(view, offset + 4, 6) === "Exif") {
+      const tiffStart = offset + 10;
+      const endian = readAscii(view, tiffStart, 2);
+      const littleEndian = endian === "II";
+      if (!littleEndian && endian !== "MM") return null;
+      const firstIfdOffset = tiffStart + view.getUint32(tiffStart + 4, littleEndian);
+      const gpsPointerEntry = readIfdEntries(view, firstIfdOffset, littleEndian)
+        .map((entryOffset) => readIfdValue(view, tiffStart, entryOffset, littleEndian))
+        .find((entry) => entry.tag === 0x8825);
+      if (!gpsPointerEntry?.value) return null;
+      const gpsIfdOffset = tiffStart + gpsPointerEntry.value;
+      const gps = {};
+      readIfdEntries(view, gpsIfdOffset, littleEndian).forEach((entryOffset) => {
+        const { tag, value } = readIfdValue(view, tiffStart, entryOffset, littleEndian);
+        if (tag === 1) gps.latRef = value;
+        if (tag === 2) gps.lat = value;
+        if (tag === 3) gps.lngRef = value;
+        if (tag === 4) gps.lng = value;
+        if (tag === 16) gps.directionRef = value;
+        if (tag === 17) gps.direction = Array.isArray(value) ? value[0] : value;
+      });
+      const lat = dmsToDecimal(gps.lat, gps.latRef);
+      const lng = dmsToDecimal(gps.lng, gps.lngRef);
+      if (lat == null || lng == null) return null;
+      return {
+        lat,
+        lng,
+        direction: gps.direction ?? null,
+        directionRef: gps.directionRef || null,
+        capturedAt: file.lastModified || Date.now(),
+        source: "exif",
+      };
+    }
+    offset += 2 + segmentLength;
+  }
+  return null;
+}
+
 async function captureCurrentLocation() {
   if (!navigator.geolocation) return null;
   return new Promise((resolve) => {
@@ -50,6 +145,16 @@ async function captureCurrentLocation() {
       { enableHighAccuracy: true, timeout: 4500, maximumAge: 60000 },
     );
   });
+}
+
+async function extractImageMetadata(file) {
+  try {
+    const exifGps = await extractJpegExifGps(file);
+    if (exifGps) return exifGps;
+  } catch {
+    // Fall through to device location when EXIF is absent or malformed.
+  }
+  return captureCurrentLocation();
 }
 
 export async function compressImage(file) {
@@ -103,7 +208,7 @@ export default function PhotoUpload({ onPhotosAdded, existingPhotos = [], onRemo
         const compressed = await compressImage(file);
         if (!compressed) throw new Error(`Could not process ${file.name}.`);
         const dataUrl = await blobToDataUrl(compressed);
-        const geo = await captureCurrentLocation();
+        const geo = await extractImageMetadata(file);
         const record = await put("photos", {
           id: uuid(),
           filename: file.name,
