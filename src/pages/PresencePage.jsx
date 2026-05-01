@@ -11,20 +11,32 @@ export default function PresencePage() {
   const siteId = state.session.siteId;
   const canView = can(role, "presence.view");
   const canResolve = can(role, "presence.resolve_anomaly");
+  const canExport = can(role, "presence.export_payroll");
   const [tab, setTab] = useState("overview");
+  const [noticeForm, setNoticeForm] = useState({
+    noticeIssuedAt: new Date().toISOString().slice(0, 10),
+    noticeDocumentName: "NSW WSA 2005 presence disclosure notice.pdf",
+  });
+  const [optOutReason, setOptOutReason] = useState("");
 
   const records = useMemo(
     () => state.presence.records.filter((record) => (canSeeAllSites(role) ? true : record.siteId === siteId)),
     [role, siteId, state.presence.records],
   );
+  const currentUserRecords = records.filter((record) => record.userId === state.session.userId);
   const anomalies = records.filter((record) => record.anomalyFlags?.length);
   const timeline = state.presence.events.filter((event) => (canSeeAllSites(role) ? true : event.siteId === siteId)).slice(0, 10);
   const payrollExports = state.presence.exports.filter((entry) => (canSeeAllSites(role) ? true : entry.siteId === siteId));
+  const complianceRows = state.presence.siteCompliance.filter((entry) => (canSeeAllSites(role) ? true : entry.siteId === siteId));
+  const activeCompliance = state.presence.siteCompliance.find((entry) => entry.siteId === siteId);
+  const openReviews = state.presence.reviewQueue.filter((entry) => entry.status === "open" && (canSeeAllSites(role) ? true : entry.siteId === siteId));
+  const openChallenges = state.presence.challenges.filter((entry) => entry.status === "open" && (canSeeAllSites(role) ? true : entry.siteId === siteId));
+  const optOutRequests = state.presence.optOutRequests.filter((entry) => ["review", "compliance-review"].includes(entry.status) && (canSeeAllSites(role) ? true : entry.siteId === siteId));
   const metrics = [
     { label: "Verified On Site", value: records.filter((record) => record.status === "verified-on-site").length, color: "g" },
     { label: "Anomalies", value: anomalies.length, color: "r" },
     { label: "Payroll Confidence", value: `${Math.round(records.reduce((sum, record) => sum + record.confidence, 0) / Math.max(1, records.length))}%`, color: "b" },
-    { label: "Exports", value: payrollExports.length, color: "a" },
+    { label: "Compliance Reviews", value: openReviews.length + openChallenges.length + optOutRequests.length, color: "a" },
   ];
 
   if (!canView) {
@@ -47,7 +59,9 @@ export default function PresencePage() {
         onChange={setTab}
         items={[
           { value: "overview", label: "Overview" },
+          { value: "compliance", label: "Compliance Gate" },
           { value: "anomaly", label: "Anomaly Dashboard" },
+          { value: "exports", label: "Payroll Export" },
           { value: "timeline", label: "Attendance Timeline" },
           { value: "privacy", label: "Privacy Settings" },
         ]}
@@ -160,8 +174,80 @@ export default function PresencePage() {
                   </div>
                 ))}
               </div>
+              {canExport ? (
+                <Button tone="bt-p" icon={Icons.download} onClick={() => actions.generatePresencePayrollExport({ siteId })} style={{ marginTop: 10 }}>
+                  Generate Evidence Export
+                </Button>
+              ) : null}
             </Card>
           </div>
+        </div>
+      ) : null}
+
+      {tab === "compliance" ? (
+        <div className="g32">
+          <Card title="14-day notice gate" icon={Icons.shield} style={{ marginTop: 10 }}>
+            <div className="form-grid two">
+              <label className="form-group">
+                <span className="form-label">Notice issued date</span>
+                <input
+                  className="form-input"
+                  type="date"
+                  value={noticeForm.noticeIssuedAt}
+                  onChange={(event) => setNoticeForm((current) => ({ ...current, noticeIssuedAt: event.target.value }))}
+                />
+              </label>
+              <label className="form-group">
+                <span className="form-label">Notice document</span>
+                <input
+                  className="form-input"
+                  value={noticeForm.noticeDocumentName}
+                  onChange={(event) => setNoticeForm((current) => ({ ...current, noticeDocumentName: event.target.value }))}
+                />
+              </label>
+            </div>
+            <div className="linked-row">
+              <div>
+                <div className="b sm">Current site status</div>
+                <div className="xs ct3">
+                  Activation date: {activeCompliance?.activationDate || "Not issued"} · Notice: {activeCompliance?.noticeDocumentName || "No document"}
+                </div>
+              </div>
+              <Badge tone={activeCompliance?.enabled ? "passed" : activeCompliance?.status === "ready-to-activate" ? "medium" : "high"}>
+                {activeCompliance?.status || "not-issued"}
+              </Badge>
+            </div>
+            <div className="fx" style={{ gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+              <Button tone="bt-p" icon={Icons.file} onClick={() => actions.configurePresenceNotice(siteId, { ...noticeForm, confirmedNoticeIssued: true })}>
+                Record Notice
+              </Button>
+              <Button tone="bt-g" icon={Icons.check} onClick={() => actions.activatePresenceForSite(siteId)}>
+                Activate Presence
+              </Button>
+              <Button tone="bt-s" icon={Icons.alert} onClick={() => actions.runPresenceAnomalyScan(siteId)}>
+                Run Anomaly Scan
+              </Button>
+            </div>
+          </Card>
+
+          <Card title="Compliance dashboard" icon={Icons.eye} style={{ marginTop: 10 }}>
+            <DataTable
+              storageKey={`presence-compliance-${role}-${siteId}`}
+              rows={complianceRows}
+              columns={[
+                { key: "siteId", label: "Site", filterable: true },
+                { key: "status", label: "Status", filterable: true, render: (value) => <Badge tone={value === "active" ? "passed" : "medium"}>{value}</Badge> },
+                { key: "noticeIssuedAt", label: "Notice Issued", type: "date", filterable: true },
+                { key: "activationDate", label: "Activation", type: "date", filterable: true },
+                { key: "noticeDocumentName", label: "Document", filterable: true },
+              ]}
+            />
+            <div className="mini-grid" style={{ marginTop: 12 }}>
+              <div className="mini-card"><span>Open anomaly reviews</span><b>{openReviews.length}</b></div>
+              <div className="mini-card"><span>Worker challenges</span><b>{openChallenges.length}</b></div>
+              <div className="mini-card"><span>Opt-out requests</span><b>{optOutRequests.length}</b></div>
+            </div>
+          </Card>
         </div>
       ) : null}
 
@@ -178,7 +264,7 @@ export default function PresencePage() {
                 <div className="fx" style={{ gap: 6 }}>
                   <Badge tone="critical">{record.confidence}%</Badge>
                   {canResolve ? (
-                    <Button small tone="bt-g" onClick={() => actions.resolvePresence(record.id, "verify", "Verified from anomaly dashboard.")}>
+                    <Button small tone="bt-g" onClick={() => actions.resolvePresence(record.id, "verify", "Verified from anomaly dashboard.", { reason: "Manual compliance review completed." })}>
                       Resolve
                     </Button>
                   ) : null}
@@ -186,6 +272,33 @@ export default function PresencePage() {
               </div>
             ))}
           </div>
+        </Card>
+      ) : null}
+
+      {tab === "exports" ? (
+        <Card title="Payroll Evidence Exports" icon={Icons.download} style={{ marginTop: 10 }}>
+          <div className="fx" style={{ gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            {canExport ? (
+              <Button tone="bt-p" icon={Icons.download} onClick={() => actions.generatePresencePayrollExport({ siteId })}>
+                Generate Current Site Export
+              </Button>
+            ) : null}
+            <Button tone="bt-s" icon={Icons.search} onClick={() => actions.runPresenceAnomalyScan(siteId)}>
+              Refresh Confidence
+            </Button>
+          </div>
+          <DataTable
+            storageKey={`presence-exports-${role}-${siteId}`}
+            rows={payrollExports}
+            columns={[
+              { key: "period", label: "Period", filterable: true },
+              { key: "state", label: "State", filterable: true, render: (value) => <Badge tone={value === "ready" ? "passed" : "high"}>{value}</Badge> },
+              { key: "verifiedHours", label: "Verified Hours", type: "number", filterable: true },
+              { key: "flaggedHours", label: "Flagged Hours", type: "number", filterable: true },
+              { key: "confidence", label: "Confidence", type: "number", render: (value) => <span className="mono xs">{value}%</span> },
+              { key: "generatedAt", label: "Generated", type: "date", filterable: true },
+            ]}
+          />
         </Card>
       ) : null}
 
@@ -228,6 +341,43 @@ export default function PresencePage() {
               <div className="xs ct3">Disclosure model</div>
             </div>
             <Badge tone="passed">{state.presence.privacy.mode}</Badge>
+          </div>
+          <div className="linked-row">
+            <div>
+              <div className="b sm">My disclosed records</div>
+              <div className="xs ct3">Workers can view captured data and challenge disputed entries.</div>
+            </div>
+            <Badge tone="medium">{currentUserRecords.length} records</Badge>
+          </div>
+          <div className="list-stack" style={{ marginTop: 10 }}>
+            {currentUserRecords.slice(0, 5).map((record) => (
+              <div className="linked-row" key={record.id}>
+                <div>
+                  <div className="b sm">{record.status}</div>
+                  <div className="xs ct3">{record.start || "No timestamp"} · {record.anomalyFlags?.join(" · ") || "No flags"}</div>
+                </div>
+                <Button small tone="bt-s" onClick={() => actions.challengePresenceRecord(record.id, "Worker challenged this disclosed attendance record.")}>
+                  Challenge
+                </Button>
+              </div>
+            ))}
+          </div>
+          <label className="form-group" style={{ marginTop: 14 }}>
+            <span className="form-label">Opt-out review reason</span>
+            <textarea
+              className="form-textarea"
+              value={optOutReason}
+              onChange={(event) => setOptOutReason(event.target.value)}
+              placeholder="Explain the privacy or operational concern for compliance review."
+            />
+          </label>
+          <div className="fx" style={{ gap: 8, flexWrap: "wrap" }}>
+            <Button tone="bt-s" icon={Icons.download} onClick={() => actions.requestPresenceDataExport(state.session.userId, siteId)}>
+              Request My Data Export
+            </Button>
+            <Button tone="bt-r" icon={Icons.shield} onClick={() => actions.requestPresenceOptOut({ siteId, reason: optOutReason })}>
+              Request Opt-out Review
+            </Button>
           </div>
         </Card>
       ) : null}

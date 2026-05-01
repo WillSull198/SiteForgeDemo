@@ -529,6 +529,49 @@ function normaliseState(state) {
       ...(next.buildxact?.connection || {}),
     },
   };
+  next.presence = {
+    ...(next.presence || {}),
+    privacy: {
+      mode: "disclosed-consent",
+      note: "Presence verification is disclosed to workers and subcontractors for payroll confidence, attendance validation, and anomaly detection only.",
+      retentionDays: 2557,
+      workerAccess: true,
+      challengeWindowDays: 30,
+      ...(next.presence?.privacy || {}),
+    },
+    records: Array.isArray(next.presence?.records)
+      ? next.presence.records.slice(0, 240).map((record) => ({
+          payrollState: record.payrollState || "review",
+          anomalyFlags: Array.isArray(record.anomalyFlags) ? record.anomalyFlags : [],
+          signals: Array.isArray(record.signals) ? record.signals : [],
+          challenges: Array.isArray(record.challenges) ? record.challenges : [],
+          manualOverrides: Array.isArray(record.manualOverrides) ? record.manualOverrides : [],
+          ...record,
+        }))
+      : [],
+    events: Array.isArray(next.presence?.events) ? next.presence.events.slice(0, 360) : [],
+    exports: Array.isArray(next.presence?.exports) ? next.presence.exports.slice(0, 160) : [],
+    siteCompliance: Array.isArray(next.presence?.siteCompliance) ? next.presence.siteCompliance.slice(0, 80) : [],
+    challenges: Array.isArray(next.presence?.challenges) ? next.presence.challenges.slice(0, 160) : [],
+    optOutRequests: Array.isArray(next.presence?.optOutRequests) ? next.presence.optOutRequests.slice(0, 120) : [],
+    dataExports: Array.isArray(next.presence?.dataExports) ? next.presence.dataExports.slice(0, 120) : [],
+    reviewQueue: Array.isArray(next.presence?.reviewQueue) ? next.presence.reviewQueue.slice(0, 160) : [],
+  };
+  next.sites.forEach((site) => {
+    if (!next.presence.siteCompliance.some((entry) => entry.siteId === site.id)) {
+      next.presence.siteCompliance.push({
+        id: randomId("presence-compliance"),
+        siteId: site.id,
+        status: "not-issued",
+        enabled: false,
+        noticeIssuedAt: null,
+        activationDate: null,
+        noticeDocumentName: "",
+        confirmedNoticeIssued: false,
+        lastReviewedAt: null,
+      });
+    }
+  });
   next.messages = Array.isArray(next.messages)
     ? next.messages.slice(0, 120).map((thread) => ({
         ...thread,
@@ -4158,7 +4201,234 @@ export function SiteForgeProvider({ children }) {
           }
         });
       },
-      resolvePresence(presenceId, outcome, note) {
+      configurePresenceNotice(siteId, payload = {}) {
+        mutate((next, helpers) => {
+          const site = next.sites.find((item) => item.id === siteId);
+          if (!site) return;
+          const noticeIssuedAt = formatDate(payload.noticeIssuedAt);
+          const activationDate = addDays(noticeIssuedAt, 14);
+          const today = formatDate();
+          let record = next.presence.siteCompliance.find((item) => item.siteId === siteId);
+          if (!record) {
+            record = { id: randomId("presence-compliance"), siteId };
+            next.presence.siteCompliance.unshift(record);
+          }
+          const before = { ...record };
+          Object.assign(record, {
+            status: today >= activationDate ? "ready-to-activate" : "pending-14-day-notice",
+            enabled: false,
+            noticeIssuedAt,
+            activationDate,
+            noticeDocumentName: payload.noticeDocumentName || "Presence disclosure notice",
+            confirmedNoticeIssued: Boolean(payload.confirmedNoticeIssued ?? true),
+            disclosureCopy: payload.disclosureCopy || "Workers may view, export, and challenge disclosed attendance signals.",
+            lastReviewedAt: nowStamp(),
+          });
+          helpers.addAudit({
+            action: "presence.notice-configured",
+            entityType: "presenceCompliance",
+            entityId: record.id,
+            before,
+            after: { ...record },
+            siteId,
+          });
+          pushToast(next, {
+            tone: today >= activationDate ? "medium" : "warning",
+            title: "Presence notice recorded",
+            body: today >= activationDate ? "Notice window is complete. Presence can now be activated." : `Activation locked until ${activationDate}.`,
+          });
+        });
+      },
+      activatePresenceForSite(siteId) {
+        mutate((next, helpers) => {
+          const record = next.presence.siteCompliance.find((item) => item.siteId === siteId);
+          if (!record?.confirmedNoticeIssued || !record.activationDate) {
+            pushToast(next, { tone: "critical", title: "Presence cannot activate", body: "Issue and upload the 14-day disclosure notice first." });
+            return;
+          }
+          const today = formatDate();
+          if (today < record.activationDate) {
+            pushToast(next, { tone: "warning", title: "14-day notice still running", body: `Activation is locked until ${record.activationDate}.` });
+            return;
+          }
+          const before = { ...record };
+          Object.assign(record, {
+            enabled: true,
+            status: "active",
+            activatedAt: nowStamp(),
+            activatedBy: next.session.userId,
+            lastReviewedAt: nowStamp(),
+          });
+          helpers.addAudit({
+            action: "presence.activated",
+            entityType: "presenceCompliance",
+            entityId: record.id,
+            before,
+            after: { ...record },
+            siteId,
+          });
+          pushToast(next, { tone: "passed", title: "Presence active", body: "Disclosed attendance verification is now enabled for this site." });
+        });
+      },
+      runPresenceAnomalyScan(siteId = null) {
+        mutate((next, helpers) => {
+          const targetSiteId = siteId || next.session.siteId;
+          const scannedAt = nowStamp();
+          const existingOpen = new Set(next.presence.reviewQueue.filter((item) => item.status === "open").map((item) => item.recordId));
+          next.presence.records
+            .filter((record) => record.siteId === targetSiteId)
+            .forEach((record) => {
+              const flags = new Set(record.anomalyFlags || []);
+              if (!record.signals?.some((signal) => ["geofence", "gps", "beacon"].includes(signal))) flags.add("No verified location signal");
+              if (record.gpsVerified === false) flags.add("GPS outside declared site boundary");
+              if (!record.finish && hoursSince(record.start || scannedAt) >= 10) flags.add("Missing scan-out after expected shift");
+              if (record.status === "overlapping-presence") flags.add("Overlapping presence on another site");
+              if (!flags.size) return;
+              record.anomalyFlags = [...flags];
+              record.payrollState = record.payrollState === "ready" ? "review" : record.payrollState || "review";
+              record.confidence = Math.min(record.confidence || 75, flags.size >= 2 ? 52 : 70);
+              if (!existingOpen.has(record.id)) {
+                next.presence.reviewQueue.unshift({
+                  id: randomId("presence-review"),
+                  siteId: record.siteId,
+                  recordId: record.id,
+                  worker: record.person || record.worker,
+                  flags: record.anomalyFlags,
+                  confidence: record.confidence,
+                  status: "open",
+                  createdAt: scannedAt,
+                });
+              }
+            });
+          next.presence.reviewQueue = next.presence.reviewQueue.slice(0, 160);
+          helpers.addAudit({
+            action: "presence.anomaly-scan",
+            entityType: "presence",
+            entityId: targetSiteId,
+            before: null,
+            after: { scannedAt, openReviews: next.presence.reviewQueue.filter((item) => item.siteId === targetSiteId && item.status === "open").length },
+            siteId: targetSiteId,
+          });
+          pushToast(next, { tone: "medium", title: "Presence scan complete", body: "Anomaly queue updated for disclosed attendance records." });
+        });
+      },
+      generatePresencePayrollExport({ siteId = null, userId = null, period = null } = {}) {
+        mutate((next, helpers) => {
+          const targetSiteId = siteId || next.session.siteId;
+          const targetRecords = next.presence.records.filter((record) => record.siteId === targetSiteId && (!userId || record.userId === userId));
+          const verified = targetRecords.filter((record) => record.payrollState === "ready" || record.status === "verified-on-site");
+          const flagged = targetRecords.filter((record) => record.anomalyFlags?.length || ["hold", "review"].includes(record.payrollState));
+          const averageConfidence = targetRecords.length
+            ? Math.round(targetRecords.reduce((sum, record) => sum + (record.confidence || 0), 0) / targetRecords.length)
+            : 100;
+          const exportRecord = {
+            id: randomId("pay"),
+            siteId: targetSiteId,
+            userId,
+            period: period || `${formatDate().slice(0, 7)} payroll evidence`,
+            state: flagged.length ? "review" : "ready",
+            verifiedHours: Number((verified.length * 7.6).toFixed(1)),
+            flaggedHours: Number((flagged.length * 7.6).toFixed(1)),
+            confidence: averageConfidence,
+            generatedAt: nowStamp(),
+            rows: targetRecords.map((record) => ({
+              userId: record.userId,
+              person: record.person || record.worker,
+              status: record.status,
+              confidence: record.confidence,
+              flags: record.anomalyFlags || [],
+              start: record.start || null,
+              finish: record.finish || null,
+            })),
+          };
+          next.presence.exports.unshift(exportRecord);
+          next.presence.exports = next.presence.exports.slice(0, 160);
+          helpers.addAudit({
+            action: "presence.payroll-export",
+            entityType: "presenceExport",
+            entityId: exportRecord.id,
+            before: null,
+            after: { period: exportRecord.period, confidence: exportRecord.confidence },
+            siteId: targetSiteId,
+          });
+          pushToast(next, { tone: "passed", title: "Payroll evidence generated", body: `${exportRecord.verifiedHours} verified hours exported.` });
+        });
+      },
+      requestPresenceDataExport(userId = null, siteId = null) {
+        mutate((next, helpers) => {
+          const requesterId = userId || next.session.userId;
+          const targetSiteId = siteId || next.session.siteId;
+          const request = {
+            id: randomId("presence-data-export"),
+            siteId: targetSiteId,
+            userId: requesterId,
+            status: "compliance-review",
+            requestedAt: nowStamp(),
+            recordCount: next.presence.records.filter((record) => record.siteId === targetSiteId && record.userId === requesterId).length,
+          };
+          next.presence.dataExports.unshift(request);
+          helpers.addAudit({
+            action: "presence.worker-data-export-requested",
+            entityType: "presenceDataExport",
+            entityId: request.id,
+            before: null,
+            after: request,
+            siteId: targetSiteId,
+          });
+          pushToast(next, { tone: "medium", title: "Data export requested", body: "Compliance review queue has been updated." });
+        });
+      },
+      requestPresenceOptOut({ userId = null, siteId = null, reason = "" } = {}) {
+        mutate((next, helpers) => {
+          const request = {
+            id: randomId("presence-optout"),
+            siteId: siteId || next.session.siteId,
+            userId: userId || next.session.userId,
+            reason: reason || "Worker requested presence verification opt-out review.",
+            status: "review",
+            requestedAt: nowStamp(),
+          };
+          next.presence.optOutRequests.unshift(request);
+          helpers.addAudit({
+            action: "presence.opt-out-requested",
+            entityType: "presenceOptOut",
+            entityId: request.id,
+            before: null,
+            after: request,
+            siteId: request.siteId,
+          });
+          pushToast(next, { tone: "warning", title: "Opt-out review opened", body: "Presence opt-out request is waiting for compliance review." });
+        });
+      },
+      challengePresenceRecord(presenceId, reason = "Worker challenged this attendance signal.") {
+        mutate((next, helpers) => {
+          const record = next.presence.records.find((item) => item.id === presenceId);
+          if (!record) return;
+          const challenge = {
+            id: randomId("presence-challenge"),
+            siteId: record.siteId,
+            recordId: record.id,
+            userId: record.userId,
+            reason,
+            status: "open",
+            requestedAt: nowStamp(),
+          };
+          record.challenges = [...(record.challenges || []), challenge.id];
+          record.payrollState = "review";
+          if (!record.anomalyFlags.includes("Worker challenge open")) record.anomalyFlags.push("Worker challenge open");
+          next.presence.challenges.unshift(challenge);
+          helpers.addAudit({
+            action: "presence.challenge-opened",
+            entityType: "presence",
+            entityId: record.id,
+            before: null,
+            after: challenge,
+            siteId: record.siteId,
+          });
+          pushToast(next, { tone: "warning", title: "Presence challenge opened", body: "Supervisor review is required before payroll export." });
+        });
+      },
+      resolvePresence(presenceId, outcome, note, override = {}) {
         mutate((next, helpers) => {
           const record = next.presence.records.find((item) => item.id === presenceId);
           if (!record) return;
@@ -4173,6 +4443,26 @@ export function SiteForgeProvider({ children }) {
             record.confidence = Math.min(record.confidence, 45);
           }
           record.supervisorNotes = note || record.supervisorNotes;
+          record.resolvedAt = nowStamp();
+          record.resolvedBy = next.session.userId;
+          if (override.reason || note) {
+            record.manualOverrides = [
+              ...(record.manualOverrides || []),
+              {
+                id: randomId("presence-override"),
+                outcome,
+                reason: override.reason || note,
+                signedBy: override.signedBy || next.users.find((user) => user.id === next.session.userId)?.name || "Supervisor",
+                at: record.resolvedAt,
+              },
+            ].slice(-20);
+          }
+          next.presence.reviewQueue = next.presence.reviewQueue.map((item) =>
+            item.recordId === record.id && item.status === "open" ? { ...item, status: outcome === "verify" ? "resolved" : "held", resolvedAt: nowStamp() } : item,
+          );
+          next.presence.challenges = next.presence.challenges.map((item) =>
+            item.recordId === record.id && item.status === "open" ? { ...item, status: outcome === "verify" ? "resolved" : "held", resolvedAt: nowStamp() } : item,
+          );
           helpers.addAudit({
             action: "presence.resolve",
             entityType: "presence",
