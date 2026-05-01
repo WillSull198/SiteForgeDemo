@@ -2584,9 +2584,19 @@ function CalculatorsPage() {
 }
 
 function ReportsPage() {
-  const { state, derived } = useSiteForge();
+  const { state, actions, derived } = useSiteForge();
   const site = derived.currentSite;
   const siteMetric = derived.metrics.siteMetrics.find((metric) => metric.siteId === site.id);
+  const reportTypes = [
+    ["weekly-site-operations", "Weekly Site Operations"],
+    ["weekly-clientflow", "Weekly ClientFlow"],
+    ["monthly-compliance", "Monthly Compliance"],
+    ["monthly-safety", "Monthly Safety"],
+    ["handover-pack", "Handover Pack"],
+    ["audit-trail", "Audit Trail"],
+  ];
+  const siteReports = state.boardReports.filter((report) => !report.siteId || report.siteId === site.id).slice(0, 8);
+  const queuedReports = state.reportQueue.filter((report) => report.siteId === site.id).slice(0, 8);
 
   return (
     <div className="oy fin">
@@ -2625,6 +2635,68 @@ function ReportsPage() {
               .toLocaleString()}
           </div>
         </Card>
+      </div>
+      <div className="g32" style={{ marginTop: 12 }}>
+        <Card title="Operations PDF Reports" icon={Icons.download}>
+          <div className="list-stack">
+            {reportTypes.map(([value, label]) => (
+              <div className="linked-row" key={value}>
+                <div>
+                  <div className="b sm">{label}</div>
+                  <div className="xs ct3">Generates a durable PDF artifact into Document Control.</div>
+                </div>
+                <Button small tone="bt-p" onClick={() => actions.generateOperationsReport(value, site.id)}>
+                  Generate PDF
+                </Button>
+              </div>
+            ))}
+          </div>
+          <div className="fx" style={{ gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <Button tone="bt-s" icon={Icons.clock} onClick={() => actions.queueScheduledReports()}>
+              Queue Scheduled Reports
+            </Button>
+            <Button tone="bt-p" icon={Icons.zap} onClick={() => actions.generateWeeklyOperationsSummary()}>
+              Generate AI Weekly Summary
+            </Button>
+          </div>
+        </Card>
+
+        <div>
+          <Card title="Scheduled Delivery Queue" icon={Icons.clock} className="mb8">
+            <div className="list-stack">
+              {queuedReports.length ? (
+                queuedReports.map((report) => (
+                  <div className="linked-row" key={report.id}>
+                    <div>
+                      <div className="b sm">{report.reportType}</div>
+                      <div className="xs ct3">Queued {report.queuedAt} · recipients {(report.recipients || []).join(", ")}</div>
+                    </div>
+                    <Badge tone="medium">{report.status}</Badge>
+                  </div>
+                ))
+              ) : (
+                <div className="ct3 sm empty">No scheduled reports are queued for this site.</div>
+              )}
+            </div>
+          </Card>
+          <Card title="Generated Report Artifacts" icon={Icons.file}>
+            <div className="list-stack">
+              {siteReports.length ? (
+                siteReports.map((report) => (
+                  <div className="linked-row" key={report.id}>
+                    <div>
+                      <div className="b sm">{report.title}</div>
+                      <div className="xs ct3">{report.createdAt} · {report.documentId ? "Document Control" : "Boardroom only"}</div>
+                    </div>
+                    <Badge tone={report.fileId ? "passed" : "medium"}>{report.fileId ? "PDF" : "summary"}</Badge>
+                  </div>
+                ))
+              ) : (
+                <div className="ct3 sm empty">Generate your first operations report to create a PDF artifact.</div>
+              )}
+            </div>
+          </Card>
+        </div>
       </div>
     </div>
   );

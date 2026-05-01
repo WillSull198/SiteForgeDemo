@@ -18,7 +18,7 @@ import {
 import { createAuditEntry, exportAuditCsv, verifyAuditChain } from "./auditTrail";
 import { buildContractSummary, generateDraft, signContract } from "./contractService";
 import { Audit, bootstrapLocalDataLayer } from "./data";
-import { generateSignedContractPdfBlob, generateTransmittalPdfBlob } from "./pdfService";
+import { generateOperationsReportPdfBlob, generateSignedContractPdfBlob, generateTransmittalPdfBlob } from "./pdfService";
 import { diffPlans, parseTemplate, removeFileEverywhere, uploadFile, uploadSeededTextFile, buildTemplatePreviewContent, getBlob, putBlob } from "./documentIntelligence";
 import { dispatchNotificationEvent } from "./notificationEngine";
 import { canSeeAllSites, routeKindForRole } from "./permissions";
@@ -471,6 +471,14 @@ function normaliseState(state) {
     "weather-rain-day": "Rain Day",
     ...(next.recoveryTemplates || {}),
   };
+  next.reportSchedules = Array.isArray(next.reportSchedules)
+    ? next.reportSchedules.slice(0, 40)
+    : [
+        { id: "sched-weekly-ops", reportType: "weekly-site-operations", frequency: "weekly", day: "Friday", time: "18:00", recipients: ["PM"], enabled: true, lastQueuedAt: null },
+        { id: "sched-clientflow", reportType: "weekly-clientflow", frequency: "weekly", day: "Friday", time: "18:00", recipients: ["PM", "Director"], enabled: true, lastQueuedAt: null },
+        { id: "sched-compliance", reportType: "monthly-compliance", frequency: "monthly", day: "1", time: "07:00", recipients: ["Director"], enabled: true, lastQueuedAt: null },
+      ];
+  next.reportQueue = Array.isArray(next.reportQueue) ? next.reportQueue.slice(0, 80) : [];
   next.documents = Array.isArray(next.documents)
     ? next.documents.map((document) => ({
         retentionCategory: document.retentionCategory || (document.category === "Contract Pack" ? "signed-contract" : "project-document"),
@@ -1368,6 +1376,111 @@ function buildRecoveryCandidates(state, siteId) {
   return candidates;
 }
 
+function buildOperationsReport(state, reportType = "weekly-site-operations", siteId = null) {
+  const targetSiteId = siteId || state.session.siteId;
+  const site = state.sites.find((entry) => entry.id === targetSiteId) || state.sites[0] || {};
+  const scoped = (items) => items.filter((item) => item.siteId === targetSiteId);
+  const approvals = scoped(state.approvals || []);
+  const problems = scoped(state.problems || []);
+  const rfis = scoped(state.rfis || []);
+  const diary = scoped(state.diary || []);
+  const safety = scoped(state.safety || []);
+  const passports = (state.passports?.records || []).filter((item) => item.siteId === targetSiteId);
+  const transmittals = scoped(state.transmittals || []);
+  const signed = approvals.filter((approval) => approval.status === "signed");
+  const reportNames = {
+    "weekly-site-operations": "Weekly Site Operations Report",
+    "weekly-clientflow": "Weekly ClientFlow Recovery Report",
+    "monthly-compliance": "Monthly Compliance Report",
+    "monthly-safety": "Monthly Safety Report",
+    "handover-pack": "Project Handover Pack",
+    "audit-trail": "Audit Trail Report",
+  };
+  const baseSections = {
+    "weekly-site-operations": [
+      {
+        heading: "Diary and field activity",
+        lines: [
+          `${diary.length} diary entries captured.`,
+          `${problems.filter((item) => item.status !== "closed").length} open problems requiring action.`,
+          `${rfis.filter((item) => item.status !== "closed").length} RFIs open or under review.`,
+        ],
+        rows: diary.slice(0, 6).map((entry) => ({ date: entry.date, weather: entry.weather, summary: entry.summary || entry.title })),
+      },
+      {
+        heading: "Photos and evidence",
+        lines: [`${state.files?.records?.filter((file) => file.siteId === targetSiteId && file.classification === "Photo / Site Image").length || 0} indexed site photos.`],
+      },
+    ],
+    "weekly-clientflow": [
+      {
+        heading: "ClientFlow recovery",
+        lines: [
+          `${approvals.length} approvals in the register.`,
+          `${signed.length} signed approvals this period.`,
+          `${formatCurrency(signed.reduce((sum, approval) => sum + Number(approval.costImpact || 0), 0))} recovered through signed approvals.`,
+          `${approvals.filter((approval) => ["awaiting-client", "question", "changes-requested"].includes(approval.status)).length} approvals awaiting client response.`,
+        ],
+        rows: approvals.slice(0, 8).map((approval) => ({ number: approval.number, title: approval.title, status: approval.status, value: formatCurrency(approval.costImpact) })),
+      },
+    ],
+    "monthly-compliance": [
+      {
+        heading: "Passport, tickets, SWMS",
+        lines: [
+          `${passports.length} worker passports registered on this site.`,
+          `${passports.filter((passport) => passport.blockedReasons?.length).length} blocked or restricted passports.`,
+          `${state.swms?.filter((item) => item.siteId === targetSiteId).length || 0} SWMS records held.`,
+          `${transmittals.length} transmittals issued with acknowledgement tracking.`,
+        ],
+      },
+    ],
+    "monthly-safety": [
+      {
+        heading: "Safety operations",
+        lines: [
+          `${safety.length} safety records captured.`,
+          `${safety.filter((item) => ["critical", "incident"].includes(item.type)).length} critical / incident records.`,
+          `${state.toolboxTalks?.filter((talk) => talk.siteId === targetSiteId).length || 0} toolbox talks issued.`,
+        ],
+        rows: safety.slice(0, 8).map((entry) => ({ type: entry.type, topic: entry.topic || entry.title, status: entry.status || "recorded" })),
+      },
+    ],
+    "handover-pack": [
+      {
+        heading: "Handover artifacts",
+        lines: [
+          `${state.documents.filter((document) => document.siteId === targetSiteId).length} documents in Document Control.`,
+          `${signed.length} signed approval packs ready for handover evidence.`,
+          `${transmittals.length} transmittal records available.`,
+        ],
+      },
+    ],
+    "audit-trail": [
+      {
+        heading: "Audit trail summary",
+        lines: [
+          `${state.auditTrail.filter((entry) => !entry.siteId || entry.siteId === targetSiteId).length} audit entries available for this site scope.`,
+          "Full hash-chain verification is available from Audit Trail.",
+        ],
+        rows: state.auditTrail.filter((entry) => !entry.siteId || entry.siteId === targetSiteId).slice(0, 10).map((entry) => ({ action: entry.action, actor: entry.actor, at: entry.timestamp })),
+      },
+    ],
+  };
+  return {
+    id: randomId("opr"),
+    number: nextScopedNumber(state, "boardReports", targetSiteId, "OPR"),
+    siteId: targetSiteId,
+    siteName: site.name,
+    reportType,
+    title: reportNames[reportType] || "Operations Report",
+    period: state.session.period || "Current period",
+    createdAt: nowStamp(),
+    summary: `${reportNames[reportType] || "Operations report"} for ${site.name || targetSiteId}, covering operational evidence, compliance, recovery and site execution.`,
+    sections: baseSections[reportType] || baseSections["weekly-site-operations"],
+  };
+}
+
 function applyBudgetImpact(state, approval, contractPack) {
   const site = state.sites.find((item) => item.id === approval.siteId);
   const budget = state.siteBudgets.find((item) => item.siteId === approval.siteId);
@@ -2154,6 +2267,39 @@ export function SiteForgeProvider({ children }) {
       runTimedAutomationSweep(next, helpers);
     });
   }, [mutate, state.demo?.simulatedNow]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      mutate((next, helpers) => {
+        const queuedAt = nowStamp();
+        const due = (next.reportSchedules || []).filter((schedule) => schedule.enabled && schedule.lastQueuedAt !== queuedAt.slice(0, 10));
+        due.forEach((schedule) => {
+          next.reportQueue.unshift({
+            id: randomId("rq"),
+            reportType: schedule.reportType,
+            status: "queued",
+            queuedAt,
+            scheduleId: schedule.id,
+            siteId: next.session.siteId,
+            recipients: schedule.recipients,
+          });
+          schedule.lastQueuedAt = queuedAt.slice(0, 10);
+        });
+        next.reportQueue = (next.reportQueue || []).slice(0, 80);
+        if (due.length) {
+          helpers.addAudit({
+            action: "report.scheduler-queue",
+            entityType: "reportQueue",
+            entityId: next.reportQueue[0]?.id || "reportQueue",
+            before: null,
+            after: { queued: due.length },
+            siteId: next.session.siteId,
+          });
+        }
+      });
+    }, 60000);
+    return () => window.clearInterval(timer);
+  }, [mutate]);
 
   useEffect(() => {
     if (!state.demo?.mode) return undefined;
@@ -5163,6 +5309,116 @@ export function SiteForgeProvider({ children }) {
               route: { kind: "internal", siteId: item.siteId, page: "integrations", entityId: historyEntry.id },
             });
           }
+        });
+      },
+      async generateOperationsReport(reportType = "weekly-site-operations", siteId = null) {
+        const report = buildOperationsReport(state, reportType, siteId || state.session.siteId);
+        try {
+          const site = state.sites.find((entry) => entry.id === report.siteId) || {};
+          const company = state.org?.settings?.company || state.company || APP_CONFIG.builder;
+          const blob = await generateOperationsReportPdfBlob({ report, company, site });
+          const blobId = `operations-report-${report.id}`;
+          await putBlob(blobId, blob);
+          mutate((next, helpers) => {
+            const document = {
+              id: randomId("doc"),
+              siteId: report.siteId,
+              title: report.title,
+              category: "Operations Report",
+              type: "report",
+              rev: "Issued",
+              date: formatDate(),
+              clientVisible: false,
+              tags: ["operations-report", report.reportType],
+              fileId: blobId,
+              fileName: `${report.number}.pdf`,
+              mimeType: "application/pdf",
+              retentionCategory: "operations-report",
+              retentionUntil: addDays(formatDate(), 2557),
+              reportId: report.id,
+              linkedRecords: [],
+            };
+            next.documents.unshift(document);
+            next.boardReports.unshift({ ...report, documentId: document.id, fileId: blobId });
+            next.boardReports = next.boardReports.slice(0, 80);
+            helpers.addAudit({
+              action: "report.generate",
+              entityType: "boardReport",
+              entityId: report.id,
+              before: null,
+              after: { reportType, documentId: document.id },
+              siteId: report.siteId,
+            });
+            helpers.emit({
+              eventType: "report.generated",
+              title: `${report.title} generated`,
+              body: `${report.number} is stored in Document Control.`,
+              siteId: report.siteId,
+              entityType: "document",
+              entityId: document.id,
+              recipients: getRecipientsForRoles(next, ["Project Manager", "Director"]),
+              route: { kind: "internal", siteId: report.siteId, page: "docs", entityId: document.id },
+            });
+          });
+        } catch (error) {
+          mutate((next) => {
+            pushToast(next, { tone: "critical", title: "Report generation failed", body: error?.message || "PDF tooling unavailable." });
+          });
+        }
+      },
+      queueScheduledReports() {
+        mutate((next, helpers) => {
+          const queuedAt = nowStamp();
+          const due = next.reportSchedules.filter((schedule) => schedule.enabled && schedule.lastQueuedAt !== queuedAt.slice(0, 10));
+          due.forEach((schedule) => {
+            next.reportQueue.unshift({
+              id: randomId("rq"),
+              reportType: schedule.reportType,
+              status: "queued",
+              queuedAt,
+              scheduleId: schedule.id,
+              siteId: next.session.siteId,
+              recipients: schedule.recipients,
+            });
+            schedule.lastQueuedAt = queuedAt.slice(0, 10);
+          });
+          next.reportQueue = next.reportQueue.slice(0, 80);
+          if (due.length) {
+            helpers.emit({
+              eventType: "report.scheduled",
+              title: `${due.length} scheduled operations reports queued`,
+              body: "Queued reports can be generated from the Reports page.",
+              siteId: next.session.siteId,
+              entityType: "reportQueue",
+              entityId: next.reportQueue[0]?.id,
+              recipients: getRecipientsForRoles(next, ["Project Manager", "Director"]),
+              route: { kind: "internal", siteId: next.session.siteId, page: "rpts" },
+            });
+          }
+        });
+      },
+      generateWeeklyOperationsSummary() {
+        mutate((next, helpers) => {
+          const signed = next.approvals.filter((approval) => approval.status === "signed");
+          const stalled = next.approvals.filter((approval) => ["awaiting-client", "question", "changes-requested"].includes(approval.status));
+          const openProblems = next.problems.filter((problem) => problem.status !== "closed");
+          const summary = `Last week across ${next.sites.filter((site) => site.status === "active").length} active sites: ${signed.length} approvals signed (${formatCurrency(signed.reduce((sum, approval) => sum + Number(approval.costImpact || 0), 0))} recovered), ${stalled.length} approvals awaiting client response, ${openProblems.length} open problems, and ${next.recoveryOpportunities.filter((item) => item.status === "open").length} recovery opportunities awaiting review.`;
+          next.boardInsightsCache = {
+            ...(next.boardInsightsCache || {}),
+            generatedAt: nowStamp(),
+            aiWeeklySummary: summary,
+            suggestedActions: ["Review stalled ClientFlow approvals", "Convert open recovery opportunities", "Close compliance acknowledgement gaps"],
+          };
+          helpers.emit({
+            eventType: "ai.weekly-summary",
+            title: "AI weekly operations summary ready",
+            body: summary,
+            siteId: next.session.siteId,
+            entityType: "boardReport",
+            entityId: "ai-weekly-summary",
+            recipients: getRecipientsForRoles(next, ["Director", "Project Manager"]),
+            route: { kind: "director", page: "boardroom" },
+          });
         });
       },
       generateBoardReport() {

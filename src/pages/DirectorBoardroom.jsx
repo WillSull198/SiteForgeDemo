@@ -67,8 +67,25 @@ export default function DirectorBoardroom() {
           <Button tone="bt-p" icon={Icons.download} onClick={() => actions.generateBoardReport()}>
             Generate Board Report
           </Button>
+          <Button icon={Icons.zap} onClick={() => actions.generateWeeklyOperationsSummary()}>
+            AI Ops Summary
+          </Button>
         </div>
       </div>
+
+      {state.boardInsightsCache?.aiWeeklySummary ? (
+        <Card title="AI Weekly Operations Briefing" icon={Icons.zap} className="mb8">
+          <div className="client-copy">{state.boardInsightsCache.aiWeeklySummary}</div>
+          <div className="list-stack" style={{ marginTop: 10 }}>
+            {(state.boardInsightsCache.suggestedActions || []).map((action) => (
+              <div className="linked-row" key={action}>
+                <span>{action}</span>
+                <Badge tone="medium">recommended</Badge>
+              </div>
+            ))}
+          </div>
+        </Card>
+      ) : null}
 
       <div className="sts g4 mb8">
         <div className="si g">
