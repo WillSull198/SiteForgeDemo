@@ -207,6 +207,13 @@ export default function ClientFlowPage() {
     () => (state.approvalBundles || []).filter((bundle) => (canSeeAllSites(role) ? true : bundle.siteId === siteId)),
     [role, siteId, state.approvalBundles],
   );
+  const recoveryOpportunities = useMemo(
+    () =>
+      (state.recoveryOpportunities || [])
+        .filter((opportunity) => (canSeeAllSites(role) ? true : opportunity.siteId === siteId))
+        .filter((opportunity) => !["dismissed", "converted"].includes(opportunity.status)),
+    [role, siteId, state.recoveryOpportunities],
+  );
 
   const analytics = useMemo(() => {
     return ["0-7 days", "7-14 days", "14-30 days", "30+ days"].map((bucket) => ({
@@ -246,6 +253,25 @@ export default function ClientFlowPage() {
     };
   }, [siteApprovals]);
 
+  const recoveryAnalytics = useMemo(() => {
+    const linked = siteApprovals.filter((approval) => approval.recoveryChain);
+    const signed = linked.filter((approval) => approval.status === "signed");
+    const signedHours = signed
+      .map((approval) => {
+        const sourceAt = Date.parse(String(approval.recoveryChain?.sourceEventAt || approval.recoveryChain?.approvalCreatedAt || "").replace(" ", "T"));
+        const signedAt = Date.parse(String(approval.recoveryChain?.signedAt || approval.timeline?.find((entry) => entry.type === "signed")?.at || "").replace(" ", "T"));
+        return Number.isFinite(sourceAt) && Number.isFinite(signedAt) ? Math.max(0, Math.round((signedAt - sourceAt) / 36e5)) : null;
+      })
+      .filter((value) => value !== null);
+    return {
+      chainCount: linked.length,
+      signedCount: signed.length,
+      recoveredValue: signed.reduce((sum, approval) => sum + Number(approval.costImpact || 0), 0),
+      pendingValue: linked.filter((approval) => approval.status !== "signed").reduce((sum, approval) => sum + Number(approval.costImpact || 0), 0),
+      averageTimeToRecovery: signedHours.length ? Math.round(signedHours.reduce((sum, value) => sum + value, 0) / signedHours.length) : 0,
+    };
+  }, [siteApprovals]);
+
   if (!canView) {
     return <div className="restricted">This role cannot access the internal ClientFlow workspace.</div>;
   }
@@ -263,6 +289,7 @@ export default function ClientFlowPage() {
             { value: "inbox", label: "Client Inbox View" },
             { value: "stalled", label: "Stalled Approvals" },
             { value: "analytics", label: "Analytics" },
+            { value: "recovery", label: "Recovery Engine" },
             { value: "bundles", label: "Bundles" },
             { value: "comms", label: "Comms Hub" },
           ]}
@@ -708,6 +735,94 @@ export default function ClientFlowPage() {
               <div className="bb-v">
                 {Math.round((siteApprovals.filter((approval) => ["approved", "signed"].includes(approval.status)).length / Math.max(1, siteApprovals.length)) * 100)}%
               </div>
+            </div>
+          </Card>
+        </div>
+      ) : null}
+
+      {tab === "recovery" ? (
+        <div className="g23">
+          <Card
+            title="Field-to-Commercial Recovery"
+            icon={Icons.zap}
+            right={
+              <Button small tone="bt-p" icon={Icons.search} onClick={() => actions.detectRecoveryOpportunities(siteId)}>
+                Sweep Site Events
+              </Button>
+            }
+          >
+            <div className="g2" style={{ marginBottom: 12 }}>
+              <div className="si b">
+                <div className="sl">Linked chains</div>
+                <div className="sv">{recoveryAnalytics.chainCount}</div>
+                <div className="ss">Site events connected to ClientFlow</div>
+              </div>
+              <div className="si b">
+                <div className="sl">Recovered</div>
+                <div className="sv">${Math.round(recoveryAnalytics.recoveredValue).toLocaleString()}</div>
+                <div className="ss">Signed recovery value</div>
+              </div>
+              <div className="si b">
+                <div className="sl">Pending exposure</div>
+                <div className="sv">${Math.round(recoveryAnalytics.pendingValue).toLocaleString()}</div>
+                <div className="ss">Draft / issued recovery chain value</div>
+              </div>
+              <div className="si b">
+                <div className="sl">Avg time-to-recover</div>
+                <div className="sv">{recoveryAnalytics.averageTimeToRecovery}h</div>
+                <div className="ss">Source event to signed approval</div>
+              </div>
+            </div>
+            <div className="list-stack">
+              {recoveryOpportunities.length ? (
+                recoveryOpportunities.map((opportunity) => (
+                  <div className="act" key={opportunity.id}>
+                    <div style={{ flex: 1 }}>
+                      <div className="b sm">{opportunity.title}</div>
+                      <div className="xs ct3">
+                        {opportunity.chainType} · source {opportunity.sourceType} · detected {opportunity.detectedAt}
+                      </div>
+                      <div className="sm ct2" style={{ marginTop: 4 }}>{opportunity.reason}</div>
+                    </div>
+                    <div className="tr">
+                      <Badge tone={Number(opportunity.costImpact || 0) > 0 ? "high" : "medium"}>
+                        ${Number(opportunity.costImpact || 0).toLocaleString()} · {opportunity.timeImpact || 0}d
+                      </Badge>
+                      <div className="fx" style={{ gap: 4, justifyContent: "flex-end", marginTop: 8 }}>
+                        <Button small tone="bt-p" onClick={() => actions.raiseRecoveryApproval({ opportunityId: opportunity.id })}>
+                          Raise Approval
+                        </Button>
+                        <Button small onClick={() => actions.dismissRecoveryOpportunity(opportunity.id, "Reviewed and not commercially recoverable.")}>
+                          Dismiss
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="ct3 sm empty">Run a sweep to find diary rain days, problem impacts, RFI scope changes, procurement delays, safety delays, drawing revisions, and forecast rain events that have not reached ClientFlow.</div>
+              )}
+            </div>
+          </Card>
+          <Card title="Recovery chains covered" icon={Icons.link}>
+            <div className="list-stack">
+              {[
+                "Diary -> Variation",
+                "Diary -> Rain Day",
+                "Problem -> Variation",
+                "Problem -> Delay Notice",
+                "RFI -> Variation",
+                "RFI -> EOT",
+                "Procurement Delay -> EOT",
+                "Safety Incident -> Delay Notice",
+                "Drawing Revision -> Variation",
+                "Weather Forecast -> Rain Day",
+              ].map((chain) => (
+                <div className="linked-row" key={chain}>
+                  <span>{chain}</span>
+                  <Badge tone="passed">one-click</Badge>
+                </div>
+              ))}
             </div>
           </Card>
         </div>

@@ -456,6 +456,20 @@ function normaliseState(state) {
   next.projectLogs = Array.isArray(next.projectLogs) ? next.projectLogs.slice(0, 240) : [];
   next.transmittals = Array.isArray(next.transmittals) ? next.transmittals.slice(0, 160) : [];
   next.permits = Array.isArray(next.permits) ? next.permits.slice(0, 160) : [];
+  next.recoveryOpportunities = Array.isArray(next.recoveryOpportunities) ? next.recoveryOpportunities.slice(0, 180) : [];
+  next.recoveryTemplates = {
+    "diary-rain-day": "Rain Day",
+    "diary-variation": "Variation",
+    "problem-variation": "Variation",
+    "problem-delay": "Delay Notice",
+    "rfi-variation": "Variation",
+    "rfi-eot": "Extension of Time",
+    "procurement-eot": "Extension of Time",
+    "safety-delay": "Delay Notice",
+    "drawing-revision": "Variation",
+    "weather-rain-day": "Rain Day",
+    ...(next.recoveryTemplates || {}),
+  };
   next.documents = Array.isArray(next.documents)
     ? next.documents.map((document) => ({
         retentionCategory: document.retentionCategory || (document.category === "Contract Pack" ? "signed-contract" : "project-document"),
@@ -1156,6 +1170,190 @@ function ensureVariationForApproval(state, approval) {
   return variation;
 }
 
+function hasApprovalLink(source) {
+  return Boolean(
+    source?.linkedApprovals?.length ||
+      source?.linkedApprovalId ||
+      source?.clientApprovalId ||
+      source?.linkedRecords?.some((record) => record.type === "approval"),
+  );
+}
+
+function sourceEventDate(source) {
+  return source?.createdAt || source?.reportedAt || source?.raisedAt || source?.date || source?.updatedAt || nowStamp();
+}
+
+function createRecoveryApprovalRecord(next, helpers, { sourceType, source, approvalType, title, summary, reason, costImpact, timeImpact, templateId, opportunityId }) {
+  const siteId = source?.siteId || next.session.siteId;
+  const site = next.sites.find((item) => item.id === siteId) || next.sites[0];
+  const client = next.clients.find((item) => item.id === site?.clientId) || next.clients[0];
+  if (!source || !site || !client) return null;
+  const aiDraft = draftApproval(source, approvalType);
+  const portalToken = uuid();
+  const numericCost = Number(costImpact ?? aiDraft.costImpact ?? source.costImpact ?? source.value ?? 0);
+  const numericTime = Number(timeImpact ?? aiDraft.timeImpact ?? source.timeImpact ?? source.days ?? 0);
+  const createdAt = nowStamp();
+  const approval = {
+    id: randomId("ap"),
+    number: nextScopedNumber(next, "approvals", siteId, "CF"),
+    siteId,
+    clientId: client.id,
+    type: approvalType,
+    title: title || buildApprovalTitle(source, approvalType),
+    summary: summary || aiDraft.summary || source.description || source.summary || source.title || "",
+    reason: reason || aiDraft.reason || "Commercial recovery generated from linked site evidence.",
+    recommendation: aiDraft.recommendation || "Recommended for issue to client for review and signature.",
+    status: "draft",
+    priority: source.priority || "medium",
+    sourceType,
+    sourceId: source.id || source.docId,
+    createdBy: helpers.actor.id,
+    ownerId: site.pmId || "u_pm_1",
+    sentAt: null,
+    dueAt: addDays(formatDate(), 3),
+    viewedAt: null,
+    costImpact: numericCost,
+    timeImpact: numericTime,
+    templateId: templateId || null,
+    linkedRecords: [...(source.linkedRecords || []), buildLink(sourceType, source, siteId)],
+    attachments: buildSourceAttachments(source),
+    aiDraft: {
+      ...aiDraft,
+      summary: summary || aiDraft.summary,
+      reason: reason || aiDraft.reason,
+      costImpact: numericCost,
+      timeImpact: numericTime,
+    },
+    timeline: [],
+    messageThread: [],
+    contractPackId: null,
+    portalToken,
+    portalUrl: `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${portalToken}`,
+    recoveryChain: {
+      chainType: `${sourceType}->${approvalType}`,
+      sourceType,
+      sourceId: source.id || source.docId,
+      sourceEventAt: sourceEventDate(source),
+      approvalCreatedAt: createdAt,
+      sentAt: null,
+      signedAt: null,
+      opportunityId: opportunityId || null,
+    },
+  };
+  helpers.appendTimeline(approval, {
+    type: "created",
+    actor: actorName(helpers.actor),
+    role: helpers.actor.role,
+    text: `${helpers.actor.role} raised ${approvalType} from ${sourceType} recovery evidence.`,
+  });
+  next.approvals.unshift(approval);
+  source.linkedApprovals = source.linkedApprovals || [];
+  if (!source.linkedApprovals.includes(approval.id)) source.linkedApprovals.push(approval.id);
+  if (sourceType === "procurement") source.linkedApprovalId = approval.id;
+  upsertLinkedRecord(source, buildLink("approval", approval, siteId));
+  const variation = helpers.ensureVariation(approval);
+  if (variation) upsertLinkedRecord(source, buildLink("variation", variation, siteId));
+  if (opportunityId) {
+    next.recoveryOpportunities = next.recoveryOpportunities.map((opportunity) =>
+      opportunity.id === opportunityId ? { ...opportunity, status: "converted", convertedAt: createdAt, approvalId: approval.id } : opportunity,
+    );
+  }
+  helpers.addAudit({
+    action: "recovery.approval-created",
+    entityType: "approval",
+    entityId: approval.id,
+    before: null,
+    after: { type: approval.type, sourceType, sourceId: approval.sourceId, costImpact: numericCost, timeImpact: numericTime },
+    siteId,
+  });
+  helpers.emit({
+    eventType: "approval.created",
+    title: `Recovery approval drafted - ${approval.number}`,
+    body: `${approval.title} was generated from ${sourceType} evidence.`,
+    siteId,
+    entityType: "approval",
+    entityId: approval.id,
+    recipients: getRecipientsForRoles(next, ["Project Manager", "Contract Admin"]),
+    route: { kind: "internal", siteId, page: "clientflow", entityId: approval.id },
+  });
+  return approval;
+}
+
+function buildRecoveryCandidates(state, siteId) {
+  const candidates = [];
+  const push = (sourceType, source, approvalType, chainType, reason, defaults = {}) => {
+    if (!source || source.siteId !== siteId || hasApprovalLink(source)) return;
+    const key = `${sourceType}:${source.id || source.docId}:${approvalType}`;
+    candidates.push({
+      id: `recovery-${hashString(key)}`,
+      key,
+      siteId,
+      sourceType,
+      sourceId: source.id || source.docId,
+      approvalType,
+      chainType,
+      title: defaults.title || buildApprovalTitle(source, approvalType),
+      summary: defaults.summary || source.description || source.summary || source.title || source.item || source.topic || reason,
+      reason,
+      costImpact: Number(defaults.costImpact ?? source.costImpact ?? source.value ?? 0),
+      timeImpact: Number(defaults.timeImpact ?? source.timeImpact ?? source.days ?? 0),
+      status: "open",
+      detectedAt: nowStamp(),
+      sourceEventAt: sourceEventDate(source),
+    });
+  };
+  state.diary.forEach((entry) => {
+    if (entry.rainEvent || entry.isRainDay || /rain|wet weather|inclement/i.test(`${entry.weather || ""} ${entry.summary || ""}`)) {
+      push("diary", entry, "Rain Day", "Diary -> Rain Day", "Rain event has no linked EOT / rain-day approval.");
+    }
+    if (Number(entry.costImpact || entry.value || 0) > 0) {
+      push("diary", entry, "Variation", "Diary -> Variation", "Diary entry records cost impact with no linked variation approval.");
+    }
+  });
+  state.problems.forEach((problem) => {
+    if (["open", "under-review", "in-progress"].includes(problem.status) && Number(problem.costImpact || 0) > 0) {
+      push("problem", problem, "Variation", "Problem -> Variation", "Problem has recoverable cost impact with no approval.");
+    }
+    if (["open", "under-review", "in-progress"].includes(problem.status) && Number(problem.timeImpact || 0) > 0) {
+      push("problem", problem, "Delay Notice", "Problem -> Delay Notice", "Problem has programme impact with no delay notice.");
+    }
+  });
+  state.rfis.forEach((rfi) => {
+    const impactText = `${rfi.response || ""} ${rfi.summary || ""} ${rfi.topic || ""}`;
+    if (["responded", "closed", "answered"].includes(rfi.status) && /change|variation|scope|extra/i.test(impactText)) {
+      push("rfi", rfi, "Variation", "RFI -> Variation", "RFI response appears to alter scope.");
+    }
+    if (["responded", "closed", "answered"].includes(rfi.status) && (/delay|extension|programme|critical path/i.test(impactText) || Number(rfi.timeImpact || 0) > 0)) {
+      push("rfi", rfi, "Extension of Time", "RFI -> EOT", "RFI response appears to affect programme.");
+    }
+  });
+  state.procurement.forEach((item) => {
+    if (["delayed", "escalated", "in-transit"].includes(item.status)) {
+      push("procurement", item, "Extension of Time", "Procurement Delay -> EOT", "Procurement delay may support an extension of time.", {
+        timeImpact: item.timeImpact || item.delayDays || 2,
+      });
+    }
+  });
+  state.safety.forEach((entry) => {
+    if (["critical", "incident"].includes(entry.type) || /stop work|shutdown|incident/i.test(`${entry.summary || ""} ${entry.title || ""}`)) {
+      push("safety", entry, "Delay Notice", "Safety Incident -> Delay Notice", "Safety event may justify a delay notice.");
+    }
+  });
+  state.documents.forEach((document) => {
+    if (document.impactAnalysis?.summary || document.acknowledgements?.some((ack) => ack.status !== "acknowledged")) {
+      push("document", document, "Variation", "Drawing Revision -> Variation", "Drawing revision may have scope or acknowledgement impact.");
+    }
+  });
+  (state.weatherForecasts?.[siteId] || []).forEach((forecast) => {
+    if (Number(forecast.rainfallMm || 0) >= 10 || Number(forecast.rainChance || 0) >= 75) {
+      push("weather", { ...forecast, id: `weather-${siteId}-${forecast.date}`, siteId, title: `${forecast.label} forecast ${forecast.date}` }, "Rain Day", "Weather Forecast -> Rain Day", "Forecast rain may justify a proactive rain-day notice.", {
+        timeImpact: 1,
+      });
+    }
+  });
+  return candidates;
+}
+
 function applyBudgetImpact(state, approval, contractPack) {
   const site = state.sites.find((item) => item.id === approval.siteId);
   const budget = state.siteBudgets.find((item) => item.siteId === approval.siteId);
@@ -1425,6 +1623,9 @@ function finaliseClientSignedContract(next, helpers, contractPack, approval, sig
   Object.assign(contractPack, signedPack);
   if (approval) {
     approval.status = "signed";
+    if (approval.recoveryChain) {
+      approval.recoveryChain.signedAt = contractPack.signatures?.client?.signedAt || nowStamp();
+    }
     helpers.appendTimeline(approval, {
       type: "signed",
       actor: signerName || client?.primaryContact || "Client",
@@ -1653,6 +1854,26 @@ function runTimedAutomationSweep(next, helpers) {
       }
     }
   });
+
+  const today = runtimeStamp.slice(0, 10);
+  if (next.recoveryLastSweepDate !== today) {
+    const existingKeys = new Set((next.recoveryOpportunities || []).filter((item) => item.status !== "dismissed").map((item) => item.key));
+    const newItems = next.sites.flatMap((site) => buildRecoveryCandidates(next, site.id)).filter((candidate) => !existingKeys.has(candidate.key));
+    if (newItems.length) {
+      next.recoveryOpportunities = [...newItems, ...(next.recoveryOpportunities || [])].slice(0, 180);
+      helpers.emit({
+        eventType: "recovery.opportunity",
+        title: `${newItems.length} recovery opportunities detected`,
+        body: "SiteForge found field events that have not reached ClientFlow.",
+        siteId: next.session.siteId,
+        entityType: "recoveryOpportunity",
+        entityId: newItems[0].id,
+        recipients: getRecipientsForRoles(next, ["Project Manager", "Director"]),
+        route: { kind: "internal", siteId: newItems[0].siteId, page: "clientflow" },
+      });
+    }
+    next.recoveryLastSweepDate = today;
+  }
 }
 
 function createHelpers(prev, next) {
@@ -2505,6 +2726,78 @@ export function SiteForgeProvider({ children }) {
         });
         if (targetRoute) navigate(targetRoute);
       },
+      detectRecoveryOpportunities(siteId = null) {
+        mutate((next, helpers) => {
+          const targetSiteId = siteId || next.session.siteId;
+          const candidates = buildRecoveryCandidates(next, targetSiteId);
+          const existingKeys = new Set(next.recoveryOpportunities.filter((item) => item.status !== "dismissed").map((item) => item.key));
+          const newItems = candidates.filter((candidate) => !existingKeys.has(candidate.key));
+          next.recoveryOpportunities = [...newItems, ...next.recoveryOpportunities].slice(0, 180);
+          helpers.addAudit({
+            action: "recovery.detect",
+            entityType: "recoveryOpportunity",
+            entityId: targetSiteId,
+            before: null,
+            after: { detected: candidates.length, added: newItems.length },
+            siteId: targetSiteId,
+          });
+          pushToast(next, {
+            tone: newItems.length ? "warning" : "passed",
+            title: newItems.length ? "Recovery opportunities found" : "Recovery sweep clear",
+            body: newItems.length ? `${newItems.length} field events can be converted to commercial recovery.` : "No unlinked recoverable events were found for this site.",
+          });
+        });
+      },
+      raiseRecoveryApproval({ opportunityId = null, sourceType, sourceId, approvalType, title, summary, reason, costImpact, timeImpact, templateId } = {}) {
+        let targetRoute = null;
+        mutate((next, helpers) => {
+          const opportunity = opportunityId ? next.recoveryOpportunities.find((item) => item.id === opportunityId) : null;
+          const resolvedSourceType = sourceType || opportunity?.sourceType;
+          const resolvedApprovalType = approvalType || opportunity?.approvalType || "Variation";
+          const resolvedSourceId = sourceId || opportunity?.sourceId;
+          let source = findInCollection(next, resolvedSourceType, resolvedSourceId);
+          if (!source && resolvedSourceType === "weather") {
+            source = (next.weatherForecasts?.[opportunity?.siteId || next.session.siteId] || [])
+              .map((forecast) => ({ ...forecast, id: `weather-${opportunity?.siteId || next.session.siteId}-${forecast.date}`, siteId: opportunity?.siteId || next.session.siteId, title: `${forecast.label} forecast ${forecast.date}` }))
+              .find((forecast) => forecast.id === resolvedSourceId);
+          }
+          if (!source) return;
+          const approval = createRecoveryApprovalRecord(next, helpers, {
+            sourceType: resolvedSourceType,
+            source,
+            approvalType: resolvedApprovalType,
+            title: title || opportunity?.title,
+            summary: summary || opportunity?.summary,
+            reason: reason || opportunity?.reason,
+            costImpact: costImpact ?? opportunity?.costImpact,
+            timeImpact: timeImpact ?? opportunity?.timeImpact,
+            templateId: templateId || opportunity?.templateId || null,
+            opportunityId: opportunity?.id || opportunityId,
+          });
+          if (!approval) return;
+          targetRoute = { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id };
+        });
+        if (targetRoute) navigate(targetRoute);
+      },
+      dismissRecoveryOpportunity(opportunityId, reason = "Dismissed after commercial review.") {
+        mutate((next, helpers) => {
+          const opportunity = next.recoveryOpportunities.find((item) => item.id === opportunityId);
+          if (!opportunity) return;
+          const before = { status: opportunity.status };
+          opportunity.status = "dismissed";
+          opportunity.dismissedAt = nowStamp();
+          opportunity.dismissedBy = next.session.userId;
+          opportunity.dismissalReason = reason;
+          helpers.addAudit({
+            action: "recovery.dismiss",
+            entityType: "recoveryOpportunity",
+            entityId: opportunity.id,
+            before,
+            after: { status: opportunity.status, reason },
+            siteId: opportunity.siteId,
+          });
+        });
+      },
       updateApprovalDraft(approvalId, patch) {
         mutate((next, helpers) => {
           const approval = next.approvals.find((item) => item.id === approvalId);
@@ -2526,6 +2819,9 @@ export function SiteForgeProvider({ children }) {
           const approval = next.approvals.find((item) => item.id === approvalId);
           if (!approval) return;
           const before = prepareApprovalForClientIssue(next, approval, helpers.actor);
+          if (approval.recoveryChain) {
+            approval.recoveryChain.sentAt = approval.sentAt || nowStamp();
+          }
           helpers.appendTimeline(approval, {
             type: "sent",
             actor: actorName(helpers.actor),
@@ -2569,6 +2865,9 @@ export function SiteForgeProvider({ children }) {
           const bulkId = randomId("bulk");
           candidates.forEach((approval) => {
             const before = prepareApprovalForClientIssue(next, approval, helpers.actor, { bulkId });
+            if (approval.recoveryChain) {
+              approval.recoveryChain.sentAt = approval.sentAt || nowStamp();
+            }
             helpers.appendTimeline(approval, {
               type: "bulk-sent",
               actor: actorName(helpers.actor),
