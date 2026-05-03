@@ -3015,27 +3015,29 @@ function AdminPage() {
           </div>
           <Button tone="bt-p" onClick={saveUserSettings}>Save User Settings</Button>
         </Card>
-        <Card title="Demo Controls" icon={Icons.gear}>
-          <div className="sm ct2">Reset the demo data back to the seeded construction scenario at any time.</div>
-          <div className="sm ct2" style={{ marginTop: 8 }}>Current simulated time: {derived.currentNow}</div>
-          <Button tone="bt-p" onClick={() => actions.resetDemo()} style={{ marginTop: 12 }}>
-            Reset Demo
-          </Button>
-          <div className="fa" style={{ marginTop: 10, justifyContent: "flex-start" }}>
-            <Button small icon={Icons.clock} onClick={() => actions.advanceSimulatedTime(1)}>
-              +1 day
+        {state.org?.mode === "demo" ? (
+          <Card title="Demo Controls" icon={Icons.gear}>
+            <div className="sm ct2">Reset the demo data back to the seeded construction scenario at any time.</div>
+            <div className="sm ct2" style={{ marginTop: 8 }}>Current simulated time: {derived.currentNow}</div>
+            <Button tone="bt-p" onClick={() => actions.resetDemo()} style={{ marginTop: 12 }}>
+              Reset Demo
             </Button>
-            <Button small icon={Icons.clock} onClick={() => actions.advanceSimulatedTime(7)}>
-              +1 week
-            </Button>
-            <Button small icon={Icons.clock} onClick={() => actions.advanceSimulatedTime(30)}>
-              +1 month
-            </Button>
-            <Button small onClick={() => actions.runSystemSweep()}>
-              Trigger sweep
-            </Button>
-          </div>
-        </Card>
+            <div className="fa" style={{ marginTop: 10, justifyContent: "flex-start" }}>
+              <Button small icon={Icons.clock} onClick={() => actions.advanceSimulatedTime(1)}>
+                +1 day
+              </Button>
+              <Button small icon={Icons.clock} onClick={() => actions.advanceSimulatedTime(7)}>
+                +1 week
+              </Button>
+              <Button small icon={Icons.clock} onClick={() => actions.advanceSimulatedTime(30)}>
+                +1 month
+              </Button>
+              <Button small onClick={() => actions.runSystemSweep()}>
+                Trigger sweep
+              </Button>
+            </div>
+          </Card>
+        ) : null}
         <Card title="Data Management" icon={Icons.help}>
           <div className="list-stack">
             <div className="linked-row">

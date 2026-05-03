@@ -1,5 +1,4 @@
 import { useMemo, useState } from "react";
-import { APP_CONFIG } from "../data/seedData";
 import { Icons } from "../components/icons";
 import DataTable from "../components/DataTable";
 import { Badge, Button, Card, MetricGrid, Modal, RestrictedPanel, Tabs } from "../components/ui";
@@ -29,15 +28,17 @@ export default function IntegrationsPage() {
   const { state, actions } = useSiteForge();
   const role = state.session.role;
   const canView = can(role, "integrations.view");
-  const [tab, setTab] = useState("teams");
+  const [tab, setTab] = useState("status");
   const [payloadPreview, setPayloadPreview] = useState(null);
   const [slashCommand, setSlashCommand] = useState("/siteforge approvals stalled");
+  const integrationSettings = state.settings?.integrations || {};
 
   const metrics = [
-    { label: "Teams Events", value: state.teams?.outbound?.length || state.notifications.eventLog.length, color: "b" },
-    { label: "Queued Syncs", value: state.buildxact.queue.filter((item) => item.status === "pending").length, color: "a" },
+    { label: "Email Queue", value: state.emailQueue?.filter((item) => item.status === "queued").length || 0, color: "b" },
+    { label: "SMS Queue", value: state.smsQueue?.filter((item) => item.status === "queued").length || 0, color: "a" },
+    { label: "Teams Queue", value: state.teamsQueue?.filter((item) => item.status === "queued").length || 0, color: "p" },
+    { label: "Buildxact Pushes", value: state.buildxact.queue.filter((item) => ["pending", "queued", "read-only"].includes(item.status)).length, color: "a" },
     { label: "Sync Errors", value: state.buildxact.syncHistory.filter((item) => item.status === "error").length, color: "r" },
-    { label: "Buildxact", value: state.buildxact.readOnlyMode ? "read-only" : state.buildxact.connection.status, color: "g" },
   ];
 
   const failedHistory = useMemo(() => state.buildxact.syncHistory.filter((item) => item.status === "error"), [state.buildxact.syncHistory]);
@@ -53,11 +54,84 @@ export default function IntegrationsPage() {
         value={tab}
         onChange={setTab}
         items={[
+          { value: "status", label: "Status" },
+          { value: "email", label: "Email Queue" },
+          { value: "sms", label: "SMS Queue" },
           { value: "teams", label: "Teams Action Layer" },
           { value: "buildxact", label: "Buildxact Connector" },
           { value: "history", label: "Sync History" },
         ]}
       />
+
+      {tab === "status" ? (
+        <div className="g2">
+          <Card title="Integration Status" icon={Icons.gear}>
+            {[
+              ["Buildxact", state.buildxact.connection.status || "disconnected", "Connect Buildxact"],
+              ["Anthropic", integrationSettings.anthropicConfigured ? "connected" : "not configured", "Add API key"],
+              ["Email", integrationSettings.emailProvider || "queued-only", "Open email queue"],
+              ["SMS", integrationSettings.smsProvider || "queued-only", "Open SMS queue"],
+              ["Microsoft Teams", state.teams?.connected ? "connected" : "disconnected", "Open Teams queue"],
+            ].map(([name, status, action]) => (
+              <div className="linked-row" key={name}>
+                <div>
+                  <div className="b sm">{name}</div>
+                  <div className="xs ct3">{status}</div>
+                </div>
+                <Badge tone={String(status).includes("connected") ? "passed" : String(status).includes("queued") ? "medium" : "critical"}>{status}</Badge>
+                <Button small onClick={() => setTab(name === "Email" ? "email" : name === "SMS" ? "sms" : name === "Microsoft Teams" ? "teams" : name === "Buildxact" ? "buildxact" : "buildxact")}>{action}</Button>
+              </div>
+            ))}
+          </Card>
+          <Card title="Queue Policy" icon={Icons.send}>
+            <p className="sm ct2">No external delivery is simulated. When a provider is disconnected, SiteForge stores the exact payload locally with status, recipient, timestamp and manual-send controls.</p>
+            <div className="linked-row"><span>Queued email payloads</span><Badge tone="medium">{state.emailQueue?.length || 0}</Badge></div>
+            <div className="linked-row"><span>Queued SMS payloads</span><Badge tone="medium">{state.smsQueue?.length || 0}</Badge></div>
+            <div className="linked-row"><span>Queued Teams payloads</span><Badge tone="medium">{state.teamsQueue?.length || 0}</Badge></div>
+            <div className="linked-row"><span>Queued Buildxact pushes</span><Badge tone="medium">{state.buildxact.pendingPushes?.length || state.buildxact.queue.length}</Badge></div>
+          </Card>
+        </div>
+      ) : null}
+
+      {tab === "email" ? (
+        <Card title="Email Queue" icon={Icons.send}>
+          <DataTable
+            storageKey="email-queue"
+            rows={state.emailQueue || []}
+            columns={[
+              { key: "type", label: "Type", filterable: true },
+              { key: "subject", label: "Subject", filterable: true },
+              { key: "createdAt", label: "Queued", type: "date", filterable: true },
+              { key: "status", label: "Status", filterable: true, render: (value) => <Badge tone={value === "sent" ? "passed" : value === "failed" ? "critical" : "medium"}>{value}</Badge> },
+            ]}
+            rowActions={[
+              { label: "Payload", onClick: (item) => setPayloadPreview({ type: item.type, reference: item.id, current: item, previous: null }) },
+              { label: "Mark sent", onClick: (item) => actions.markExternalQueueItemSent("emailQueue", item.id), when: (item) => item.status !== "sent" },
+              { label: "Delete", tone: "bt-r", onClick: (item) => window.confirm("Delete this queued email?") && actions.deleteExternalQueueItem("emailQueue", item.id) },
+            ]}
+          />
+        </Card>
+      ) : null}
+
+      {tab === "sms" ? (
+        <Card title="SMS Queue" icon={Icons.phone}>
+          <DataTable
+            storageKey="sms-queue"
+            rows={state.smsQueue || []}
+            columns={[
+              { key: "type", label: "Type", filterable: true },
+              { key: "body", label: "Message", filterable: true },
+              { key: "createdAt", label: "Queued", type: "date", filterable: true },
+              { key: "status", label: "Status", filterable: true, render: (value) => <Badge tone={value === "sent" ? "passed" : value === "failed" ? "critical" : "medium"}>{value}</Badge> },
+            ]}
+            rowActions={[
+              { label: "Payload", onClick: (item) => setPayloadPreview({ type: item.type, reference: item.id, current: item, previous: null }) },
+              { label: "Mark sent", onClick: (item) => actions.markExternalQueueItemSent("smsQueue", item.id), when: (item) => item.status !== "sent" },
+              { label: "Delete", tone: "bt-r", onClick: (item) => window.confirm("Delete this queued SMS?") && actions.deleteExternalQueueItem("smsQueue", item.id) },
+            ]}
+          />
+        </Card>
+      ) : null}
 
       {tab === "teams" ? (
         <div className="g2">
@@ -70,9 +144,9 @@ export default function IntegrationsPage() {
                 </div>
               </div>
               <div className="fx" style={{ gap: 6 }}>
-                <Badge tone={state.teams?.connected ? "passed" : "medium"}>{state.teams?.connected ? "connected" : "mock"}</Badge>
+                <Badge tone={state.teams?.connected ? "passed" : "medium"}>{state.teams?.connected ? "connected" : "queue-only"}</Badge>
                 <Button small tone="bt-p" onClick={() => actions.connectTeamsMock()}>
-                  Connect to Teams
+                  Configure Teams
                 </Button>
                 <Button small onClick={() => actions.sendTeamsTestMessage()}>
                   Send Test
@@ -138,6 +212,29 @@ export default function IntegrationsPage() {
             />
           </Card>
 
+          <Card title="Teams Queue" icon={Icons.send}>
+            <DataTable
+              storageKey="teams-queue"
+              rows={state.teamsQueue || []}
+              columns={[
+                { key: "type", label: "Type", filterable: true },
+                { key: "channel", label: "Channel", filterable: true },
+                { key: "createdAt", label: "Queued", type: "date", filterable: true },
+                {
+                  key: "status",
+                  label: "Status",
+                  filterable: true,
+                  render: (value) => <Badge tone={value === "sent" ? "passed" : value === "failed" ? "critical" : "medium"}>{value}</Badge>,
+                },
+              ]}
+              rowActions={[
+                { label: "Payload", onClick: (item) => setPayloadPreview({ type: item.type, reference: item.id, current: item.payload || item, previous: null }) },
+                { label: "Mark sent", onClick: (item) => actions.markExternalQueueItemSent("teamsQueue", item.id), when: (item) => item.status !== "sent" },
+                { label: "Delete", tone: "bt-r", onClick: (item) => window.confirm("Delete this queued Teams payload?") && actions.deleteExternalQueueItem("teamsQueue", item.id) },
+              ]}
+            />
+          </Card>
+
           <Card title="Escalation Queue" icon={Icons.alert}>
             <DataTable
               storageKey="teams-escalation-queue"
@@ -172,6 +269,11 @@ export default function IntegrationsPage() {
       {tab === "buildxact" ? (
         <div className="g32" style={{ marginTop: 10 }}>
           <Card title="Buildxact Settings" icon={Icons.gear}>
+            {state.buildxact.connection.status !== "connected" ? (
+              <div className="callout warning" style={{ marginBottom: 12 }}>
+                Buildxact is disconnected. Projects, clients, cost codes and signed variations will not sync externally. Signed outcomes are retained in the queue below until you connect.
+              </div>
+            ) : null}
             {state.buildxact.readOnlyMode ? (
               <div className="callout warning" style={{ marginBottom: 12 }}>
                 Read-only mode is active. SiteForge will pull Buildxact context but signed variations and contract packs remain queued locally.
@@ -200,7 +302,16 @@ export default function IntegrationsPage() {
                 <label>API Key</label>
                 <input
                   value={state.buildxact.connection.apiKeyMasked}
+                  placeholder="Paste Buildxact API key when available"
                   onChange={(event) => actions.updateBuildxactSettings({ connection: { apiKeyMasked: event.target.value } })}
+                />
+              </div>
+              <div className="ff">
+                <label>Workspace ID</label>
+                <input
+                  value={state.buildxact.connection.workspaceId}
+                  placeholder="Buildxact workspace ID"
+                  onChange={(event) => actions.updateBuildxactSettings({ connection: { workspaceId: event.target.value } })}
                 />
               </div>
             </div>
@@ -280,7 +391,7 @@ export default function IntegrationsPage() {
 
             <Card title="Cost Code Mapping" icon={Icons.box}>
               <div className="list-stack">
-                {(state.buildxact.costCodes.length ? state.buildxact.costCodes : APP_CONFIG.costCodes).map((code) => (
+                {state.buildxact.costCodes.map((code) => (
                   <div className="linked-row" key={code.id || code.local}>
                     <div>
                       <div className="b sm">{code.code || code.local}</div>
@@ -289,6 +400,7 @@ export default function IntegrationsPage() {
                     <Badge tone="passed">Mapped</Badge>
                   </div>
                 ))}
+                {!state.buildxact.costCodes.length ? <div className="ct3 sm empty">No Buildxact cost codes are loaded. Connect Buildxact before mapping signed outcomes.</div> : null}
               </div>
             </Card>
             <Card title="Buildxact Source Context" icon={Icons.grid} style={{ marginTop: 8 }}>

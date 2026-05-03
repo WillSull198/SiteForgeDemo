@@ -6,6 +6,7 @@ import AIAssistantDrawer from "./components/AIAssistantDrawer";
 import Breadcrumbs from "./components/Breadcrumbs";
 import GlobalSearch from "./components/GlobalSearch";
 import NotificationBell from "./components/NotificationBell";
+import Onboarding from "./components/Onboarding";
 import RoleSelector from "./components/RoleSelector";
 import { Icons, renderIcon } from "./components/icons";
 import { AccessDenied, Button, Modal } from "./components/ui";
@@ -124,7 +125,7 @@ class ViewBoundary extends Component {
 function Shell() {
   const { state, actions, derived } = useSiteForge();
   const route = state.session.route;
-  const role = state.session.role;
+  const role = state.session.role || "Director";
   const user = derived.currentUser;
   const goPrefixRef = useRef("");
   const goPrefixTimerRef = useRef(null);
@@ -288,6 +289,10 @@ function Shell() {
 
   const iconFor = (iconName) => Icons[iconName] || Icons.grid;
 
+  if (!state.onboarding?.complete) {
+    return <Onboarding state={state} actions={actions} />;
+  }
+
   if (!user) {
     return (
       <div className="A">
@@ -450,6 +455,12 @@ function Shell() {
         </aside>
 
         <main className="M">
+          {state.org?.mode === "demo" ? (
+            <div className="demo-banner">
+              <span>You're in demo mode. None of this data is real.</span>
+              <Button small onClick={() => window.confirm("Switch to a real account? This clears demo data in this browser and starts real onboarding.") && actions.switchDemoToReal()}>Switch to a real account</Button>
+            </div>
+          ) : null}
           <div className="T">
             <div>
               <h2>{PAGE_TITLES[route.page] || route.page}</h2>
@@ -470,9 +481,11 @@ function Shell() {
                 {renderIcon(Icons.search, 13)}
                 <span>Search or run a command...</span>
               </button>
-              <Button small tone={state.demo.mode ? "bt-p" : ""} icon={Icons.clock} onClick={() => actions.setDemoMode(!state.demo.mode)}>
-                {state.demo.mode ? "Demo Mode" : "Live Mode"}
-              </Button>
+              {state.org?.mode === "demo" || state.settings?.developer?.allowDemoEvents ? (
+                <Button small tone={state.demo.mode ? "bt-p" : ""} icon={Icons.clock} onClick={() => actions.setDemoMode(!state.demo.mode)}>
+                  {state.demo.mode ? "Demo Mode" : "Live Mode"}
+                </Button>
+              ) : null}
               {installPrompt ? (
                 <Button
                   small
@@ -566,31 +579,6 @@ function Shell() {
           <Button tone="bt-p" onClick={submitQuickNew}>
             Create
           </Button>
-        </div>
-      </Modal>
-
-      <Modal open={!state.onboarding?.complete} close={() => actions.completeOnboarding("demo")} title="Welcome to SiteForge" wide>
-        <div className="g2">
-          <div className="onboarding-panel">
-            <div className="b md">Try the demo</div>
-            <div className="sm ct2">Explore SiteForge with realistic Australian construction data, including ClientFlow, Passport, Presence and Buildxact workflows.</div>
-            <Button tone="bt-p" onClick={() => actions.completeOnboarding("demo")} style={{ marginTop: 12 }}>
-              Start Demo
-            </Button>
-          </div>
-          <div className="onboarding-panel">
-            <div className="b md">Set up my company</div>
-            <div className="sm ct2">Add company details, ABN, logo, AI key and integration settings before creating your first real project.</div>
-            <Button
-              onClick={() => {
-                actions.completeOnboarding("real-account");
-                actions.navigate({ kind: "internal", siteId: state.session.siteId, page: "admin", entityId: null });
-              }}
-              style={{ marginTop: 12 }}
-            >
-              Set Up Company
-            </Button>
-          </div>
         </div>
       </Modal>
 

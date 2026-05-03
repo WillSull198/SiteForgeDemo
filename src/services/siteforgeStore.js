@@ -5,6 +5,7 @@
 
 import React, { createContext, createElement, useCallback, useContext, useEffect, useMemo, useRef } from "react";
 import { APP_CONFIG, createInitialData, migrateLegacyState } from "../data/seedData";
+import { getReferenceClauseLibrary, getReferenceContractTemplates, getReferenceTemplateMarketplace } from "../data/referenceData";
 import { usePersistentState } from "../hooks/usePersistentState";
 import {
   boardInsights,
@@ -57,6 +58,17 @@ const DEFAULT_CLIENTFLOW_CHANNELS = {
   sms: false,
   teams: false,
   printPdf: true,
+};
+
+const DEFAULT_NOTIFICATION_PREFS = {
+  inApp: true,
+  email: false,
+  teams: false,
+  sms: false,
+  mobile: false,
+  quietHours: { enabled: false, from: "18:00", to: "07:00" },
+  dailyDigest: false,
+  eventChannels: {},
 };
 
 const DEFAULT_ROLE_PAGES = {
@@ -230,16 +242,161 @@ const defaultUi = () => ({
   activeContractId: "cp-004",
 });
 
-const createInitialStore = () => {
-  const base = {
+const blankSession = () => ({
+  role: null,
+  userId: null,
+  siteId: null,
+  period: "This Week",
+  route: { kind: "internal", siteId: null, page: "dash", entityId: null },
+  recentSearches: [],
+});
+
+function createBlankSlate() {
+  const orgId = uuid();
+  return {
+    version: APP_CONFIG.storageVersion,
+    company: { name: "", abn: "", address: "", phone: "", email: "" },
+    settings: {
+      company: { name: "", abn: "", address: "", phone: "", email: "", website: "", logoDataUrl: "" },
+      user: { name: "", email: "", phone: "", defaultRole: "Director" },
+      notifications: DEFAULT_NOTIFICATION_PREFS,
+      integrations: {
+        anthropicApiKey: "",
+        anthropicConfigured: false,
+        buildxactApiKey: "",
+        buildxactWorkspaceId: "",
+        buildxactConnected: false,
+        buildxactSyncMode: "disconnected",
+        buildxactLastError: null,
+        emailProvider: "queued-only",
+        smsProvider: "queued-only",
+        teamsConnected: false,
+      },
+      contractDefaults: {
+        defaultContractType: "HIA",
+        standardVariationTemplate: "tpl-hia-var",
+      },
+      theme: "light",
+      appearance: { theme: "light" },
+      developer: { demoDataBanner: false, allowClearData: true },
+    },
+    onboarding: {
+      complete: false,
+      mode: null,
+      step: "welcome",
+      completedAt: null,
+      completedTours: [],
+    },
+    org: {
+      id: orgId,
+      name: "",
+      slug: "",
+      plan: "starter",
+      mode: "blank",
+      createdAt: nowStamp(),
+    },
+    users: [],
+    companies: [],
+    clients: [],
+    sites: [],
+    schedules: [],
+    siteBudgets: [],
+    tasks: [],
+    problems: [],
+    rfis: [],
+    variations: [],
+    approvals: [],
+    contractTemplates: getReferenceContractTemplates(),
+    clauseLibrary: getReferenceClauseLibrary(),
+    contractPacks: [],
+    procurement: [],
+    qa: [],
+    diary: [],
+    safety: [],
+    toolboxTalks: [],
+    swms: [],
+    passports: { records: [], scanLog: [], siteAccess: [], expiringTickets: [], visitorPasses: [] },
+    presence: { anomalies: [], shifts: [], complianceState: {}, records: [], events: [], exports: [], siteCompliance: [] },
+    documents: [],
+    messages: [],
+    invoices: [],
+    notifications: { items: [], eventLog: [] },
+    emailQueue: [],
+    smsQueue: [],
+    teamsQueue: [],
+    buildxact: {
+      queue: [],
+      pendingPushes: [],
+      failedPushes: [],
+      syncEvents: [],
+      syncHistory: [],
+      payloadPreviews: [],
+      suppliers: [],
+      costCodes: [],
+      scheduleMilestones: [],
+      readOnlyMode: false,
+      connection: { status: "disconnected", workspaceId: "", apiKeyMasked: "" },
+    },
+    teams: { connected: false, outbound: [], commandLog: [], channelMap: DEFAULT_TEAMS_CHANNEL_MAP, oauthStatus: "disconnected", botName: "SiteForge Bot", tenantName: "" },
+    auditTrail: [],
+    boardReports: [],
+    financialPulse: null,
+    projectLogs: [],
+    files: { records: [], pendingUploads: [], uploadErrors: [], preview: null, indexedDbAvailable: true },
+    tableViews: { state: {}, saved: {} },
+    demo: {
+      mode: false,
+      queuedEvents: [],
+      recentToasts: [],
+      userControlled: false,
+    },
+    callbacks: [],
+    pmAvailability: [],
+    weatherForecasts: [],
+    calculatorHistory: [],
+    commandHistory: [],
+    clientSentiment: {},
+    templateMarketplace: getReferenceTemplateMarketplace(),
+    variationRegister: [],
+    boardInsightsCache: null,
+    reportSchedules: [],
+    reportQueue: [],
+    recoveryOpportunities: [],
+    transmittals: [],
+    permits: [],
+    help: { supportQueue: [] },
+    billing: { plan: "Starter", usage: { storageMb: 0, aiTokens: 0, activeProjects: 0 } },
+    session: blankSession(),
+    ui: { ...defaultUi(), activeApprovalId: null, activeContractId: null, bootRoleSelectorOpen: false },
+  };
+}
+
+function createDemoStore() {
+  return normaliseState({
     version: APP_CONFIG.storageVersion,
     ...createInitialData(),
+    onboarding: {
+      complete: true,
+      mode: "demo",
+      step: "done",
+      completedAt: nowStamp(),
+      completedTours: [],
+    },
+    org: {
+      ...DEFAULT_ORG,
+      id: DEFAULT_ORG.id,
+      mode: "demo",
+      plan: "demo",
+      createdAt: DEFAULT_ORG.createdAt,
+    },
     session: defaultSession(),
     ui: defaultUi(),
-  };
+  });
+}
 
+const createInitialStore = () => {
   if (typeof window === "undefined") {
-    return base;
+    return createBlankSlate();
   }
 
   for (const legacyKey of APP_CONFIG.legacyStorageKeys || []) {
@@ -257,7 +414,7 @@ const createInitialStore = () => {
     }
   }
 
-  return normaliseState(base);
+  return normaliseState(createBlankSlate());
 };
 
 function parseHash(hash = "") {
@@ -334,6 +491,10 @@ function getDefaultRouteForRole(role, state) {
 
 function getCurrentUser(state) {
   return state.users.find((user) => user.id === state.session.userId) || state.users[0];
+}
+
+function getUserForRole(state, role) {
+  return state.users.find((user) => user.role === role) || state.users.find((user) => user.id === state.session.userId) || state.users[0] || null;
 }
 
 function getCurrentClient(state) {
@@ -453,6 +614,9 @@ function normaliseState(state) {
   next.notifications = next.notifications || { items: [], eventLog: [] };
   next.notifications.items = Array.isArray(next.notifications.items) ? next.notifications.items.slice(0, 180) : [];
   next.notifications.eventLog = Array.isArray(next.notifications.eventLog) ? next.notifications.eventLog.slice(0, 240) : [];
+  next.emailQueue = Array.isArray(next.emailQueue) ? next.emailQueue.slice(0, 160) : [];
+  next.smsQueue = Array.isArray(next.smsQueue) ? next.smsQueue.slice(0, 160) : [];
+  next.teamsQueue = Array.isArray(next.teamsQueue) ? next.teamsQueue.slice(0, 160) : [];
   next.auditTrail = Array.isArray(next.auditTrail) ? next.auditTrail.slice(0, 600) : [];
   next.projectLogs = Array.isArray(next.projectLogs) ? next.projectLogs.slice(0, 240) : [];
   next.transmittals = Array.isArray(next.transmittals) ? next.transmittals.slice(0, 160) : [];
@@ -486,6 +650,9 @@ function normaliseState(state) {
     completedTours: Array.isArray(next.onboarding?.completedTours) ? next.onboarding.completedTours : [],
     ...(next.onboarding || {}),
   };
+  if (!next.org.mode) {
+    next.org.mode = next.onboarding.mode === "real" ? "real" : next.settings?.developer?.demoDataBanner ? "demo" : "real";
+  }
   next.billing = {
     plan: "Pro",
     usage: {
@@ -563,6 +730,16 @@ function normaliseState(state) {
       ...(next.buildxact?.syncFrequency || {}),
     },
     queue: Array.isArray(next.buildxact?.queue) ? next.buildxact.queue.slice(0, 120) : [],
+    pendingPushes: Array.isArray(next.buildxact?.pendingPushes)
+      ? next.buildxact.pendingPushes.slice(0, 120)
+      : Array.isArray(next.buildxact?.queue)
+        ? next.buildxact.queue.filter((item) => ["pending", "queued", "read-only"].includes(item.status)).slice(0, 120)
+        : [],
+    failedPushes: Array.isArray(next.buildxact?.failedPushes)
+      ? next.buildxact.failedPushes.slice(0, 80)
+      : Array.isArray(next.buildxact?.queue)
+        ? next.buildxact.queue.filter((item) => item.status === "error" || item.status === "failed").slice(0, 80)
+        : [],
     syncHistory: Array.isArray(next.buildxact?.syncHistory) ? next.buildxact.syncHistory.slice(0, 180) : [],
     payloadPreviews: Array.isArray(next.buildxact?.payloadPreviews) ? next.buildxact.payloadPreviews.slice(0, 120) : [],
     connection: {
@@ -990,6 +1167,19 @@ function queueBuildxactSync(state, type, reference, siteId, payloadCurrent, payl
   };
   state.buildxact.queue.unshift(queueItem);
   state.buildxact.queue = state.buildxact.queue.slice(0, 120);
+  state.buildxact.pendingPushes = Array.isArray(state.buildxact.pendingPushes) ? state.buildxact.pendingPushes : [];
+  state.buildxact.pendingPushes.unshift({
+    id: queueItem.id,
+    createdAt: queueItem.createdAt,
+    status: readOnly ? "queued" : "queued",
+    type,
+    payload: payloadCurrent,
+    relatedEntity: { type, id: reference },
+    attemptCount: 0,
+    lastError: queueItem.lastError,
+    buildxactRemoteId: null,
+  });
+  state.buildxact.pendingPushes = state.buildxact.pendingPushes.slice(0, 120);
   state.buildxact.payloadPreviews.unshift({
     id: randomId("bxp"),
     type,
@@ -1028,9 +1218,96 @@ function queueSignedApprovalBuildxactPush(state, approval, contractPack) {
 
 function getBrowserEvidence() {
   return {
-    ip: "browser-demo",
+    ip: "browser-direct",
     ua: typeof navigator !== "undefined" ? navigator.userAgent : "SiteForge Browser",
   };
+}
+
+function buildApprovalEmailPayload(state, approval) {
+  const client = state.clients.find((item) => item.id === approval.clientId);
+  const site = state.sites.find((item) => item.id === approval.siteId);
+  const builder = state.settings?.company || state.company || APP_CONFIG.builder;
+  return {
+    id: randomId("email"),
+    createdAt: nowStamp(),
+    status: "queued",
+    type: "approval-sent",
+    to: { name: client?.primaryContact || client?.name || "Client", email: client?.email || "" },
+    cc: [],
+    subject: `${builder.name || "SiteForge"} approval request: ${approval.number || approval.title}`,
+    bodyText: [
+      `Hello ${client?.primaryContact || "there"},`,
+      "",
+      `${builder.name || "Your builder"} has issued ${approval.title} for ${site?.name || "your project"}.`,
+      `Cost impact: ${formatCurrency(approval.costImpact || 0)}`,
+      `Time impact: ${approval.timeImpact || 0} day(s)`,
+      "",
+      `Review and sign here: ${approval.portalUrl}`,
+      "",
+      "This message is queued locally until an email provider is connected. You can copy and send it manually.",
+    ].join("\n"),
+    bodyHtml: `<p>Hello ${client?.primaryContact || "there"},</p><p>${builder.name || "Your builder"} has issued <strong>${approval.title}</strong> for ${site?.name || "your project"}.</p><p><strong>Cost impact:</strong> ${formatCurrency(approval.costImpact || 0)}<br/><strong>Time impact:</strong> ${approval.timeImpact || 0} day(s)</p><p><a href="${approval.portalUrl}">Review and sign approval</a></p><p>This message is queued locally until an email provider is connected.</p>`,
+    attachments: [],
+    relatedEntity: { type: "approval", id: approval.id },
+    attemptCount: 0,
+    lastAttempt: null,
+    lastError: null,
+    externalProvider: null,
+    externalMessageId: null,
+  };
+}
+
+function queueExternalDeliveryForApproval(state, approval) {
+  if (!approval) return;
+  state.emailQueue = Array.isArray(state.emailQueue) ? state.emailQueue : [];
+  state.smsQueue = Array.isArray(state.smsQueue) ? state.smsQueue : [];
+  state.teamsQueue = Array.isArray(state.teamsQueue) ? state.teamsQueue : [];
+  if (approval.deliveryChannels?.email) {
+    const exists = state.emailQueue.some((item) => item.relatedEntity?.type === "approval" && item.relatedEntity?.id === approval.id && item.type === "approval-sent");
+    if (!exists) state.emailQueue.unshift(buildApprovalEmailPayload(state, approval));
+  }
+  if (approval.deliveryChannels?.sms) {
+    const client = state.clients.find((item) => item.id === approval.clientId);
+    state.smsQueue.unshift({
+      id: randomId("sms"),
+      createdAt: nowStamp(),
+      status: "queued",
+      type: "approval-sent",
+      to: { name: client?.primaryContact || client?.name || "Client", phone: client?.phone || "" },
+      body: `${approval.title}: review and sign ${approval.portalUrl}`,
+      relatedEntity: { type: "approval", id: approval.id },
+      attemptCount: 0,
+      lastAttempt: null,
+      lastError: null,
+      externalProvider: null,
+      externalMessageId: null,
+    });
+  }
+  if (approval.deliveryChannels?.teams) {
+    const client = state.clients.find((item) => item.id === approval.clientId);
+    state.teamsQueue.unshift({
+      id: randomId("teamsq"),
+      createdAt: nowStamp(),
+      status: "queued",
+      type: "approval-sent",
+      channel: "client-approval",
+      payload: {
+        title: approval.title,
+        number: approval.number,
+        client: client?.primaryContact || client?.name || "Client",
+        costImpact: approval.costImpact || 0,
+        timeImpact: approval.timeImpact || 0,
+        portalUrl: approval.portalUrl,
+      },
+      relatedEntity: { type: "approval", id: approval.id },
+      attemptCount: 0,
+      lastAttempt: null,
+      lastError: null,
+    });
+  }
+  state.emailQueue = state.emailQueue.slice(0, 160);
+  state.smsQueue = state.smsQueue.slice(0, 160);
+  state.teamsQueue = state.teamsQueue.slice(0, 160);
 }
 
 function getDeliveryChannels(state, approval) {
@@ -2047,7 +2324,11 @@ function runTimedAutomationSweep(next, helpers) {
 }
 
 function createHelpers(prev, next) {
-  const actor = prev.users.find((user) => user.id === prev.session.userId) || prev.users[0];
+  const actor = prev.users.find((user) => user.id === prev.session.userId) || prev.users[0] || {
+    id: "system",
+    name: "SiteForge",
+    role: "System",
+  };
 
   const helpers = {
     actor,
@@ -2369,8 +2650,146 @@ export function SiteForgeProvider({ children }) {
     () => ({
       navigate,
       resetDemo() {
-        setState(createInitialStore());
+        setState(createDemoStore());
         window.location.hash = buildHash(DEFAULT_ROLE_PAGES.Supervisor);
+      },
+      startDemoAccount() {
+        const demoState = createDemoStore();
+        setState(demoState);
+        window.location.hash = buildHash(demoState.session.route || DEFAULT_ROLE_PAGES.Supervisor);
+      },
+      switchDemoToReal() {
+        const slate = createBlankSlate();
+        const blank = normaliseState({
+          ...slate,
+          onboarding: { ...slate.onboarding, mode: "real", step: "company" },
+          org: { ...slate.org, mode: "real" },
+        });
+        setState(blank);
+        window.location.hash = "#/site/setup/dash";
+      },
+      beginRealOnboarding() {
+        setState((previous) => {
+          const next = cloneState(previous);
+          next.org = { ...(next.org || {}), mode: "real" };
+          next.onboarding = { ...(next.onboarding || {}), complete: false, mode: "real", step: "company" };
+          next.demo = { ...(next.demo || {}), mode: false, queuedEvents: [], recentToasts: [] };
+          return normaliseState(next);
+        });
+      },
+      saveOnboardingCompany(payload = {}) {
+        setState((previous) => {
+          const next = cloneState(previous);
+          const company = {
+            name: payload.companyName || payload.name || "",
+            abn: payload.abn || "",
+            address: payload.addressText || [payload.street, payload.suburb, payload.state, payload.postcode].filter(Boolean).join(", "),
+            phone: payload.phone || "",
+            email: payload.email || "",
+            website: payload.website || "",
+            logoDataUrl: payload.logoDataUrl || "",
+            defaultContractType: payload.defaultContractType || "HIA",
+          };
+          next.company = { ...(next.company || {}), ...company };
+          next.settings = next.settings || {};
+          next.settings.company = { ...(next.settings.company || {}), ...company };
+          next.settings.contractDefaults = {
+            ...(next.settings.contractDefaults || {}),
+            defaultContractType: payload.defaultContractType || "HIA",
+            standardVariationTemplate: next.settings.contractDefaults?.standardVariationTemplate || "tpl-hia-var",
+          };
+          next.org = { ...(next.org || {}), name: company.name, mode: "real", settings: { ...(next.org?.settings || {}), company } };
+          next.onboarding = { ...(next.onboarding || {}), mode: "real", step: "profile" };
+          return normaliseState(next);
+        });
+      },
+      saveOnboardingTeam({ owner = {}, teammates = [] } = {}) {
+        setState((previous) => {
+          const next = cloneState(previous);
+          const ownerId = owner.id || randomId("u");
+          const ownerRecord = {
+            id: ownerId,
+            name: owner.name || "Owner",
+            email: owner.email || "",
+            phone: owner.phone || "",
+            role: owner.role || "Director",
+            trade: owner.trade || "",
+            avatar: (owner.name || "Owner").split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase(),
+            siteIds: [],
+            orgId: next.org?.id || DEFAULT_ORG.id,
+          };
+          const teammateRecords = teammates
+            .filter((person) => person.name || person.email)
+            .map((person) => ({
+              id: person.id || randomId("u"),
+              name: person.name || person.email,
+              email: person.email || "",
+              phone: person.phone || "",
+              role: person.role || "Supervisor",
+              trade: person.trade || "",
+              avatar: (person.name || person.email || "TM").split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase(),
+              siteIds: [],
+              orgId: next.org?.id || DEFAULT_ORG.id,
+            }));
+          next.users = [ownerRecord, ...teammateRecords];
+          next.settings.user = {
+            ...(next.settings.user || {}),
+            name: ownerRecord.name,
+            email: ownerRecord.email,
+            phone: ownerRecord.phone,
+            defaultRole: ownerRecord.role,
+          };
+          next.settings.profile = { ...(next.settings.profile || {}), ...next.settings.user };
+          next.session.userId = ownerRecord.id;
+          next.session.role = ownerRecord.role;
+          next.onboarding = { ...(next.onboarding || {}), step: "first-project" };
+          return normaliseState(next);
+        });
+      },
+      saveOnboardingIntegrations(payload = {}) {
+        setState((previous) => {
+          const next = cloneState(previous);
+          next.settings.integrations = {
+            ...(next.settings.integrations || {}),
+            anthropicConfigured: Boolean(payload.anthropicConfigured),
+            buildxactConnected: false,
+            buildxactApiKey: payload.buildxactApiKey || "",
+            buildxactWorkspaceId: payload.buildxactWorkspaceId || "",
+            buildxactSyncMode: "disconnected",
+            buildxactLastError: payload.buildxactConnected ? "Credentials saved locally. Real Buildxact API connection requires backend configuration." : null,
+            teamsConnected: false,
+          };
+          next.buildxact.connection = {
+            ...(next.buildxact.connection || {}),
+            status: payload.buildxactConnected ? "configured" : "disconnected",
+            workspaceId: payload.buildxactWorkspaceId || "",
+            apiKeyMasked: payload.buildxactApiKey ? `••••${payload.buildxactApiKey.slice(-4)}` : "",
+          };
+          next.onboarding = { ...(next.onboarding || {}), step: "done" };
+          return normaliseState(next);
+        });
+      },
+      finishRealOnboarding() {
+        mutate((next, helpers) => {
+          next.org = { ...(next.org || {}), mode: "real", plan: next.org?.plan || "starter" };
+          next.onboarding = {
+            ...(next.onboarding || {}),
+            complete: true,
+            mode: "real",
+            step: "done",
+            completedAt: nowStamp(),
+          };
+          next.settings.developer = { ...(next.settings.developer || {}), demoDataBanner: false };
+          next.demo = { ...(next.demo || {}), mode: false, queuedEvents: [], recentToasts: [] };
+          helpers.addAudit({
+            action: "onboarding.complete",
+            entityType: "onboarding",
+            entityId: "real",
+            before: null,
+            after: next.onboarding,
+            siteId: next.session.siteId,
+          });
+        });
       },
       importState(importedState) {
         const imported = normaliseState(migrateLegacyState(cloneState(importedState)));
@@ -2378,6 +2797,12 @@ export function SiteForgeProvider({ children }) {
         window.location.hash = buildHash(imported.session?.route || DEFAULT_ROLE_PAGES.Supervisor);
       },
       completeOnboarding(mode = "demo") {
+        if (mode === "demo") {
+          const demoState = createDemoStore();
+          setState(demoState);
+          window.location.hash = buildHash(demoState.session.route || DEFAULT_ROLE_PAGES.Supervisor);
+          return;
+        }
         mutate((next, helpers) => {
           next.onboarding = {
             ...(next.onboarding || {}),
@@ -2426,10 +2851,11 @@ export function SiteForgeProvider({ children }) {
         setState((previous) => {
           const next = cloneState(previous);
           const defaultRoute = getDefaultRouteForRole(role, next);
+          const roleUser = getUserForRole(next, role);
           next.session.role = role;
-          next.session.userId = DEFAULT_ROLE_USERS[role] || DEFAULT_ROLE_USERS.Supervisor;
+          next.session.userId = roleUser?.id || null;
           next.session.route = defaultRoute;
-          next.session.siteId = defaultRoute.siteId || next.users.find((user) => user.id === next.session.userId)?.siteIds?.[0] || next.sites[0]?.id;
+          next.session.siteId = defaultRoute.siteId || roleUser?.siteIds?.[0] || next.sites[0]?.id || null;
           return normaliseState(next);
         });
         window.location.hash = buildHash(getDefaultRouteForRole(role, state));
@@ -2447,8 +2873,13 @@ export function SiteForgeProvider({ children }) {
         const clientName = `${payload.clientFirstName || ""} ${payload.clientLastName || ""}`.trim();
         const companyName = payload.clientCompany || clientName || "New Client";
         const contractValue = Number(payload.contractValue || 0);
+        const addressText = payload.siteAddressText || payload.siteAddress || [payload.siteStreet, payload.siteSuburb, payload.siteState, payload.sitePostcode].filter(Boolean).join(", ");
 
         mutate((next, helpers) => {
+          const currentUser = next.users.find((user) => user.id === next.session.userId) || next.users[0] || null;
+          const supervisorId = payload.supervisorId || next.users.find((user) => user.role === "Supervisor")?.id || currentUser?.id || null;
+          const pmId = payload.pmId || next.users.find((user) => user.role === "Project Manager")?.id || currentUser?.id || null;
+          const caId = payload.caId || next.users.find((user) => user.role === "Contract Admin")?.id || null;
           const client = {
             id: clientId,
             name: companyName,
@@ -2471,12 +2902,18 @@ export function SiteForgeProvider({ children }) {
               .padEnd(3, "X"),
             name: payload.projectName,
             clientId,
-            superintendentId: "u_sup_1",
-            pmId: "u_pm_1",
-            caId: "u_ca_1",
+            superintendentId: supervisorId,
+            pmId,
+            caId,
             region: payload.region || "Brisbane",
             type: payload.contractType || "HIA",
-            address: payload.siteAddress,
+            address: addressText,
+            addressStructured: {
+              street: payload.siteStreet || "",
+              suburb: payload.siteSuburb || "",
+              state: payload.siteState || "",
+              postcode: payload.sitePostcode || "",
+            },
             status: (payload.status || "Active").toLowerCase().replace(/\s+/g, "-"),
             progress: 0,
             contractValue,
@@ -2493,11 +2930,19 @@ export function SiteForgeProvider({ children }) {
             heroPhotoLabel: `${payload.projectName} site photo`,
             contractType: payload.contractType || "HIA",
             startDate: payload.startDate || formatDate(),
-            supervisorName: payload.supervisorAssigned || "Dave Mitchell",
+            supervisorName: next.users.find((user) => user.id === supervisorId)?.name || "Unassigned",
+            notes: payload.notes || "",
+            lotNumber: payload.lotNumber || "",
+            planNumber: payload.planNumber || "",
           };
 
           next.clients.unshift(client);
           next.sites.unshift(site);
+          next.users = next.users.map((user) =>
+            [supervisorId, pmId, caId].includes(user.id)
+              ? { ...user, siteIds: [...new Set([...(user.siteIds || []), siteId])] }
+              : user,
+          );
           next.siteBudgets.unshift({
             siteId,
             summary: { contractValue, spent: 0, committed: 0, contingencyUsed: 0, forecastMargin: 18 },
@@ -2532,6 +2977,9 @@ export function SiteForgeProvider({ children }) {
           next.settings.activeProjectId = siteId;
           next.session.siteId = siteId;
           next.session.route = { kind: "internal", siteId, page: "dash", entityId: null };
+          if (!next.onboarding?.complete) {
+            next.onboarding = { ...(next.onboarding || {}), step: "integrations" };
+          }
           helpers.addAudit({
             action: "project.create",
             entityType: "site",
@@ -3067,6 +3515,7 @@ export function SiteForgeProvider({ children }) {
           const approval = next.approvals.find((item) => item.id === approvalId);
           if (!approval) return;
           const before = prepareApprovalForClientIssue(next, approval, helpers.actor);
+          queueExternalDeliveryForApproval(next, approval);
           if (approval.recoveryChain) {
             approval.recoveryChain.sentAt = approval.sentAt || nowStamp();
           }
@@ -3128,6 +3577,7 @@ export function SiteForgeProvider({ children }) {
           const bulkId = randomId("bulk");
           candidates.forEach((approval) => {
             const before = prepareApprovalForClientIssue(next, approval, helpers.actor, { bulkId });
+            queueExternalDeliveryForApproval(next, approval);
             if (approval.recoveryChain) {
               approval.recoveryChain.sentAt = approval.sentAt || nowStamp();
             }
@@ -5054,25 +5504,18 @@ export function SiteForgeProvider({ children }) {
       connectTeamsMock() {
         mutate((next, helpers) => {
           const before = { connected: next.teams.connected, oauthStatus: next.teams.oauthStatus };
-          next.teams.connected = true;
-          next.teams.oauthStatus = "mock-connected";
-          next.teams.connectedAt = nowStamp();
-          next.teams.outbound.unshift(createTeamsEvent({
-            eventType: "teams.connected",
-            title: "Teams connection established",
-            body: "Mock Microsoft Teams action layer is ready for adaptive card dispatch.",
-            channel: "SiteForge Admin",
-            status: "sent",
-          }));
+          next.teams.connected = false;
+          next.teams.oauthStatus = "backend-required";
+          next.teams.lastConnectionAttemptAt = nowStamp();
           helpers.addAudit({
-            action: "teams.connect",
+            action: "teams.connect-blocked",
             entityType: "integration",
             entityId: "teams",
             before,
-            after: { connected: true, oauthStatus: next.teams.oauthStatus },
+            after: { connected: false, oauthStatus: next.teams.oauthStatus },
             siteId: next.session.siteId,
           });
-          pushToast(next, { tone: "passed", title: "Teams connected", body: "Mock Teams action layer is ready." });
+          pushToast(next, { tone: "medium", title: "Teams requires backend setup", body: "Adaptive card payloads will stay queued locally until a real Teams bot or webhook is configured." });
         });
       },
       updateTeamsChannelMap(eventType, channel) {
@@ -5182,16 +5625,27 @@ export function SiteForgeProvider({ children }) {
       },
       testBuildxactConnection() {
         mutate((next, helpers) => {
-          next.buildxact.connection.status = "connected";
+          const hasConfig = Boolean(next.buildxact.connection.workspaceId && next.buildxact.connection.apiKeyMasked);
+          next.buildxact.connection.status = hasConfig ? "configured" : "disconnected";
           next.buildxact.connection.lastTestedAt = nowStamp();
-          next.buildxact.lastSyncAt = next.buildxact.connection.lastTestedAt;
+          next.settings.integrations = {
+            ...(next.settings.integrations || {}),
+            buildxactConnected: false,
+            buildxactSyncMode: "disconnected",
+            buildxactLastError: hasConfig ? "Credentials saved locally. Real Buildxact API connection requires backend configuration." : "Buildxact API key and Workspace ID are required.",
+          };
           helpers.addAudit({
             action: "buildxact.connection-test",
             entityType: "integration",
             entityId: "buildxact",
             before: null,
-            after: { status: "connected" },
+            after: { status: next.buildxact.connection.status, backendRequired: hasConfig },
             siteId: next.session.siteId,
+          });
+          pushToast(next, {
+            tone: hasConfig ? "medium" : "critical",
+            title: hasConfig ? "Buildxact credentials saved" : "Buildxact disconnected",
+            body: hasConfig ? "No fake sync was run. Backend API connection is still required before data leaves SiteForge." : "Enter an API key and workspace ID before testing.",
           });
         });
       },
@@ -5220,8 +5674,65 @@ export function SiteForgeProvider({ children }) {
           });
         });
       },
+      markExternalQueueItemSent(queueName, itemId, note = "") {
+        mutate((next, helpers) => {
+          const queue = next[queueName];
+          if (!Array.isArray(queue)) return;
+          const item = queue.find((entry) => entry.id === itemId);
+          if (!item) return;
+          item.status = "sent";
+          item.manuallyMarkedSentAt = nowStamp();
+          item.manualNote = note || `Manually marked sent by ${actorName(helpers.actor)}`;
+          helpers.addAudit({
+            action: `${queueName}.manual-sent`,
+            entityType: queueName,
+            entityId: itemId,
+            before: null,
+            after: { status: item.status, manualNote: item.manualNote },
+            siteId: next.session.siteId,
+          });
+        });
+      },
+      deleteExternalQueueItem(queueName, itemId) {
+        mutate((next, helpers) => {
+          if (!Array.isArray(next[queueName])) return;
+          const before = next[queueName].find((entry) => entry.id === itemId) || null;
+          next[queueName] = next[queueName].filter((entry) => entry.id !== itemId);
+          helpers.addAudit({
+            action: `${queueName}.delete`,
+            entityType: queueName,
+            entityId: itemId,
+            before,
+            after: null,
+            siteId: next.session.siteId,
+          });
+        });
+      },
       reconcileBuildxactNow() {
         mutate((next, helpers) => {
+          if (next.buildxact.connection?.status !== "connected") {
+            pushToast(next, {
+              tone: "critical",
+              title: "Buildxact disconnected",
+              body: "Connect Buildxact before reconciling. Existing pushes remain queued locally.",
+            });
+            next.buildxact.connection.lastTestedAt = nowStamp();
+            next.settings.integrations = {
+              ...(next.settings.integrations || {}),
+              buildxactConnected: false,
+              buildxactSyncMode: "disconnected",
+              buildxactLastError: "Buildxact is disconnected.",
+            };
+            helpers.addAudit({
+              action: "buildxact.reconcile-blocked",
+              entityType: "integration",
+              entityId: "buildxact",
+              before: null,
+              after: { status: "disconnected" },
+              siteId: next.session.siteId,
+            });
+            return;
+          }
           const orgId = next.org?.id || DEFAULT_ORG.id;
           const snapshot = buildBuildxactPullSnapshot({ orgId });
           const toggles = next.buildxact.entitySync || next.buildxact.toggles || {};
@@ -5329,6 +5840,12 @@ export function SiteForgeProvider({ children }) {
         mutate((next, helpers) => {
           const item = next.buildxact.queue.find((entry) => entry.id === queueId);
           if (!item) return;
+          if (next.buildxact.connection?.status !== "connected") {
+            item.status = "pending";
+            item.lastError = "Buildxact is disconnected. Payload retained locally until connection is configured.";
+            pushToast(next, { tone: "critical", title: "Buildxact disconnected", body: item.lastError });
+            return;
+          }
           if (item.status === "read-only" || next.buildxact.readOnlyMode) {
             item.status = "read-only";
             item.lastError = "Read-only mode enabled. Nothing was pushed to Buildxact.";
@@ -6727,7 +7244,7 @@ export function SiteForgeProvider({ children }) {
       auditVerification: state.ui.auditVerification || verifyAuditChain(state.auditTrail),
       search: (query) => buildSearchResults(state, query),
       resolveRecord: (type, id) => findInCollection(state, type, id),
-      weeklyClientSummary: summariseDiary(state.diary.filter((entry) => entry.siteId === currentClient.siteId)),
+      weeklyClientSummary: summariseDiary(state.diary.filter((entry) => entry.siteId === currentClient?.siteId)),
       boardInsight: boardInsights({
         sites: state.sites,
         approvals: openApprovals,
