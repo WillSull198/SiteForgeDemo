@@ -293,18 +293,25 @@ function Shell() {
     return <Onboarding state={state} actions={actions} />;
   }
 
-  if (!user) {
+  if (!user || !derived.currentSite) {
     return (
       <div className="A">
         <main className="M">
           <div className="C">
             <div className="restricted">
-              <div className="restricted-badge">Session Recovery</div>
-              <div className="b md" style={{ marginTop: 8 }}>We couldn't restore this role session cleanly.</div>
-              <div className="sm ct2" style={{ marginTop: 5 }}>The demo state has likely drifted. Resetting will restore a clean workspace.</div>
-              <Button tone="bt-p" onClick={() => actions.resetDemo()} style={{ marginTop: 12 }}>
-                Reset Demo State
-              </Button>
+              <div className="restricted-badge">Workspace not ready</div>
+              <div className="b md" style={{ marginTop: 8 }}>We couldn't find a project or user for this session.</div>
+              <div className="sm ct2" style={{ marginTop: 5 }}>
+                {!user && !derived.currentSite
+                  ? "No user or project is set up. Restart onboarding to fix this."
+                  : !user
+                    ? "User session is missing. This usually means the team setup didn't save."
+                    : "No projects exist for this account. Create your first project to continue."}
+              </div>
+              <div className="fx" style={{ gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                <Button onClick={() => actions.restartOnboarding()}>Restart Onboarding</Button>
+                <Button tone="bt-p" onClick={actions.resetDemo}>Reset Demo State</Button>
+              </div>
             </div>
           </div>
         </main>
@@ -326,7 +333,7 @@ function Shell() {
       return items;
     }
     items.push({ label: "Portfolio", route: { kind: "internal", siteId: state.session.siteId, page: "portfolio", entityId: null } });
-    items.push({ label: derived.currentSite.name, route: { kind: "internal", siteId: derived.currentSite.id, page: "dash", entityId: null } });
+    items.push({ label: derived.currentSite?.name || "Project", route: { kind: "internal", siteId: derived.currentSite?.id || state.session.siteId, page: "dash", entityId: null } });
     items.push({ label: PAGE_TITLES[route.page] || route.page, active: !route.entityId });
     if (route.entityId) {
       items.push({ label: route.entityId, active: true });
@@ -501,7 +508,7 @@ function Shell() {
               <div className="wp">
                 {renderIcon(Icons.sun, 11)}
                 <span>Brisbane</span>
-                <b>{derived.currentSite.weather?.split(",").pop()?.trim() || "24°C"}</b>
+                <b>{derived.currentSite?.weather?.split(",").pop()?.trim() || "24°C"}</b>
               </div>
               <NotificationBell
                 open={state.ui.notificationsOpen}

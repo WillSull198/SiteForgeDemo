@@ -2409,6 +2409,11 @@ function createHelpers(prev, next) {
 export function SiteForgeProvider({ children }) {
   const [state, setState] = usePersistentState(APP_CONFIG.storageKey, createInitialStore);
   const dataLayerBootstrapped = useRef(false);
+  const stateRef = useRef(state);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   useEffect(() => {
     if (dataLayerBootstrapped.current) return;
@@ -2426,12 +2431,26 @@ export function SiteForgeProvider({ children }) {
       }
       setState((previous) => {
         const next = cloneState(previous);
-        next.session.route = parsed;
+        let resolvedSiteId = next.session.siteId;
         if (parsed.siteId) {
-          next.session.siteId = parsed.siteId;
+          const exists = next.sites.some((site) => site.id === parsed.siteId);
+          if (exists) {
+            resolvedSiteId = parsed.siteId;
+          } else if (next.sites[0]?.id) {
+            resolvedSiteId = next.sites[0].id;
+          }
+        } else if (!resolvedSiteId && next.sites[0]?.id) {
+          resolvedSiteId = next.sites[0].id;
         }
+
+        next.session.route = { ...parsed, siteId: resolvedSiteId };
+        next.session.siteId = resolvedSiteId;
+
         if (parsed.userId) {
-          next.session.userId = parsed.userId;
+          const userExists = next.users.some((user) => user.id === parsed.userId);
+          if (userExists) {
+            next.session.userId = parsed.userId;
+          }
         }
         if (parsed.clientId) {
           const clientUser = next.users.find((user) => user.clientId === parsed.clientId);
@@ -2467,8 +2486,12 @@ export function SiteForgeProvider({ children }) {
     if (!window.location.hash && window.location.pathname.startsWith("/approve/")) {
       onHashChange();
     } else if (!window.location.hash) {
-      const bootRole = ["Worker", "Client", "Subcontractor"].includes(state.session.role) ? "Supervisor" : state.session.role;
-      window.location.hash = buildHash(getDefaultRouteForRole(bootRole, state));
+      const onboardingComplete = state.onboarding?.complete;
+      const hasSites = state.sites.length > 0;
+      if (onboardingComplete && hasSites) {
+        const bootRole = ["Worker", "Client", "Subcontractor"].includes(state.session.role) ? "Supervisor" : state.session.role;
+        window.location.hash = buildHash(getDefaultRouteForRole(bootRole, state));
+      }
     } else {
       onHashChange();
     }
@@ -2742,6 +2765,10 @@ export function SiteForgeProvider({ children }) {
           next.settings.profile = { ...(next.settings.profile || {}), ...next.settings.user };
           next.session.userId = ownerRecord.id;
           next.session.role = ownerRecord.role;
+          const routeKind = routeKindForRole(ownerRecord.role);
+          if (next.session.route?.kind && next.session.route.kind !== routeKind) {
+            next.session.route = { ...next.session.route, kind: routeKind };
+          }
           next.onboarding = { ...(next.onboarding || {}), step: "first-project" };
           return normaliseState(next);
         });
@@ -2770,7 +2797,10 @@ export function SiteForgeProvider({ children }) {
         });
       },
       finishRealOnboarding() {
-        mutate((next, helpers) => {
+        let resolvedRoute = null;
+        setState((previous) => {
+          const next = cloneState(previous);
+
           next.org = { ...(next.org || {}), mode: "real", plan: next.org?.plan || "starter" };
           next.onboarding = {
             ...(next.onboarding || {}),
@@ -2781,14 +2811,75 @@ export function SiteForgeProvider({ children }) {
           };
           next.settings.developer = { ...(next.settings.developer || {}), demoDataBanner: false };
           next.demo = { ...(next.demo || {}), mode: false, queuedEvents: [], recentToasts: [] };
-          helpers.addAudit({
+
+          const firstSite = next.sites[0];
+          const targetSiteId =
+            next.session.siteId && next.sites.some((site) => site.id === next.session.siteId)
+              ? next.session.siteId
+              : firstSite?.id || null;
+
+          const ownerUser =
+            next.users.find((user) => user.id === next.session.userId) ||
+            next.users.find((user) => user.role === (next.settings?.user?.defaultRole || "Director")) ||
+            next.users[0];
+
+          const role = ownerUser?.role || next.settings?.user?.defaultRole || "Director";
+
+          next.session.userId = ownerUser?.id || null;
+          next.session.role = role;
+          next.session.siteId = targetSiteId;
+
+          const routeKind = routeKindForRole(role);
+          if (routeKind === "director") {
+            next.session.route = { kind: "director", page: "boardroom", siteId: targetSiteId, entityId: null };
+          } else if (routeKind === "internal") {
+            const defaultPage = role === "Contract Admin" ? "contracts" : "dash";
+            next.session.route = { kind: "internal", siteId: targetSiteId, page: defaultPage, entityId: null };
+          } else {
+            next.session.route = getDefaultRouteForRole(role, next);
+          }
+          resolvedRoute = next.session.route;
+
+          const auditEntry = createAuditEntry({
+            actor: ownerUser?.name || "SiteForge User",
+            actorRole: role,
             action: "onboarding.complete",
             entityType: "onboarding",
             entityId: "real",
             before: null,
-            after: next.onboarding,
-            siteId: next.session.siteId,
+            after: { mode: "real", siteId: targetSiteId, role, userId: ownerUser?.id || null },
+            siteId: targetSiteId,
           });
+          auditEntry.orgId = next.org?.id || DEFAULT_ORG.id;
+          next.auditTrail = [auditEntry, ...(next.auditTrail || [])].slice(0, 600);
+
+          return normaliseState(next);
+        });
+
+        setTimeout(() => {
+          try {
+            const targetState = stateRef.current;
+            const committedRoute = targetState?.onboarding?.complete ? targetState?.session?.route : null;
+            const hash = buildHash(committedRoute || resolvedRoute || DEFAULT_ROLE_PAGES.Director);
+            if (window.location.hash !== hash) {
+              window.location.hash = hash;
+            }
+          } catch (error) {
+            console.warn("Failed to navigate after onboarding", error);
+          }
+        }, 0);
+      },
+      restartOnboarding() {
+        setState((previous) => {
+          const next = cloneState(previous);
+          next.onboarding = {
+            complete: false,
+            mode: null,
+            step: "welcome",
+            completedAt: null,
+            completedTours: [],
+          };
+          return normaliseState(next);
         });
       },
       importState(importedState) {
