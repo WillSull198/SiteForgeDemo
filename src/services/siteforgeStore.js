@@ -872,7 +872,7 @@ function buildMetrics(state) {
       presenceConfidence,
       riskScore,
       riskBand: riskScore >= 65 ? "red" : riskScore >= 35 ? "amber" : "green",
-      marginPosition: site.forecastMargin - costExposure / 10000,
+      marginPosition: (Number(site.forecastMargin) || 0) - costExposure / 10000,
     };
   });
 
@@ -893,7 +893,7 @@ function buildMetrics(state) {
     siteMetrics,
     portfolio: {
       activeProjects: activeSites.length,
-      totalContractValue: activeSites.reduce((sum, site) => sum + site.contractValue, 0),
+      totalContractValue: activeSites.reduce((sum, site) => sum + (Number(site.contractValue) || 0), 0),
       totalMarginAtRisk: siteMetrics.reduce((sum, metric) => sum + metric.costExposure, 0),
       variationExposure: state.variations
         .filter((variation) => !["signed", "approved"].includes(variation.status))

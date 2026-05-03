@@ -115,6 +115,12 @@ class ViewBoundary extends Component {
             <Button onClick={this.props.onRecover}>Return to safe page</Button>
             <Button tone="bt-p" onClick={this.props.onReset}>Reset demo state</Button>
           </div>
+          {this.props.debug ? (
+            <details style={{ marginTop: 14 }}>
+              <summary className="xs ct3">Crash diagnostics</summary>
+              <pre className="xs" style={{ whiteSpace: "pre-wrap", marginTop: 8 }}>{JSON.stringify(this.props.debug, null, 2)}</pre>
+            </details>
+          ) : null}
         </div>
       );
     }
@@ -144,6 +150,26 @@ function Shell() {
   const [isOnline, setIsOnline] = useState(() => navigator.onLine);
   const [installPrompt, setInstallPrompt] = useState(null);
   const company = state.settings?.company || state.company || APP_CONFIG.builder;
+  const currentSite = derived.currentSite || null;
+  const activeSiteId =
+    currentSite?.id ||
+    (state.session.siteId && state.sites.some((site) => site.id === state.session.siteId) ? state.session.siteId : null) ||
+    state.sites[0]?.id ||
+    null;
+  const routeRequiresSite = (route.kind || "internal") === "internal";
+  const missingRequiredSite = routeRequiresSite && !currentSite;
+  const shellDebug = {
+    route,
+    role,
+    userId: state.session.userId || null,
+    siteId: state.session.siteId || null,
+    activeSiteId,
+    currentSiteFound: Boolean(currentSite),
+    userFound: Boolean(user),
+    sitesCount: state.sites.length,
+    financialPulseExists: Boolean(state.financialPulse),
+    onboardingComplete: Boolean(state.onboarding?.complete),
+  };
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -278,46 +304,19 @@ function Shell() {
   const navSections = useMemo(() => getNavForRole(role), [role]);
   const routeKey = `${route.kind || "internal"}:${route.page || "dash"}:${route.siteId || ""}:${route.entityId || ""}:${state.session.userId || ""}`;
 
-  const navBadgeFor = (badge) => {
-    const siteId = state.session.siteId;
-    if (badge === "tasks") return state.tasks.filter((task) => task.siteId === siteId && task.status !== "done" && !task.archived).length;
-    if (badge === "problems") return state.problems.filter((problem) => problem.siteId === siteId && ["open", "under-review", "in-progress"].includes(problem.status)).length;
-    if (badge === "approvals") return state.approvals.filter((approval) => approval.siteId === siteId && !["signed", "declined", "archived", "withdrawn"].includes(approval.status)).length;
-    if (badge === "rfis") return state.rfis.filter((rfi) => rfi.siteId === siteId && !["closed", "responded"].includes(rfi.status)).length;
-    return 0;
-  };
-
-  const iconFor = (iconName) => Icons[iconName] || Icons.grid;
-
-  if (!state.onboarding?.complete) {
-    return <Onboarding state={state} actions={actions} />;
-  }
-
-  if (!user || !derived.currentSite) {
-    return (
-      <div className="A">
-        <main className="M">
-          <div className="C">
-            <div className="restricted">
-              <div className="restricted-badge">Workspace not ready</div>
-              <div className="b md" style={{ marginTop: 8 }}>We couldn't find a project or user for this session.</div>
-              <div className="sm ct2" style={{ marginTop: 5 }}>
-                {!user && !derived.currentSite
-                  ? "No user or project is set up. Restart onboarding to fix this."
-                  : !user
-                    ? "User session is missing. This usually means the team setup didn't save."
-                    : "No projects exist for this account. Create your first project to continue."}
-              </div>
-              <div className="fx" style={{ gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-                <Button onClick={() => actions.restartOnboarding()}>Restart Onboarding</Button>
-                <Button tone="bt-p" onClick={actions.resetDemo}>Reset Demo State</Button>
-              </div>
-            </div>
-          </div>
-        </main>
-      </div>
-    );
-  }
+  useEffect(() => {
+    if (!state.onboarding?.complete || route.kind !== "internal") return;
+    const requestedSiteId = route.siteId || state.session.siteId;
+    if (requestedSiteId && state.sites.some((site) => site.id === requestedSiteId)) return;
+    const fallbackSiteId = state.sites[0]?.id;
+    if (!fallbackSiteId) return;
+    actions.navigate({
+      kind: "internal",
+      siteId: fallbackSiteId,
+      page: route.page || "dash",
+      entityId: route.entityId || null,
+    });
+  }, [actions, route.entityId, route.kind, route.page, route.siteId, state.onboarding?.complete, state.session.siteId, state.sites]);
 
   const breadcrumbItems = useMemo(() => {
     if (isClient || isWorker || isSubcontractor) return [];
@@ -332,14 +331,59 @@ function Shell() {
       }
       return items;
     }
-    items.push({ label: "Portfolio", route: { kind: "internal", siteId: state.session.siteId, page: "portfolio", entityId: null } });
-    items.push({ label: derived.currentSite?.name || "Project", route: { kind: "internal", siteId: derived.currentSite?.id || state.session.siteId, page: "dash", entityId: null } });
+    items.push({ label: "Portfolio", route: { kind: "internal", siteId: activeSiteId, page: "portfolio", entityId: null } });
+    items.push({ label: currentSite?.name || "Project", route: { kind: "internal", siteId: activeSiteId, page: "dash", entityId: null } });
     items.push({ label: PAGE_TITLES[route.page] || route.page, active: !route.entityId });
     if (route.entityId) {
       items.push({ label: route.entityId, active: true });
     }
     return items;
-  }, [derived.currentSite, isClient, isSubcontractor, isWorker, role, route, state.session.siteId, state.sites]);
+  }, [activeSiteId, currentSite?.name, isClient, isSubcontractor, isWorker, route, state.sites]);
+
+  const navBadgeFor = (badge) => {
+    const siteId = activeSiteId;
+    if (badge === "tasks") return state.tasks.filter((task) => task.siteId === siteId && task.status !== "done" && !task.archived).length;
+    if (badge === "problems") return state.problems.filter((problem) => problem.siteId === siteId && ["open", "under-review", "in-progress"].includes(problem.status)).length;
+    if (badge === "approvals") return state.approvals.filter((approval) => approval.siteId === siteId && !["signed", "declined", "archived", "withdrawn"].includes(approval.status)).length;
+    if (badge === "rfis") return state.rfis.filter((rfi) => rfi.siteId === siteId && !["closed", "responded"].includes(rfi.status)).length;
+    return 0;
+  };
+
+  const iconFor = (iconName) => Icons[iconName] || Icons.grid;
+
+  if (!state.onboarding?.complete) {
+    return <Onboarding state={state} actions={actions} />;
+  }
+
+  if (!user || missingRequiredSite) {
+    return (
+      <div className="A">
+        <main className="M">
+          <div className="C">
+            <div className="restricted">
+              <div className="restricted-badge">Workspace not ready</div>
+              <div className="b md" style={{ marginTop: 8 }}>We couldn't find a project or user for this session.</div>
+              <div className="sm ct2" style={{ marginTop: 5 }}>
+                {!user && missingRequiredSite
+                  ? "No user or project is set up. Restart onboarding to fix this."
+                  : !user
+                    ? "User session is missing. This usually means the team setup didn't save."
+                    : "This route points at a project that is not available. Use the recovery action below to return to a safe route."}
+              </div>
+              <div className="fx" style={{ gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                <Button onClick={() => actions.restartOnboarding()}>Restart Onboarding</Button>
+                <Button tone="bt-p" onClick={actions.resetDemo}>Reset Demo State</Button>
+              </div>
+              <details style={{ marginTop: 14 }}>
+                <summary className="xs ct3">Session debug</summary>
+                <pre className="xs" style={{ whiteSpace: "pre-wrap", marginTop: 8 }}>{JSON.stringify(shellDebug, null, 2)}</pre>
+              </details>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   const renderInternalPage = () => {
     const permission = PAGE_PERMISSIONS[route.page];
@@ -366,7 +410,7 @@ function Shell() {
     } else if (page === "mats") {
       actions.addProcurementRequest({ item: quickForm.title, quantity: quickForm.description || "1", requestedBy: user.id });
     } else if (page === "clientflow") {
-      const fallbackSource = state.problems.find((problem) => problem.siteId === state.session.siteId);
+      const fallbackSource = state.problems.find((problem) => problem.siteId === activeSiteId);
       if (fallbackSource) {
         actions.createApprovalFromSource({ sourceType: "problem", sourceId: fallbackSource.id, approvalType: "Variation", handUp: mustHandUpForApproval(role) });
       }
@@ -379,7 +423,7 @@ function Shell() {
 
   if (isClient) {
     return (
-      <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Client")} onReset={actions.resetDemo}>
+      <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Client")} onReset={actions.resetDemo} debug={shellDebug}>
         <Suspense fallback={<PageLoadingFallback />}>
           <ClientPortalPage />
         </Suspense>
@@ -388,7 +432,7 @@ function Shell() {
   }
   if (isWorker) {
     return (
-      <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Worker")} onReset={actions.resetDemo}>
+      <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Worker")} onReset={actions.resetDemo} debug={shellDebug}>
         <Suspense fallback={<PageLoadingFallback />}>
           <WorkerMobileView />
         </Suspense>
@@ -397,7 +441,7 @@ function Shell() {
   }
   if (isSubcontractor) {
     return (
-      <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Subcontractor")} onReset={actions.resetDemo}>
+      <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Subcontractor")} onReset={actions.resetDemo} debug={shellDebug}>
         <Suspense fallback={<PageLoadingFallback />}>
           <SubcontractorPortal />
         </Suspense>
@@ -416,7 +460,7 @@ function Shell() {
             <p>Construction operating layer</p>
           </div>
           {route.kind !== "director" ? (
-            <div className="S-st" onClick={() => actions.navigate({ kind: "internal", siteId: state.session.siteId, page: "portfolio", entityId: null })}>
+            <div className="S-st" onClick={() => actions.navigate({ kind: "internal", siteId: activeSiteId, page: "portfolio", entityId: null })}>
               <div className="sn">{renderIcon(Icons.briefcase, 12)} Portfolio View</div>
               <div className="sa">{state.sites.length} sites</div>
             </div>
@@ -435,7 +479,7 @@ function Shell() {
                         actions.navigate({
                           kind: routeKindForRole(role),
                           page: item.page,
-                          siteId: route.kind === "director" ? route.siteId : state.session.siteId,
+                          siteId: route.kind === "director" ? route.siteId || activeSiteId : activeSiteId,
                           entityId: null,
                         })
                       }
@@ -475,8 +519,8 @@ function Shell() {
             </div>
             <div className="tr">
               <RoleSelector value={role} onChange={actions.setRole} roles={["Supervisor", "Project Manager", "Contract Admin", "Director", "Subcontractor", "Client", "Worker"]} currentUser={user} />
-              {route.kind !== "director" ? (
-                <select className="role-select" value={state.session.siteId} onChange={(event) => actions.setSite(event.target.value)}>
+              {route.kind !== "director" && derived.accessibleSites.length ? (
+                <select className="role-select" value={activeSiteId || ""} onChange={(event) => actions.setSite(event.target.value)}>
                   {derived.accessibleSites.map((site) => (
                     <option key={site.id} value={site.id}>
                       {site.name}
@@ -508,7 +552,7 @@ function Shell() {
               <div className="wp">
                 {renderIcon(Icons.sun, 11)}
                 <span>Brisbane</span>
-                <b>{derived.currentSite?.weather?.split(",").pop()?.trim() || "24°C"}</b>
+                <b>{currentSite?.weather?.split(",").pop()?.trim() || "24°C"}</b>
               </div>
               <NotificationBell
                 open={state.ui.notificationsOpen}
@@ -541,8 +585,15 @@ function Shell() {
           <div className="C">
             <ViewBoundary
               key={routeKey}
-              onRecover={() => actions.setRole(role)}
+              onRecover={() =>
+                actions.navigate(
+                  route.kind === "director"
+                    ? { kind: "director", page: "boardroom", siteId: activeSiteId, entityId: null }
+                    : { kind: "internal", siteId: activeSiteId, page: "dash", entityId: null },
+                )
+              }
               onReset={actions.resetDemo}
+              debug={shellDebug}
             >
               <Suspense fallback={<PageLoadingFallback />}>{renderInternalPage()}</Suspense>
             </ViewBoundary>

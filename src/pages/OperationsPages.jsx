@@ -128,8 +128,8 @@ function PortfolioPage() {
   });
   const metrics = [
     { label: "Active Sites", value: state.sites.filter((site) => site.status === "active").length, color: "g" },
-    { label: "Contract Value", value: `$${(state.sites.reduce((sum, site) => sum + site.contractValue, 0) / 1e6).toFixed(1)}M`, color: "a" },
-    { label: "Margin At Risk", value: `$${Math.round(state.sites.reduce((sum, site) => sum + site.marginAtRisk, 0) / 1000)}k`, color: "r" },
+    { label: "Contract Value", value: `$${(state.sites.reduce((sum, site) => sum + (Number(site.contractValue) || 0), 0) / 1e6).toFixed(1)}M`, color: "a" },
+    { label: "Margin At Risk", value: `$${Math.round(state.sites.reduce((sum, site) => sum + (Number(site.marginAtRisk) || 0), 0) / 1000)}k`, color: "r" },
     { label: "Clients", value: state.clients.length, color: "b" },
   ];
 
@@ -167,11 +167,11 @@ function PortfolioPage() {
             <div className="g2" style={{ marginTop: 8 }}>
               <div>
                 <div className="xs ct3">Contract</div>
-                <div className="mono b">${Math.round(site.contractValue / 1000)}k</div>
+                <div className="mono b">${Math.round((Number(site.contractValue) || 0) / 1000)}k</div>
               </div>
               <div>
                 <div className="xs ct3">Margin at risk</div>
-                <div className="mono b">${site.marginAtRisk.toLocaleString()}</div>
+                <div className="mono b">${(site.marginAtRisk || 0).toLocaleString()}</div>
               </div>
             </div>
           </button>
@@ -290,6 +290,20 @@ function DashboardPage() {
   const { state, actions, derived } = useSiteForge();
   const site = derived.currentSite;
   const role = state.session.role;
+  if (!site) {
+    return (
+      <div className="oy fin">
+        <Card title="Project setup required" icon={Icons.briefcase}>
+          <EmptyState
+            icon={Icons.briefcase}
+            title="No project is available for this route"
+            description="The dashboard needs a valid project. Restart onboarding to recreate the first project and repair the session."
+            action={<Button tone="bt-p" onClick={() => actions.restartOnboarding()}>Restart Onboarding</Button>}
+          />
+        </Card>
+      </div>
+    );
+  }
   const siteApprovals = state.approvals.filter((approval) => approval.siteId === site.id);
   const todaysCrew = state.presence.records.filter((record) => record.siteId === site.id && record.status === "verified-on-site");
   const openProblems = state.problems.filter((problem) => problem.siteId === site.id && ["open", "under-review"].includes(problem.status));
@@ -2587,7 +2601,25 @@ function CalculatorsPage() {
 function ReportsPage() {
   const { state, actions, derived } = useSiteForge();
   const site = derived.currentSite;
-  const siteMetric = derived.metrics.siteMetrics.find((metric) => metric.siteId === site.id);
+  if (!site) {
+    return (
+      <div className="oy fin">
+        <Card title="Reports setup required" icon={Icons.download}>
+          <EmptyState
+            icon={Icons.download}
+            title="No project is available for reports"
+            description="Project reports need a valid project. Complete onboarding or create a project before generating report artifacts."
+            action={<Button tone="bt-p" onClick={() => actions.restartOnboarding()}>Restart Onboarding</Button>}
+          />
+        </Card>
+      </div>
+    );
+  }
+  const siteMetric = derived.metrics.siteMetrics.find((metric) => metric.siteId === site.id) || {
+    costExposure: 0,
+    timeExposure: 0,
+    presenceConfidence: 0,
+  };
   const reportTypes = [
     ["daily-site-report", "Daily Site Report"],
     ["weekly-site-operations", "Weekly Site Operations"],
@@ -3126,7 +3158,13 @@ function AdminPage() {
 
 function FinancialSummaryPage() {
   const { state } = useSiteForge();
-  const pulse = state.financialPulse[state.session.period] || state.financialPulse["This Week"] || Object.values(state.financialPulse)[0];
+  const financialPulse = state.financialPulse && typeof state.financialPulse === "object" ? state.financialPulse : {};
+  const pulse = financialPulse[state.session.period] || financialPulse["This Week"] || Object.values(financialPulse)[0] || {
+    revenueRecognised: 0,
+    marginAtRisk: 0,
+    contingencyConsumed: 0,
+    variationExposure: 0,
+  };
   return (
     <div className="oy fin">
       <MetricGrid

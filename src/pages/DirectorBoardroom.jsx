@@ -14,6 +14,14 @@ const ageLabel = (approval) => {
   return "30+ days";
 };
 
+const EMPTY_PULSE = {
+  revenueRecognised: 0,
+  contingencyConsumed: 0,
+  variationExposure: 0,
+  marginAtRisk: 0,
+  cashFlowTrend: [12, 18, 16, 22, 20, 26],
+};
+
 export default function DirectorBoardroom() {
   const { state, actions, derived } = useSiteForge();
   const [riskFilter, setRiskFilter] = useState("all");
@@ -25,37 +33,47 @@ export default function DirectorBoardroom() {
   const [reason, setReason] = useState("");
   const [overrideValue, setOverrideValue] = useState("");
 
-  const pulse = state.financialPulse[state.session.period] || state.financialPulse["This Week"] || Object.values(state.financialPulse)[0];
-  const siteMetrics = derived.metrics.siteMetrics.filter((metric) => {
-    const site = state.sites.find((entry) => entry.id === metric.siteId);
+  const financialPulse = state.financialPulse && typeof state.financialPulse === "object" ? state.financialPulse : {};
+  const pulse = financialPulse[state.session.period] || financialPulse["This Week"] || Object.values(financialPulse)[0] || EMPTY_PULSE;
+  const cashFlowTrend = Array.isArray(pulse.cashFlowTrend) && pulse.cashFlowTrend.length ? pulse.cashFlowTrend : EMPTY_PULSE.cashFlowTrend;
+  const sites = Array.isArray(state.sites) ? state.sites : [];
+  const approvals = Array.isArray(state.approvals) ? state.approvals : [];
+  const toolboxTalks = Array.isArray(state.toolboxTalks) ? state.toolboxTalks : [];
+  const presenceExports = Array.isArray(state.presence?.exports) ? state.presence.exports : [];
+  const schedules = Array.isArray(state.schedules) ? state.schedules : [];
+  const qa = Array.isArray(state.qa) ? state.qa : [];
+  const safety = Array.isArray(state.safety) ? state.safety : [];
+  const procurement = Array.isArray(state.procurement) ? state.procurement : [];
+  const siteMetrics = (derived.metrics?.siteMetrics || []).filter((metric) => {
+    const site = sites.find((entry) => entry.id === metric.siteId);
     if (riskFilter !== "all" && metric.riskBand !== riskFilter) return false;
     if (regionFilter !== "all" && site?.region !== regionFilter) return false;
     if (statusFilter !== "all" && site?.status !== statusFilter) return false;
     return true;
   });
-  const exposureRows = state.approvals.filter((approval) => !["signed", "declined"].includes(approval.status));
+  const exposureRows = approvals.filter((approval) => !["signed", "fully-signed", "declined", "archived"].includes(approval.status));
   const toolboxCompliance = Math.round(
-    (state.toolboxTalks.reduce((sum, talk) => sum + talk.acknowledgements.length, 0) /
-      Math.max(1, state.toolboxTalks.reduce((sum, talk) => sum + talk.requiredFor.length, 0))) *
+    (toolboxTalks.reduce((sum, talk) => sum + (talk.acknowledgements?.length || 0), 0) /
+      Math.max(1, toolboxTalks.reduce((sum, talk) => sum + (talk.requiredFor?.length || 0), 0))) *
       100,
   );
 
-  const totalLabourHours = state.presence.exports.reduce((sum, entry) => sum + entry.verifiedHours + entry.flaggedHours, 0);
-  const avgCrew = Math.round(state.sites.reduce((sum, site) => sum + site.crewToday, 0) / Math.max(1, state.sites.length));
+  const totalLabourHours = presenceExports.reduce((sum, entry) => sum + (Number(entry.verifiedHours) || 0) + (Number(entry.flaggedHours) || 0), 0);
+  const avgCrew = Math.round(sites.reduce((sum, site) => sum + (Number(site.crewToday) || 0), 0) / Math.max(1, sites.length));
   const riskRadar = {
-    commercial: Math.min(100, Math.round((derived.metrics.portfolio.totalMarginAtRisk / Math.max(1, derived.metrics.portfolio.totalContractValue)) * 600)),
-    programme: Math.min(100, Math.round((state.schedules.flatMap((schedule) => schedule.impacts).reduce((sum, impact) => sum + impact.days, 0) / 20) * 100)),
-    quality: Math.min(100, Math.round((state.qa.filter((entry) => entry.status === "failed").length / Math.max(1, state.qa.length)) * 100)),
-    safety: Math.min(100, Math.round((state.safety.filter((entry) => ["critical", "incident"].includes(entry.type)).length / Math.max(1, state.safety.length)) * 100)),
+    commercial: Math.min(100, Math.round(((derived.metrics?.portfolio?.totalMarginAtRisk || 0) / Math.max(1, derived.metrics?.portfolio?.totalContractValue || 0)) * 600)),
+    programme: Math.min(100, Math.round((schedules.flatMap((schedule) => (Array.isArray(schedule.impacts) ? schedule.impacts : [])).reduce((sum, impact) => sum + (Number(impact.days) || 0), 0) / 20) * 100)),
+    quality: Math.min(100, Math.round((qa.filter((entry) => entry.status === "failed").length / Math.max(1, qa.length)) * 100)),
+    safety: Math.min(100, Math.round((safety.filter((entry) => ["critical", "incident"].includes(entry.type)).length / Math.max(1, safety.length)) * 100)),
     client: Math.min(100, Math.round((100 - Object.values(state.clientSentiment || {}).reduce((sum, entry) => sum + (entry.score || 60), 0) / Math.max(1, Object.keys(state.clientSentiment || {}).length)))),
-    procurement: Math.min(100, Math.round((state.procurement.filter((entry) => ["delayed", "escalated"].includes(entry.status)).length / Math.max(1, state.procurement.length)) * 100)),
+    procurement: Math.min(100, Math.round((procurement.filter((entry) => ["delayed", "escalated"].includes(entry.status)).length / Math.max(1, procurement.length)) * 100)),
   };
 
   return (
     <div className="oy fin">
       <div className="boardroom-header">
         <div>
-          <div className="boardroom-kicker">{state.company.legalName}</div>
+          <div className="boardroom-kicker">{state.company?.legalName || state.settings?.company?.name || state.company?.name || "SiteForge"}</div>
           <h1>Director Boardroom</h1>
         </div>
         <div className="fx" style={{ gap: 8 }}>
@@ -87,44 +105,57 @@ export default function DirectorBoardroom() {
         </Card>
       ) : null}
 
+      {!sites.length ? (
+        <Card title="Boardroom setup" icon={Icons.briefcase} className="mb8">
+          <div className="sm ct2">
+            No projects are available yet, so portfolio metrics are showing safe zero values. Restart onboarding or create a project to populate the boardroom.
+          </div>
+          <div className="fx" style={{ gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <Button tone="bt-p" onClick={() => actions.restartOnboarding()}>
+              Restart Onboarding
+            </Button>
+          </div>
+        </Card>
+      ) : null}
+
       <div className="sts g4 mb8">
         <div className="si g">
           <div className="sl">Active Projects</div>
-          <div className="sv">{derived.metrics.portfolio.activeProjects}</div>
+          <div className="sv">{derived.metrics?.portfolio?.activeProjects || 0}</div>
         </div>
         <div className="si a">
           <div className="sl">Total Contract Value</div>
-          <div className="sv">${(derived.metrics.portfolio.totalContractValue / 1e6).toFixed(1)}M</div>
+          <div className="sv">${((derived.metrics?.portfolio?.totalContractValue || 0) / 1e6).toFixed(1)}M</div>
         </div>
         <div className="si r">
           <div className="sl">Margin At Risk</div>
-          <div className="sv">${Math.round(derived.metrics.portfolio.totalMarginAtRisk / 1000)}k</div>
+          <div className="sv">${Math.round((derived.metrics?.portfolio?.totalMarginAtRisk || 0) / 1000)}k</div>
         </div>
         <div className="si b">
           <div className="sl">Margin Movement</div>
-          <div className="sv">{Math.round(derived.metrics.portfolio.verifiedLabourPct)}%</div>
+          <div className="sv">{Math.round(derived.metrics?.portfolio?.verifiedLabourPct || 0)}%</div>
         </div>
       </div>
 
       <div className="g4 mb8">
         <Card title="Revenue Recognised" icon={Icons.dollar}>
           <div className="cr">
-            <span>{state.session.period}</span>${pulse.revenueRecognised.toLocaleString()}
+            <span>{state.session.period}</span>${(pulse.revenueRecognised || 0).toLocaleString()}
           </div>
         </Card>
         <Card title="Contingency Consumed" icon={Icons.alert}>
           <div className="cr">
-            <span>Current Period</span>${pulse.contingencyConsumed.toLocaleString()}
+            <span>Current Period</span>${(pulse.contingencyConsumed || 0).toLocaleString()}
           </div>
         </Card>
         <Card title="Variation Exposure" icon={Icons.shuffle}>
           <div className="cr">
-            <span>Unapproved</span>${pulse.variationExposure.toLocaleString()}
+            <span>Unapproved</span>${(pulse.variationExposure || 0).toLocaleString()}
           </div>
         </Card>
         <Card title="Cash Flow Indicator" icon={Icons.trending}>
           <div className="sparkline">
-            {pulse.cashFlowTrend.map((value, index) => (
+            {cashFlowTrend.map((value, index) => (
               <span key={`${value}-${index}`} style={{ height: `${value}%` }} />
             ))}
           </div>
@@ -154,14 +185,14 @@ export default function DirectorBoardroom() {
       <Card title="Portfolio Heatmap" icon={Icons.grid} className="mb8">
         <div className="heatmap-grid">
           {siteMetrics.map((metric) => {
-            const site = state.sites.find((entry) => entry.id === metric.siteId);
+            const site = sites.find((entry) => entry.id === metric.siteId);
             return (
               <button className={`heatmap-tile ${metric.riskBand}`} key={metric.siteId} onClick={() => actions.navigate({ kind: "director", page: "boardroom", siteId: metric.siteId, entityId: null })} type="button">
                 <div className="b sm">{site?.name || metric.siteId}</div>
                 <div className="xs ct3">{site?.progress ?? 0}% complete</div>
                 <div className="heatmap-score">{metric.riskScore}</div>
                 <div className="xs ct2" style={{ marginTop: 6 }}>
-                  Margin position {metric.marginPosition.toFixed(1)}%
+                  Margin position {(metric.marginPosition || 0).toFixed(1)}%
                 </div>
               </button>
             );
@@ -191,9 +222,9 @@ export default function DirectorBoardroom() {
                         <div className="b sm">{approval.title}</div>
                         <div className="xs ct3">{approval.type}</div>
                       </td>
-                      <td className="xs">{state.sites.find((site) => site.id === approval.siteId)?.name || approval.siteId}</td>
+                      <td className="xs">{sites.find((site) => site.id === approval.siteId)?.name || approval.siteId}</td>
                       <td className="xs">{ageLabel(approval)}</td>
-                      <td className="mono xs">${approval.costImpact.toLocaleString()}</td>
+                      <td className="mono xs">${(approval.costImpact || 0).toLocaleString()}</td>
                       <td>
                         <Badge tone={approval.status === "question" ? "high" : "medium"}>{approval.status}</Badge>
                       </td>
@@ -219,11 +250,11 @@ export default function DirectorBoardroom() {
           </Card>
 
           <Card title="AI Insights" icon={Icons.zap}>
-            <div className="client-copy">{derived.boardInsight.summary}</div>
+            <div className="client-copy">{derived.boardInsight?.summary || "No portfolio signals are available yet. Add projects and operational activity to generate board insights."}</div>
             <div className="g3" style={{ marginTop: 10 }}>
               <div className="mini-panel">
                 <div className="xs ct3">Top risks</div>
-                {derived.boardInsight.topRisks.map((item) => (
+                {(derived.boardInsight?.topRisks || []).map((item) => (
                   <div className="sm ct2" key={item} style={{ marginTop: 6 }}>
                     {item}
                   </div>
@@ -231,7 +262,7 @@ export default function DirectorBoardroom() {
               </div>
               <div className="mini-panel">
                 <div className="xs ct3">Top wins</div>
-                {derived.boardInsight.topWins.map((item) => (
+                {(derived.boardInsight?.topWins || []).map((item) => (
                   <div className="sm ct2" key={item} style={{ marginTop: 6 }}>
                     {item}
                   </div>
@@ -239,7 +270,7 @@ export default function DirectorBoardroom() {
               </div>
               <div className="mini-panel">
                 <div className="xs ct3">Suggested actions</div>
-                {derived.boardInsight.suggestedActions.map((item) => (
+                {(derived.boardInsight?.suggestedActions || []).map((item) => (
                   <div className="sm ct2" key={item} style={{ marginTop: 6 }}>
                     {item}
                   </div>
@@ -322,7 +353,7 @@ export default function DirectorBoardroom() {
                 <div className="b sm">Presence verified</div>
                 <div className="xs ct3">Of billed labour records</div>
               </div>
-              <Badge tone="passed">{derived.metrics.portfolio.verifiedLabourPct}%</Badge>
+              <Badge tone="passed">{derived.metrics?.portfolio?.verifiedLabourPct || 0}%</Badge>
             </div>
           </Card>
 
@@ -332,7 +363,7 @@ export default function DirectorBoardroom() {
                 <div className="b sm">Avg client response time</div>
                 <div className="xs ct3">Sent to decision</div>
               </div>
-              <span className="mono bb">{derived.metrics.portfolio.clientVelocityHours}h</span>
+              <span className="mono bb">{derived.metrics?.portfolio?.clientVelocityHours || 0}h</span>
             </div>
             <div className="linked-row">
               <div>
@@ -341,7 +372,7 @@ export default function DirectorBoardroom() {
               </div>
               <span className="mono bb">
                 $
-                {state.approvals
+                {approvals
                   .filter((approval) => approval.status === "signed")
                   .reduce((sum, approval) => sum + approval.costImpact, 0)
                   .toLocaleString()}
@@ -350,7 +381,7 @@ export default function DirectorBoardroom() {
           </Card>
           <Card title="Director Controls" icon={Icons.flag}>
             <div className="list-stack">
-              {state.sites.map((site) => (
+              {sites.map((site) => (
                 <div className="linked-row" key={site.id}>
                   <div>
                     <div className="b sm">{site.name}</div>
