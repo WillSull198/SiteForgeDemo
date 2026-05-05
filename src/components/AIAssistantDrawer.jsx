@@ -1,9 +1,9 @@
 /* SiteForge audit: Expanded the assistant from static suggestions into a working
-   AI chat drawer that can call the configured Claude service and falls back to
+   AI chat drawer that can call the configured AI provider and falls back to
    SiteForge's local drafting intelligence during demos. */
 
 import { useMemo, useState } from "react";
-import { askSiteForgeAi } from "../services/aiService";
+import { askSiteForgeAi, getStoredAiConfig } from "../services/aiService";
 import { mustHandUpForApproval, routeKindForRole } from "../services/permissions";
 import { useSiteForge } from "../services/siteforgeStore";
 import { Icons, renderIcon } from "./icons";
@@ -150,12 +150,13 @@ export default function AIAssistantDrawer({ open, onClose }) {
                 setChat((current) => [...current, outgoing]);
                 setMessage("");
                 setLoading(true);
+                const aiConfig = getStoredAiConfig(state.device?.settings?.integrations || state.settings?.integrations || {});
                 const result = await askSiteForgeAi({
                   userMessage: outgoing.text,
-	                  projectContext: { ...projectContext, orgMode: state.org?.mode },
-                  apiKey:
-                    (typeof window !== "undefined" ? window.localStorage.getItem("siteforge-anthropic-key") : "") ||
-                    state.settings?.integrations?.anthropicApiKey,
+                  projectContext: { ...projectContext, orgMode: state.org?.mode },
+                  provider: aiConfig.provider,
+                  apiKey: aiConfig.apiKey,
+                  model: aiConfig.model,
                 });
                 setChat((current) => [...current, { id: `a-${Date.now()}`, role: "assistant", text: result.text, source: result.source }]);
                 setLoading(false);

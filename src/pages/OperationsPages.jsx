@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { flagBudgetAnomaly, suggestRFI } from "../services/aiDraftService";
-import { askSiteForgeAi } from "../services/aiService";
+import { AI_PROVIDERS, AI_STORAGE_KEYS, DEFAULT_AI_MODELS, askSiteForgeAi, getStoredAiConfig, normaliseAiProvider } from "../services/aiService";
 import DataTable from "../components/DataTable";
 import FileDropZone from "../components/FileDropZone";
 import PhotoUpload from "../components/PhotoUpload";
@@ -1881,11 +1881,13 @@ function DocumentsPage() {
         };
       })
       .filter((document) => document.extractedText);
-    const apiKey = typeof window !== "undefined" ? window.localStorage.getItem("siteforge-anthropic-key") : "";
+    const aiConfig = getStoredAiConfig(state.device?.settings?.integrations || state.settings?.integrations || {});
     try {
       const result = await askSiteForgeAi({
-        apiKey,
-	        projectContext: { siteId, documents: documentContext, orgMode: state.org?.mode },
+        provider: aiConfig.provider,
+        apiKey: aiConfig.apiKey,
+        model: aiConfig.model,
+        projectContext: { siteId, documents: documentContext, orgMode: state.org?.mode },
         userMessage: `Plan search query: "${planQuery}".
 
 Search these SiteForge construction documents and respond only as JSON:
@@ -1899,11 +1901,11 @@ Search these SiteForge construction documents and respond only as JSON:
 Documents:
 ${JSON.stringify(documentContext)}`,
       });
-      if (result.source === "claude") {
+      if (result.source === "claude" || result.source === "openai") {
         const match = result.text.match(/\{[\s\S]*\}/);
         const parsed = JSON.parse(match ? match[0] : result.text);
         setPlanSearchSummary(parsed.summary || "");
-        setPlanSearchSource("claude");
+        setPlanSearchSource(result.source);
         setPlanResults(
           (parsed.results || []).map((entry, index) => {
             const document = documents.find((item) => item.id === entry.documentId || item.drawingNumber === entry.drawingNumber);
@@ -2090,9 +2092,9 @@ ${JSON.stringify(documentContext)}`,
                     {planSearchLoading ? "Searching..." : "Search"}
                   </Button>
                 </div>
-                {planSearchSource && planSearchSource !== "claude" ? (
+                {planSearchSource && !["claude", "openai"].includes(planSearchSource) ? (
                   <div className="xs ct3" style={{ marginTop: 8 }}>
-                    <Badge tone="medium">Keyword match</Badge> Add Claude API key in Settings for AI plan search.
+                    <Badge tone="medium">Keyword match</Badge> Add a Claude or ChatGPT API key in Settings for AI plan search.
                   </div>
                 ) : null}
                 {planSearchSummary ? <div className="mini-panel sm ct2" style={{ marginTop: 8 }}>{planSearchSummary}</div> : null}
@@ -2746,7 +2748,8 @@ function ReportsPage() {
 function AdminPage() {
   const { actions, derived, state } = useSiteForge();
   const currentUser = derived.currentUser;
-  const deviceApiKey = typeof window !== "undefined" ? window.localStorage.getItem("siteforge-anthropic-key") || "" : "";
+  const integrationSettings = state.device?.settings?.integrations || state.settings?.integrations || {};
+  const storedAiConfig = getStoredAiConfig(integrationSettings);
   const [companyForm, setCompanyForm] = useState({
     name: state.org?.settings?.company?.name || state.settings?.company?.name || state.company?.name || "",
     legalName: state.org?.settings?.company?.legalName || state.settings?.company?.legalName || state.company?.legalName || "",
@@ -2759,8 +2762,12 @@ function AdminPage() {
     logoDataUrl: state.org?.settings?.company?.logoDataUrl || state.settings?.company?.logoDataUrl || "",
   });
   const [integrationsForm, setIntegrationsForm] = useState({
-    anthropicApiKey: deviceApiKey,
-    aiModel: state.device?.settings?.integrations?.aiModel || state.settings?.integrations?.aiModel || "claude-sonnet-4-20250514",
+    aiProvider: storedAiConfig.provider,
+    anthropicApiKey: storedAiConfig.anthropicKey,
+    openaiApiKey: storedAiConfig.openaiKey,
+    aiModel: storedAiConfig.model,
+    anthropicModel: integrationSettings.anthropicModel || integrationSettings.aiModel || DEFAULT_AI_MODELS.anthropic,
+    openaiModel: integrationSettings.openaiModel || DEFAULT_AI_MODELS.openai,
     buildxactApiKey: state.device?.settings?.integrations?.buildxactApiKey || state.settings?.integrations?.buildxactApiKey || "",
     buildxactWorkspaceId: state.device?.settings?.integrations?.buildxactWorkspaceId || state.settings?.integrations?.buildxactWorkspaceId || "",
   });
@@ -2780,7 +2787,7 @@ function AdminPage() {
   const [settingsMessage, setSettingsMessage] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [importCandidate, setImportCandidate] = useState(null);
-  const [testingClaude, setTestingClaude] = useState(false);
+  const [testingAi, setTestingAi] = useState(false);
 
   const saveCompany = () => {
     if (!companyForm.name.trim()) {
@@ -2805,41 +2812,63 @@ function AdminPage() {
   };
 
   const saveIntegrations = () => {
+    const provider = normaliseAiProvider(integrationsForm.aiProvider);
+    const activeModel = provider === AI_PROVIDERS.OPENAI ? integrationsForm.openaiModel : integrationsForm.anthropicModel;
     if (typeof window !== "undefined") {
       if (integrationsForm.anthropicApiKey.trim()) {
-        window.localStorage.setItem("siteforge-anthropic-key", integrationsForm.anthropicApiKey.trim());
+        window.localStorage.setItem(AI_STORAGE_KEYS.anthropic, integrationsForm.anthropicApiKey.trim());
       } else {
-        window.localStorage.removeItem("siteforge-anthropic-key");
+        window.localStorage.removeItem(AI_STORAGE_KEYS.anthropic);
       }
+      if (integrationsForm.openaiApiKey.trim()) {
+        window.localStorage.setItem(AI_STORAGE_KEYS.openai, integrationsForm.openaiApiKey.trim());
+      } else {
+        window.localStorage.removeItem(AI_STORAGE_KEYS.openai);
+      }
+      window.localStorage.setItem(AI_STORAGE_KEYS.provider, provider);
     }
     actions.updateSettings("integrations", {
-      aiModel: integrationsForm.aiModel,
+      aiProvider: provider,
+      aiModel: activeModel,
+      anthropicModel: integrationsForm.anthropicModel,
+      openaiModel: integrationsForm.openaiModel,
       anthropicConfigured: Boolean(integrationsForm.anthropicApiKey.trim()),
+      openaiConfigured: Boolean(integrationsForm.openaiApiKey.trim()),
       buildxactApiKey: integrationsForm.buildxactApiKey,
       buildxactWorkspaceId: integrationsForm.buildxactWorkspaceId,
     });
-    setSettingsMessage("Integration settings saved. Claude key is stored on this device only.");
+    setSettingsMessage("Integration settings saved. AI keys are stored on this device only.");
   };
 
-  const testClaudeConnection = async () => {
-    setTestingClaude(true);
+  const testAiConnection = async () => {
+    const provider = normaliseAiProvider(integrationsForm.aiProvider);
+    const apiKey = provider === AI_PROVIDERS.OPENAI ? integrationsForm.openaiApiKey.trim() : integrationsForm.anthropicApiKey.trim();
+    const model = provider === AI_PROVIDERS.OPENAI ? integrationsForm.openaiModel : integrationsForm.anthropicModel;
+    const providerName = provider === AI_PROVIDERS.OPENAI ? "OpenAI" : "Claude";
+    if (!apiKey) {
+      setSettingsMessage(`Paste a ${providerName} API key first.`);
+      return;
+    }
+    setTestingAi(true);
     try {
       const result = await askSiteForgeAi({
         userMessage: "Reply with the word 'pong' only.",
-	        projectContext: { orgMode: state.org?.mode },
-        apiKey: integrationsForm.anthropicApiKey.trim(),
+        projectContext: { orgMode: state.org?.mode },
+        provider,
+        apiKey,
+        model,
       });
-      if (result.source === "claude" && /pong/i.test(result.text || "")) {
-        setSettingsMessage("✓ Claude API key works.");
-      } else if (result.source === "claude-error") {
-        setSettingsMessage(result.text || "Claude API key test failed.");
+      if ((result.source === "claude" || result.source === "openai") && /pong/i.test(result.text || "")) {
+        setSettingsMessage(`✓ ${providerName} API key works.`);
+      } else if (result.source === "claude-error" || result.source === "openai-error") {
+        setSettingsMessage(result.text || `${providerName} API key test failed.`);
       } else {
-        setSettingsMessage("Key did not produce a Claude response. Check the key, model name, and that your account has API access.");
+        setSettingsMessage(`Key did not produce a ${providerName} response. Check the key, model name, and that your account has API access.`);
       }
     } catch (error) {
-      setSettingsMessage(`Claude API key test failed: ${error?.message || "Unknown error"}`);
+      setSettingsMessage(`${providerName} API key test failed: ${error?.message || "Unknown error"}`);
     } finally {
-      setTestingClaude(false);
+      setTestingAi(false);
     }
   };
 
@@ -3007,13 +3036,40 @@ function AdminPage() {
         </Card>
         <Card title="Device Settings: Integrations" icon={Icons.zap}>
           <div className="ff">
+            <label>AI provider</label>
+            <select
+              value={integrationsForm.aiProvider}
+              onChange={(event) =>
+                setIntegrationsForm((current) => {
+                  const provider = normaliseAiProvider(event.target.value);
+                  return {
+                    ...current,
+                    aiProvider: provider,
+                    aiModel: provider === AI_PROVIDERS.OPENAI ? current.openaiModel : current.anthropicModel,
+                  };
+                })
+              }
+            >
+              <option value={AI_PROVIDERS.ANTHROPIC}>Claude / Anthropic</option>
+              <option value={AI_PROVIDERS.OPENAI}>ChatGPT / OpenAI</option>
+            </select>
+            <div className="xs ct3" style={{ marginTop: 4 }}>Choose whichever API key you have. Keys stay in this browser only.</div>
+          </div>
+          <div className="ff">
             <label>Claude API key</label>
-            <input type="password" value={integrationsForm.anthropicApiKey} onChange={(event) => setIntegrationsForm((current) => ({ ...current, anthropicApiKey: event.target.value }))} />
-            <div className="xs ct3" style={{ marginTop: 4 }}>Stored in this browser only, not in exported demo data.</div>
+            <input type="password" value={integrationsForm.anthropicApiKey} onChange={(event) => setIntegrationsForm((current) => ({ ...current, anthropicApiKey: event.target.value }))} placeholder="sk-ant-..." />
           </div>
           <div className="ff">
             <label>Claude model</label>
-            <input value={integrationsForm.aiModel} onChange={(event) => setIntegrationsForm((current) => ({ ...current, aiModel: event.target.value }))} />
+            <input value={integrationsForm.anthropicModel} onChange={(event) => setIntegrationsForm((current) => ({ ...current, anthropicModel: event.target.value, aiModel: current.aiProvider === AI_PROVIDERS.ANTHROPIC ? event.target.value : current.aiModel }))} />
+          </div>
+          <div className="ff">
+            <label>ChatGPT / OpenAI API key</label>
+            <input type="password" value={integrationsForm.openaiApiKey} onChange={(event) => setIntegrationsForm((current) => ({ ...current, openaiApiKey: event.target.value }))} placeholder="sk-..." />
+          </div>
+          <div className="ff">
+            <label>OpenAI model</label>
+            <input value={integrationsForm.openaiModel} onChange={(event) => setIntegrationsForm((current) => ({ ...current, openaiModel: event.target.value, aiModel: current.aiProvider === AI_PROVIDERS.OPENAI ? event.target.value : current.aiModel }))} />
           </div>
           <div className="ff">
             <label>Buildxact API key</label>
@@ -3027,17 +3083,20 @@ function AdminPage() {
             <Button tone="bt-p" onClick={saveIntegrations}>
               Save Integration Settings
             </Button>
-            <Button onClick={testClaudeConnection} disabled={testingClaude}>
-              {testingClaude ? "Testing..." : "Test Connection"}
+            <Button onClick={testAiConnection} disabled={testingAi}>
+              {testingAi ? "Testing..." : "Test AI Connection"}
             </Button>
             <Button
               onClick={() => {
-                if (typeof window !== "undefined") window.localStorage.removeItem("siteforge-anthropic-key");
-                setIntegrationsForm((current) => ({ ...current, anthropicApiKey: "" }));
-                setSettingsMessage("Claude API key cleared from this device.");
+                if (typeof window !== "undefined") {
+                  window.localStorage.removeItem(AI_STORAGE_KEYS.anthropic);
+                  window.localStorage.removeItem(AI_STORAGE_KEYS.openai);
+                }
+                setIntegrationsForm((current) => ({ ...current, anthropicApiKey: "", openaiApiKey: "" }));
+                setSettingsMessage("AI API keys cleared from this device.");
               }}
             >
-              Clear Claude Key
+              Clear AI Keys
             </Button>
           </div>
         </Card>

@@ -354,8 +354,13 @@ function createBlankSlate() {
       user: { name: "", email: "", phone: "", defaultRole: "Director" },
       notifications: DEFAULT_NOTIFICATION_PREFS,
       integrations: {
+        aiProvider: "anthropic",
+        aiModel: "claude-sonnet-4-20250514",
+        anthropicModel: "claude-sonnet-4-20250514",
+        openaiModel: "gpt-5.2",
         anthropicApiKey: "",
         anthropicConfigured: false,
+        openaiConfigured: false,
         buildxactApiKey: "",
         buildxactWorkspaceId: "",
         buildxactConnected: false,
@@ -3118,7 +3123,12 @@ export function SiteForgeProvider({ children }) {
           const next = cloneState(previous);
           next.settings.integrations = {
             ...(next.settings.integrations || {}),
+            aiProvider: payload.aiProvider || next.settings.integrations?.aiProvider || "anthropic",
+            aiModel: payload.aiModel || next.settings.integrations?.aiModel || "claude-sonnet-4-20250514",
+            anthropicModel: payload.anthropicModel || next.settings.integrations?.anthropicModel || "claude-sonnet-4-20250514",
+            openaiModel: payload.openaiModel || next.settings.integrations?.openaiModel || "gpt-5.2",
             anthropicConfigured: Boolean(payload.anthropicConfigured),
+            openaiConfigured: Boolean(payload.openaiConfigured),
             buildxactConnected: false,
             buildxactApiKey: payload.buildxactApiKey || "",
             buildxactWorkspaceId: payload.buildxactWorkspaceId || "",

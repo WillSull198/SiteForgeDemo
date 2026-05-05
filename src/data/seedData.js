@@ -2805,7 +2805,13 @@ export function createInitialData() {
         },
       },
       integrations: {
+        aiProvider: "anthropic",
+        aiModel: "claude-sonnet-4-20250514",
+        anthropicModel: "claude-sonnet-4-20250514",
+        openaiModel: "gpt-5.2",
         anthropicApiKey: "",
+        anthropicConfigured: false,
+        openaiConfigured: false,
         buildxactApiKey: "",
         buildxactWorkspaceId: "BX-WORKSPACE-DEMO",
         buildxactConnected: true,

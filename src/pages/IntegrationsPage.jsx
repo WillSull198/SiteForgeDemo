@@ -5,6 +5,7 @@ import { Badge, Button, Card, MetricGrid, Modal, RestrictedPanel, Tabs } from ".
 import { useSiteForge } from "../services/siteforgeStore";
 import { can } from "../services/permissions";
 import { SYNC_ENTITY_TOGGLES } from "../services/integrations/buildxact/schemas";
+import { getStoredAiConfig } from "../services/aiService";
 
 const copyJson = async (payload) => {
   if (!payload) return;
@@ -32,6 +33,9 @@ export default function IntegrationsPage() {
   const [payloadPreview, setPayloadPreview] = useState(null);
   const [slashCommand, setSlashCommand] = useState("/siteforge approvals stalled");
   const integrationSettings = state.settings?.integrations || {};
+  const aiConfig = getStoredAiConfig(state.device?.settings?.integrations || integrationSettings);
+  const aiConnected = aiConfig.provider === "openai" ? Boolean(aiConfig.openaiKey) : Boolean(aiConfig.anthropicKey);
+  const aiProviderLabel = aiConfig.provider === "openai" ? "ChatGPT / OpenAI" : "Claude / Anthropic";
 
   const metrics = [
     { label: "Email Queue", value: state.emailQueue?.filter((item) => item.status === "queued").length || 0, color: "b" },
@@ -68,7 +72,7 @@ export default function IntegrationsPage() {
           <Card title="Integration Status" icon={Icons.gear}>
             {[
               ["Buildxact", state.buildxact.connection.status || "disconnected", "Connect Buildxact"],
-              ["Anthropic", integrationSettings.anthropicConfigured ? "connected" : "not configured", "Add API key"],
+              ["AI Provider", `${aiProviderLabel} · ${aiConnected ? "connected" : "not configured"}`, "Add API key"],
               ["Email", integrationSettings.emailProvider || "queued-only", "Open email queue"],
               ["SMS", integrationSettings.smsProvider || "queued-only", "Open SMS queue"],
               ["Microsoft Teams", state.teams?.connected ? "connected" : "disconnected", "Open Teams queue"],
@@ -79,7 +83,16 @@ export default function IntegrationsPage() {
                   <div className="xs ct3">{status}</div>
                 </div>
                 <Badge tone={String(status).includes("connected") ? "passed" : String(status).includes("queued") ? "medium" : "critical"}>{status}</Badge>
-                <Button small onClick={() => setTab(name === "Email" ? "email" : name === "SMS" ? "sms" : name === "Microsoft Teams" ? "teams" : name === "Buildxact" ? "buildxact" : "buildxact")}>{action}</Button>
+                <Button
+                  small
+                  onClick={() =>
+                    name === "AI Provider"
+                      ? actions.navigate({ kind: "internal", siteId: state.session.siteId, page: "admin", entityId: null })
+                      : setTab(name === "Email" ? "email" : name === "SMS" ? "sms" : name === "Microsoft Teams" ? "teams" : name === "Buildxact" ? "buildxact" : "buildxact")
+                  }
+                >
+                  {action}
+                </Button>
               </div>
             ))}
           </Card>

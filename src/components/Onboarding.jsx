@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { askSiteForgeAi } from "../services/aiService";
+import { AI_PROVIDERS, AI_STORAGE_KEYS, DEFAULT_AI_MODELS, askSiteForgeAi, normaliseAiProvider } from "../services/aiService";
 import { formatters } from "../utils/formatters";
 import { validateStructuredAddress, validators } from "../utils/validators";
 import { Badge, Button, Card } from "./ui";
@@ -89,7 +89,15 @@ export default function Onboarding({ state, actions }) {
     pmId: "",
     notes: "",
   });
-  const [integrations, setIntegrations] = useState({ anthropicApiKey: "", buildxactApiKey: "", buildxactWorkspaceId: "" });
+  const [integrations, setIntegrations] = useState({
+    aiProvider: AI_PROVIDERS.ANTHROPIC,
+    anthropicApiKey: "",
+    openaiApiKey: "",
+    anthropicModel: DEFAULT_AI_MODELS.anthropic,
+    openaiModel: DEFAULT_AI_MODELS.openai,
+    buildxactApiKey: "",
+    buildxactWorkspaceId: "",
+  });
   const [aiStatus, setAiStatus] = useState("");
   const [testingAi, setTestingAi] = useState(false);
 
@@ -138,31 +146,63 @@ export default function Onboarding({ state, actions }) {
   };
 
   const testAi = async () => {
-    if (!integrations.anthropicApiKey.trim()) {
+    const provider = normaliseAiProvider(integrations.aiProvider);
+    const apiKey = provider === AI_PROVIDERS.OPENAI ? integrations.openaiApiKey.trim() : integrations.anthropicApiKey.trim();
+    const model = provider === AI_PROVIDERS.OPENAI ? integrations.openaiModel : integrations.anthropicModel;
+    const providerName = provider === AI_PROVIDERS.OPENAI ? "OpenAI" : "Claude";
+    if (!apiKey) {
       setAiStatus("Paste a key first, or skip this step.");
       return;
     }
-    if (!/^sk-ant-/.test(integrations.anthropicApiKey.trim())) {
+    if (provider === AI_PROVIDERS.ANTHROPIC && !/^sk-ant-/.test(apiKey)) {
       setAiStatus("Anthropic keys normally start with sk-ant-. Check the value before saving.");
       return;
     }
-    setTestingAi(true);
-    const result = await askSiteForgeAi({ userMessage: "Reply with the word 'pong' only.", projectContext: { orgMode: state.org?.mode }, apiKey: integrations.anthropicApiKey.trim() });
-    if (result.source === "claude" && /pong/i.test(result.text || "")) {
-      window.localStorage.setItem("siteforge-anthropic-key", integrations.anthropicApiKey.trim());
-      setAiStatus("Claude API key works.");
-    } else {
-      setAiStatus(result.text || "Claude did not return a valid test response.");
+    if (provider === AI_PROVIDERS.OPENAI && !/^sk-/.test(apiKey)) {
+      setAiStatus("OpenAI API keys normally start with sk-. Check the value before saving.");
+      return;
     }
-    setTestingAi(false);
+    setTestingAi(true);
+    try {
+      const result = await askSiteForgeAi({
+        userMessage: "Reply with the word 'pong' only.",
+        projectContext: { orgMode: state.org?.mode },
+        provider,
+        apiKey,
+        model,
+      });
+      if ((result.source === "claude" || result.source === "openai") && /pong/i.test(result.text || "")) {
+        window.localStorage.setItem(provider === AI_PROVIDERS.OPENAI ? AI_STORAGE_KEYS.openai : AI_STORAGE_KEYS.anthropic, apiKey);
+        window.localStorage.setItem(AI_STORAGE_KEYS.provider, provider);
+        setAiStatus(`${providerName} API key works.`);
+      } else {
+        setAiStatus(result.text || `${providerName} did not return a valid test response.`);
+      }
+    } catch (error) {
+      setAiStatus(`${providerName} test failed: ${error?.message || "Unknown error"}`);
+    } finally {
+      setTestingAi(false);
+    }
   };
 
   const saveIntegrations = () => {
-    if (integrations.anthropicApiKey.trim()) {
-      window.localStorage.setItem("siteforge-anthropic-key", integrations.anthropicApiKey.trim());
+    const provider = normaliseAiProvider(integrations.aiProvider);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(AI_STORAGE_KEYS.provider, provider);
+      if (integrations.anthropicApiKey.trim()) {
+        window.localStorage.setItem(AI_STORAGE_KEYS.anthropic, integrations.anthropicApiKey.trim());
+      }
+      if (integrations.openaiApiKey.trim()) {
+        window.localStorage.setItem(AI_STORAGE_KEYS.openai, integrations.openaiApiKey.trim());
+      }
     }
     actions.saveOnboardingIntegrations({
+      aiProvider: provider,
+      aiModel: provider === AI_PROVIDERS.OPENAI ? integrations.openaiModel : integrations.anthropicModel,
+      anthropicModel: integrations.anthropicModel,
+      openaiModel: integrations.openaiModel,
       anthropicConfigured: Boolean(integrations.anthropicApiKey.trim()),
+      openaiConfigured: Boolean(integrations.openaiApiKey.trim()),
       buildxactConnected: Boolean(integrations.buildxactApiKey.trim() && integrations.buildxactWorkspaceId.trim()),
       buildxactApiKey: integrations.buildxactApiKey.trim(),
       buildxactWorkspaceId: integrations.buildxactWorkspaceId.trim(),
@@ -289,9 +329,23 @@ export default function Onboarding({ state, actions }) {
                 <input placeholder="API key" value={integrations.buildxactApiKey} onChange={(event) => setIntegrations({ ...integrations, buildxactApiKey: event.target.value })} />
                 <input placeholder="Workspace ID" value={integrations.buildxactWorkspaceId} onChange={(event) => setIntegrations({ ...integrations, buildxactWorkspaceId: event.target.value })} style={{ marginTop: 8 }} />
               </Card>
-              <Card title="Anthropic AI">
-                <p className="sm ct2">AI drafting and plan search use Claude when a key is present. Without it, SiteForge uses local keyword/template fallback.</p>
-                <input type="password" placeholder="sk-ant-..." value={integrations.anthropicApiKey} onChange={(event) => setIntegrations({ ...integrations, anthropicApiKey: event.target.value })} />
+              <Card title="AI provider">
+                <p className="sm ct2">Choose the provider you have. Without a key, SiteForge uses local keyword/template fallback.</p>
+                <select value={integrations.aiProvider} onChange={(event) => setIntegrations({ ...integrations, aiProvider: event.target.value })}>
+                  <option value={AI_PROVIDERS.ANTHROPIC}>Claude / Anthropic</option>
+                  <option value={AI_PROVIDERS.OPENAI}>ChatGPT / OpenAI</option>
+                </select>
+                {normaliseAiProvider(integrations.aiProvider) === AI_PROVIDERS.OPENAI ? (
+                  <>
+                    <input type="password" placeholder="sk-..." value={integrations.openaiApiKey} onChange={(event) => setIntegrations({ ...integrations, openaiApiKey: event.target.value })} style={{ marginTop: 8 }} />
+                    <input value={integrations.openaiModel} onChange={(event) => setIntegrations({ ...integrations, openaiModel: event.target.value })} style={{ marginTop: 8 }} />
+                  </>
+                ) : (
+                  <>
+                    <input type="password" placeholder="sk-ant-..." value={integrations.anthropicApiKey} onChange={(event) => setIntegrations({ ...integrations, anthropicApiKey: event.target.value })} style={{ marginTop: 8 }} />
+                    <input value={integrations.anthropicModel} onChange={(event) => setIntegrations({ ...integrations, anthropicModel: event.target.value })} style={{ marginTop: 8 }} />
+                  </>
+                )}
                 <div className="fx" style={{ gap: 8, marginTop: 8 }}><Button small onClick={testAi}>{testingAi ? "Testing..." : "Test"}</Button>{aiStatus ? <span className="xs ct2">{aiStatus}</span> : null}</div>
               </Card>
               <Card title="Microsoft Teams">
