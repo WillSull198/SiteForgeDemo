@@ -386,7 +386,7 @@ export default function DataTable({
           <div className="b sm">{selectedIds.length} selected</div>
           <div className="fx" style={{ gap: 6, flexWrap: "wrap" }}>
             {bulkActions.map((action) => (
-              <Button key={action.label} small tone={action.tone} onClick={() => action.onClick(selectedIds)}>
+              <Button key={action.label} small tone={action.tone} data-testid={action.dataTestId} onClick={() => action.onClick(selectedIds)}>
                 {action.label}
               </Button>
             ))}
@@ -457,7 +457,7 @@ export default function DataTable({
                             const visible = action.when ? action.when(row) : true;
                             if (!visible) return null;
                             return (
-                              <Button key={`${id}-${action.label}`} small tone={action.tone} onClick={() => action.onClick(row)}>
+                              <Button key={`${id}-${action.label}`} small tone={action.tone} data-testid={action.dataTestId} onClick={() => action.onClick(row)}>
                                 {action.label}
                               </Button>
                             );

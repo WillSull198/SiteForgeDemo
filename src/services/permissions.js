@@ -6,6 +6,8 @@ export const PERMISSIONS = {
   "clientflow.create": ["Project Manager", "Contract Admin", "Director"],
   "clientflow.send": ["Project Manager", "Contract Admin", "Director"],
   "clientflow.send_to_client": ["Project Manager", "Contract Admin", "Director"],
+  "clientflow.review_pm": ["Project Manager", "Director"],
+  "clientflow.review_ca": ["Contract Admin", "Director"],
   "clientflow.approve": ["Project Manager", "Contract Admin", "Director"],
   "clientflow.mark_approved": ["Project Manager", "Contract Admin", "Director"],
   "clientflow.mark_declined": ["Project Manager", "Contract Admin", "Director"],

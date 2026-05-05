@@ -221,7 +221,7 @@ export function DetailHeader({ title, subtitle, badges = [], actions = [] }) {
       </div>
       <div className="fx" style={{ gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
         {actions.map((action) => (
-          <Button key={action.label} tone={action.tone} small={action.small} icon={action.icon} onClick={action.onClick}>
+          <Button key={action.label} tone={action.tone} small={action.small} icon={action.icon} data-testid={action.dataTestId} onClick={action.onClick}>
             {action.label}
           </Button>
         ))}

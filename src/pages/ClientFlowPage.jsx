@@ -62,6 +62,8 @@ export default function ClientFlowPage() {
   const canCreateApproval = can(role, "clientflow.create");
   const canSend = can(role, "clientflow.send");
   const canApprove = can(role, "clientflow.approve");
+  const canPmReview = can(role, "clientflow.review_pm");
+  const canCaReview = can(role, "clientflow.review_ca");
   const canGenerateContract = can(role, "clientflow.generate_contract");
   const [tab, setTab] = useState("dashboard");
   const [createOpen, setCreateOpen] = useState(false);
@@ -362,7 +364,7 @@ export default function ClientFlowPage() {
                   filterable: true,
                   options: [...new Set(siteApprovals.map((approval) => approval.status))],
                   render: (value) => (
-                    <Badge tone={value === "declined" ? "critical" : value === "signed" ? "passed" : value === "awaiting-client" ? "medium" : "high"}>
+                    <Badge tone={["declined", "internal-rejected"].includes(value) ? "critical" : value === "signed" ? "passed" : value === "awaiting-client" ? "medium" : "high"}>
                       {value}
                     </Badge>
                   ),
@@ -384,9 +386,9 @@ export default function ClientFlowPage() {
                 },
                 { label: "Open", onClick: (approval) => setSelectedId(approval.id) },
                 {
-                  label: "Send",
+                  label: "Submit Review",
                   tone: "bt-p",
-                  onClick: (approval) => actions.sendApproval(approval.id),
+                  onClick: (approval) => actions.submitApprovalForInternalReview(approval.id),
                   when: (approval) => approval.status === "draft" && canSend,
                 },
                 {
@@ -417,21 +419,46 @@ export default function ClientFlowPage() {
                 right={
                   <div className="fx" style={{ gap: 4, flexWrap: "wrap" }}>
                     {selected.status === "draft" && canSend ? (
-                      <Button small tone="bt-p" icon={Icons.send} onClick={() => actions.sendApproval(selected.id)}>
-                        Send to Client
+                      <Button small tone="bt-p" icon={Icons.send} data-testid="approval-submit-pm-review" onClick={() => actions.submitApprovalForInternalReview(selected.id)}>
+                        Submit for Review
+                      </Button>
+                    ) : null}
+                    {selected.status === "awaiting-pm" && canPmReview ? (
+                      <>
+                        <Button small tone="bt-g" icon={Icons.check} data-testid="approval-pm-approve" onClick={() => actions.pmReviewApproval(selected.id, "approve", window.prompt("PM review note", "Approved for Contract Admin review.") || "")}>
+                          PM Approve
+                        </Button>
+                        <Button small tone="bt-r" icon={Icons.x} data-testid="approval-pm-reject" onClick={() => actions.pmReviewApproval(selected.id, "reject", window.prompt("Reason for rejection", "Revise before client issue.") || "")}>
+                          PM Reject
+                        </Button>
+                      </>
+                    ) : null}
+                    {selected.status === "awaiting-ca" && canCaReview ? (
+                      <>
+                        <Button small tone="bt-g" icon={Icons.check} data-testid="approval-ca-approve" aria-label="approval-send-client" onClick={() => actions.caReviewApproval(selected.id, "approve", window.prompt("Contract Admin review note", "Approved for client issue.") || "")}>
+                          CA Approve + Send
+                        </Button>
+                        <Button small tone="bt-r" icon={Icons.x} data-testid="approval-ca-reject" onClick={() => actions.caReviewApproval(selected.id, "reject", window.prompt("Reason for rejection", "Revise contract language before issue.") || "")}>
+                          CA Reject
+                        </Button>
+                      </>
+                    ) : null}
+                    {["draft", "awaiting-pm", "awaiting-ca", "internal-rejected"].includes(selected.status) && canPmReview && canCaReview ? (
+                      <Button small tone="bt-p" icon={Icons.zap} data-testid="approval-director-override" onClick={() => actions.directorOverrideApprovalReview(selected.id)}>
+                        Director Override
                       </Button>
                     ) : null}
                     {selected.status === "approved" && canGenerateContract ? (
-                      <Button small tone="bt-p" icon={Icons.file} onClick={() => actions.generateContractFromApproval(selected.id)}>
+                      <Button small tone="bt-p" icon={Icons.file} data-testid="approval-generate-contract-pack" onClick={() => actions.generateContractFromApproval(selected.id)}>
                         Generate Contract Pack
                       </Button>
                     ) : null}
                     {["awaiting-client", "question", "changes-requested"].includes(selected.status) && canApprove ? (
                       <>
-                        <Button small tone="bt-g" icon={Icons.check} onClick={() => actions.markApprovalInternal(selected.id, "approved", "Marked approved internally after client confirmation.")}>
+                        <Button small tone="bt-g" icon={Icons.check} data-testid="approval-mark-signed" onClick={() => actions.markApprovalInternal(selected.id, "approved", "Marked approved internally after client confirmation.")}>
                           Mark Approved
                         </Button>
-                        <Button small tone="bt-r" icon={Icons.x} onClick={() => actions.markApprovalInternal(selected.id, "declined", "Marked declined internally.")}>
+                        <Button small tone="bt-r" icon={Icons.x} data-testid="approval-mark-declined" onClick={() => actions.markApprovalInternal(selected.id, "declined", "Marked declined internally.")}>
                           Mark Declined
                         </Button>
                       </>
@@ -988,7 +1015,7 @@ export default function ClientFlowPage() {
         )}
         <div className="fa">
           <Button onClick={() => setCreateOpen(false)}>Cancel</Button>
-          <Button tone="bt-p" icon={Icons.plus} onClick={createApproval}>
+          <Button tone="bt-p" icon={Icons.plus} data-testid="approval-create-draft" onClick={createApproval}>
             Create Draft
           </Button>
         </div>

@@ -34,7 +34,7 @@ const ensureLink = (rel, href, extra = {}) => {
 };
 
 ensureMeta("description", APP_CONFIG.metaDescription);
-ensureMeta("theme-color", "#F7F6F2");
+ensureMeta("theme-color", "#D97706");
 ensureLink("preconnect", "https://fonts.googleapis.com");
 ensureLink("preconnect", "https://fonts.gstatic.com", { crossOrigin: "anonymous" });
 ensureLink(
@@ -55,7 +55,16 @@ if (window.pdfjsLib) {
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => {
+    navigator.serviceWorker.register("/sw.js").then((registration) => {
+      registration.addEventListener("updatefound", () => {
+        const worker = registration.installing;
+        worker?.addEventListener("statechange", () => {
+          if (worker.state === "installed" && navigator.serviceWorker.controller) {
+            window.dispatchEvent(new CustomEvent("siteforge-update-available"));
+          }
+        });
+      });
+    }).catch(() => {
       // PWA support is best-effort; the app remains fully usable without SW registration.
     });
   });

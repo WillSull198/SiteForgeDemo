@@ -13,6 +13,7 @@ const GROUPS = {
   "approval.declined": "Approvals",
   "approval.signed": "Approvals",
   "approval.stalled": "Approvals",
+  "approval.internal-review": "Approvals",
   "contract.drafted": "Contracts",
   "contract.review-requested": "Contracts",
   "contract.builder-signed": "Contracts",
@@ -21,6 +22,7 @@ const GROUPS = {
   "problem.created": "Problems",
   "problem.critical": "Problems",
   "rfi.overdue": "RFIs",
+  "rfi.created": "RFIs",
   "procurement.delayed": "Procurement",
   "qa.failed": "QA",
   "safety.incident": "Safety",
@@ -29,6 +31,7 @@ const GROUPS = {
   "passport.ticket-expiring": "Passport",
   "task.overdue": "Tasks",
   "variation.approved": "Variations",
+  "recovery.opportunity": "Recovery",
   "buildxact.sync-error": "Integrations",
 };
 
@@ -40,6 +43,7 @@ const SEVERITY = {
   "approval.declined": "critical",
   "approval.signed": "high",
   "approval.stalled": "high",
+  "approval.internal-review": "medium",
   "contract.drafted": "medium",
   "contract.review-requested": "medium",
   "contract.builder-signed": "medium",
@@ -48,6 +52,7 @@ const SEVERITY = {
   "problem.created": "medium",
   "problem.critical": "critical",
   "rfi.overdue": "medium",
+  "rfi.created": "medium",
   "procurement.delayed": "high",
   "qa.failed": "high",
   "safety.incident": "critical",
@@ -56,6 +61,7 @@ const SEVERITY = {
   "passport.ticket-expiring": "medium",
   "task.overdue": "medium",
   "variation.approved": "medium",
+  "recovery.opportunity": "medium",
   "buildxact.sync-error": "high",
 };
 
@@ -76,6 +82,7 @@ const DEFAULT_CHANNELS = {
   "approval.declined": ["in-app", "teams", "email"],
   "approval.signed": ["in-app", "email", "portal"],
   "approval.stalled": ["in-app", "teams", "email"],
+  "approval.internal-review": ["in-app", "email"],
   "contract.drafted": ["in-app"],
   "contract.review-requested": ["in-app"],
   "contract.builder-signed": ["email", "portal"],
@@ -84,6 +91,7 @@ const DEFAULT_CHANNELS = {
   "problem.created": ["in-app"],
   "problem.critical": ["in-app", "teams", "sms"],
   "rfi.overdue": ["in-app"],
+  "rfi.created": ["in-app"],
   "procurement.delayed": ["in-app"],
   "qa.failed": ["in-app", "teams"],
   "safety.incident": ["in-app", "email", "sms"],
@@ -92,6 +100,7 @@ const DEFAULT_CHANNELS = {
   "passport.ticket-expiring": ["in-app", "email", "sms"],
   "task.overdue": ["in-app", "mobile-push"],
   "variation.approved": ["in-app"],
+  "recovery.opportunity": ["in-app"],
   "buildxact.sync-error": ["in-app", "email"],
 };
 

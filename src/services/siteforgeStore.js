@@ -22,7 +22,7 @@ import { Audit, bootstrapLocalDataLayer } from "./data";
 import { generateOperationsReportPdfBlob, generateSignedContractPdfBlob, generateTransmittalPdfBlob } from "./pdfService";
 import { diffPlans, parseTemplate, removeFileEverywhere, uploadFile, uploadSeededTextFile, buildTemplatePreviewContent, getBlob, putBlob } from "./documentIntelligence";
 import { dispatchNotificationEvent } from "./notificationEngine";
-import { canSeeAllSites, routeKindForRole } from "./permissions";
+import { can, canSeeAllSites, routeKindForRole } from "./permissions";
 import {
   buildBuildxactPullSnapshot,
   createAttachmentPayload,
@@ -220,6 +220,26 @@ const buildLink = (type, record, siteId) => ({
   label: record.title || record.name || record.number || record.item || record.person || record.topic || record.docId,
   siteId,
 });
+
+function buildPortalUrl(token) {
+  if (!token || typeof window === "undefined") return "";
+  const pathname = window.location.pathname.replace(/index\.html$/, "");
+  const base =
+    window.location.protocol === "file:"
+      ? `${window.location.protocol}//${pathname}`
+      : `${window.location.origin}${pathname}`;
+  return `${base}${base.endsWith("/") ? "" : "/"}#/approve/${token}`;
+}
+
+function linkRecords(left, right, leftType, rightType, siteId = left?.siteId || right?.siteId) {
+  if (!left || !right) return;
+  upsertLinkedRecord(left, buildLink(rightType, right, siteId));
+  upsertLinkedRecord(right, buildLink(leftType, left, siteId));
+}
+
+function requireRole(role, permission, fallback = false) {
+  return can(role, permission) ? true : fallback;
+}
 
 const defaultSession = () => ({
   role: "Supervisor",
@@ -1375,7 +1395,7 @@ function prepareApprovalForClientIssue(state, approval, actor, { bulkId = null }
   approval.status = "awaiting-client";
   approval.sentAt = approval.sentAt || issuedAt;
   approval.portalToken = approval.portalToken || uuid();
-  approval.portalUrl = `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${approval.portalToken}`;
+  approval.portalUrl = buildPortalUrl(approval.portalToken);
   approval.portalExpiresAt = approval.portalExpiresAt || addDays(formatDate(), 30);
   approval.magicLink = {
     token: approval.portalToken,
@@ -1405,6 +1425,68 @@ function prepareApprovalForClientIssue(state, approval, actor, { bulkId = null }
       bulkId,
     },
   });
+  return before;
+}
+
+function issueApprovalToClient(next, helpers, approval, { bulkId = null, timelineText = null } = {}) {
+  if (!approval) return null;
+  const before = prepareApprovalForClientIssue(next, approval, helpers.actor, { bulkId });
+  queueExternalDeliveryForApproval(next, approval);
+  if (approval.recoveryChain) {
+    approval.recoveryChain.sentAt = approval.sentAt || nowStamp();
+  }
+  helpers.appendTimeline(approval, {
+    type: "sent",
+    actor: actorName(helpers.actor),
+    role: helpers.actor.role,
+    text:
+      timelineText ||
+      `Approval issued via ${Object.keys(approval.deliveryChannels || {})
+        .filter((channel) => approval.deliveryChannels[channel])
+        .join(", ")}.`,
+  });
+  helpers.addMessage(
+    "approval",
+    approval.id,
+    [approval.ownerId, next.users.find((user) => user.clientId === approval.clientId)?.id].filter(Boolean),
+    `We've sent ${approval.title.toLowerCase()} for review with the current recommendation and supporting records.`,
+  );
+  helpers.addAudit({
+    action: "approval.send",
+    entityType: "approval",
+    entityId: approval.id,
+    before,
+    after: { status: approval.status, sentAt: approval.sentAt },
+    siteId: approval.siteId,
+  });
+  helpers.emit({
+    eventType: "approval.created",
+    title: `Approval sent - ${approval.title}`,
+    body: `${approval.summary} Magic-link access expires ${approval.portalExpiresAt}.`,
+    siteId: approval.siteId,
+    entityType: "approval",
+    entityId: approval.id,
+    recipients: [
+      ...getRecipientsForRoles(next, ["Project Manager"]),
+      ...getRecipientsForClient(next, approval.clientId),
+    ],
+    route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+  });
+  if (approval.deliveryChannels?.teams) {
+    const client = next.clients.find((item) => item.id === approval.clientId);
+    const channel = next.teams.channelMap?.["approval.sent"] || "Client Approvals";
+    const event = buildTeamsApprovalDispatch({
+      approval,
+      client,
+      builder: next.org?.settings?.company || APP_CONFIG.builder,
+      channel,
+    });
+    const record = { id: randomId("teams"), ...event, status: next.teams.connected ? "sent" : "queued" };
+    next.teams.outbound.unshift(record);
+    next.notifications.eventLog.unshift({ id: randomId("tel"), ...record });
+    next.teams.outbound = next.teams.outbound.slice(0, 120);
+    next.notifications.eventLog = next.notifications.eventLog.slice(0, 240);
+  }
   return before;
 }
 
@@ -1547,7 +1629,7 @@ function createRecoveryApprovalRecord(next, helpers, { sourceType, source, appro
     messageThread: [],
     contractPackId: null,
     portalToken,
-    portalUrl: `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${portalToken}`,
+    portalUrl: buildPortalUrl(portalToken),
     recoveryChain: {
       chainType: `${sourceType}->${approvalType}`,
       sourceType,
@@ -1914,6 +1996,17 @@ function updateSentiment(state, clientId, delta) {
 }
 
 function pushToast(state, toast) {
+  state.demo = state.demo || { recentToasts: [] };
+  state.demo.recentToasts = Array.isArray(state.demo.recentToasts) ? state.demo.recentToasts : [];
+  const now = Date.now();
+  const duplicate = (state.demo.recentToasts || []).some((entry) => {
+    const entryTime = Date.parse(String(entry.at || "").replace(" ", "T"));
+    const closeEnough = Number.isFinite(entryTime) ? now - entryTime < 2000 : false;
+    const sameEvent = toast.eventType && entry.eventType === toast.eventType && entry.entityId === toast.entityId;
+    const sameCopy = entry.title === toast.title && entry.body === toast.body;
+    return closeEnough && (sameEvent || sameCopy);
+  });
+  if (duplicate) return;
   state.demo.recentToasts.unshift({
     id: randomId("toast"),
     at: nowStamp(),
@@ -3402,7 +3495,7 @@ export function SiteForgeProvider({ children }) {
             messageThread: [],
             contractPackId: null,
             portalToken,
-            portalUrl: `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${portalToken}`,
+            portalUrl: buildPortalUrl(portalToken),
           };
           helpers.appendTimeline(approval, {
             type: "created",
@@ -3477,7 +3570,7 @@ export function SiteForgeProvider({ children }) {
             messageThread: [],
             contractPackId: null,
             portalToken,
-            portalUrl: `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${portalToken}`,
+            portalUrl: buildPortalUrl(portalToken),
           };
           helpers.appendTimeline(approval, {
             type: "created",
@@ -3511,7 +3604,9 @@ export function SiteForgeProvider({ children }) {
           });
           targetRoute = { kind: "internal", siteId: site.id, page: "clientflow", entityId: approval.id };
         });
-        if (targetRoute) navigate(targetRoute);
+        setTimeout(() => {
+          if (targetRoute) navigate(targetRoute);
+        }, 0);
       },
       detectRecoveryOpportunities(siteId = null) {
         mutate((next, helpers) => {
@@ -3564,7 +3659,9 @@ export function SiteForgeProvider({ children }) {
           if (!approval) return;
           targetRoute = { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id };
         });
-        if (targetRoute) navigate(targetRoute);
+        setTimeout(() => {
+          if (targetRoute) navigate(targetRoute);
+        }, 0);
       },
       dismissRecoveryOpportunity(opportunityId, reason = "Dismissed after commercial review.") {
         mutate((next, helpers) => {
@@ -3601,63 +3698,193 @@ export function SiteForgeProvider({ children }) {
           });
         });
       },
+      submitApprovalForInternalReview(approvalId) {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval || approval.status !== "draft") return;
+          const before = { status: approval.status };
+          approval.status = "awaiting-pm";
+          approval.internalReview = {
+            ...(approval.internalReview || {}),
+            submittedAt: nowStamp(),
+            submittedBy: helpers.actor.id,
+            pm: approval.internalReview?.pm || null,
+            ca: approval.internalReview?.ca || null,
+          };
+          helpers.appendTimeline(approval, {
+            type: "awaiting-pm",
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            text: "Submitted for internal PM review before client issue.",
+          });
+          appendApprovalComplianceEvent(approval, {
+            event: "approval.internal-review-submitted",
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            payload: { status: approval.status },
+          });
+          helpers.addAudit({
+            action: "approval.submit-internal-review",
+            entityType: "approval",
+            entityId: approval.id,
+            before,
+            after: { status: approval.status },
+            siteId: approval.siteId,
+          });
+          helpers.emit({
+            eventType: "approval.internal-review",
+            title: `PM review required - ${approval.number || approval.id}`,
+            body: approval.title,
+            siteId: approval.siteId,
+            entityType: "approval",
+            entityId: approval.id,
+            recipients: getRecipientsForRoles(next, ["Project Manager", "Director"]),
+            route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+          });
+        });
+      },
+      pmReviewApproval(approvalId, decision, note = "") {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval || approval.status !== "awaiting-pm") return;
+          if (!requireRole(helpers.actor.role, "clientflow.review_pm")) return;
+          const before = { status: approval.status };
+          approval.internalReview = {
+            ...(approval.internalReview || {}),
+            pm: { decision, note, reviewerId: helpers.actor.id, reviewerName: actorName(helpers.actor), reviewedAt: nowStamp() },
+          };
+          if (decision === "approve") {
+            approval.status = "awaiting-ca";
+            helpers.appendTimeline(approval, {
+              type: "awaiting-ca",
+              actor: actorName(helpers.actor),
+              role: helpers.actor.role,
+              text: note || "PM approved for Contract Admin review.",
+            });
+            helpers.emit({
+              eventType: "approval.internal-review",
+              title: `CA review required - ${approval.number || approval.id}`,
+              body: approval.title,
+              siteId: approval.siteId,
+              entityType: "approval",
+              entityId: approval.id,
+              recipients: getRecipientsForRoles(next, ["Contract Admin", "Director"]),
+              route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+            });
+          } else {
+            approval.status = "internal-rejected";
+            helpers.appendTimeline(approval, {
+              type: "internal-rejected",
+              actor: actorName(helpers.actor),
+              role: helpers.actor.role,
+              text: note || "PM rejected the approval for revision.",
+            });
+          }
+          appendApprovalComplianceEvent(approval, {
+            event: `approval.pm-${decision === "approve" ? "approved" : "rejected"}`,
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            payload: { note, status: approval.status },
+          });
+          helpers.addAudit({
+            action: `approval.pm-${decision === "approve" ? "approve" : "reject"}`,
+            entityType: "approval",
+            entityId: approval.id,
+            before,
+            after: { status: approval.status, note },
+            siteId: approval.siteId,
+          });
+        });
+      },
+      caReviewApproval(approvalId, decision, note = "") {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval || approval.status !== "awaiting-ca") return;
+          if (!requireRole(helpers.actor.role, "clientflow.review_ca")) return;
+          const before = { status: approval.status };
+          approval.internalReview = {
+            ...(approval.internalReview || {}),
+            ca: { decision, note, reviewerId: helpers.actor.id, reviewerName: actorName(helpers.actor), reviewedAt: nowStamp() },
+          };
+          if (decision === "approve") {
+            helpers.appendTimeline(approval, {
+              type: "ca-approved",
+              actor: actorName(helpers.actor),
+              role: helpers.actor.role,
+              text: note || "Contract Admin approved. Approval released to client.",
+            });
+            appendApprovalComplianceEvent(approval, {
+              event: "approval.ca-approved",
+              actor: actorName(helpers.actor),
+              role: helpers.actor.role,
+              payload: { note },
+            });
+            issueApprovalToClient(next, helpers, approval, { timelineText: "Contract Admin approved and issued this approval to the client portal." });
+          } else {
+            approval.status = "internal-rejected";
+            helpers.appendTimeline(approval, {
+              type: "internal-rejected",
+              actor: actorName(helpers.actor),
+              role: helpers.actor.role,
+              text: note || "Contract Admin rejected the approval for revision.",
+            });
+            appendApprovalComplianceEvent(approval, {
+              event: "approval.ca-rejected",
+              actor: actorName(helpers.actor),
+              role: helpers.actor.role,
+              payload: { note, status: approval.status },
+            });
+          }
+          helpers.addAudit({
+            action: `approval.ca-${decision === "approve" ? "approve" : "reject"}`,
+            entityType: "approval",
+            entityId: approval.id,
+            before,
+            after: { status: approval.status, note },
+            siteId: approval.siteId,
+          });
+        });
+      },
+      directorOverrideApprovalReview(approvalId, note = "Solo Director override: PM and Contract Admin gates recorded and skipped under Director authority.") {
+        mutate((next, helpers) => {
+          const approval = next.approvals.find((item) => item.id === approvalId);
+          if (!approval || !["draft", "awaiting-pm", "awaiting-ca", "internal-rejected"].includes(approval.status)) return;
+          if (!requireRole(helpers.actor.role, "clientflow.review_pm") || !requireRole(helpers.actor.role, "clientflow.review_ca")) return;
+          const before = { status: approval.status };
+          approval.internalReview = {
+            ...(approval.internalReview || {}),
+            directorOverride: { note, reviewerId: helpers.actor.id, reviewerName: actorName(helpers.actor), reviewedAt: nowStamp() },
+            pm: approval.internalReview?.pm || { decision: "override", note, reviewerId: helpers.actor.id, reviewerName: actorName(helpers.actor), reviewedAt: nowStamp() },
+            ca: approval.internalReview?.ca || { decision: "override", note, reviewerId: helpers.actor.id, reviewerName: actorName(helpers.actor), reviewedAt: nowStamp() },
+          };
+          helpers.appendTimeline(approval, {
+            type: "director-override",
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            text: note,
+          });
+          appendApprovalComplianceEvent(approval, {
+            event: "approval.director-override",
+            actor: actorName(helpers.actor),
+            role: helpers.actor.role,
+            payload: { note, skippedGates: ["pm", "ca"] },
+          });
+          issueApprovalToClient(next, helpers, approval, { timelineText: "Director override recorded and approval issued to the client portal." });
+          helpers.addAudit({
+            action: "approval.director-override",
+            entityType: "approval",
+            entityId: approval.id,
+            before,
+            after: { status: approval.status, note },
+            siteId: approval.siteId,
+          });
+        });
+      },
       sendApproval(approvalId) {
         mutate((next, helpers) => {
           const approval = next.approvals.find((item) => item.id === approvalId);
           if (!approval) return;
-          const before = prepareApprovalForClientIssue(next, approval, helpers.actor);
-          queueExternalDeliveryForApproval(next, approval);
-          if (approval.recoveryChain) {
-            approval.recoveryChain.sentAt = approval.sentAt || nowStamp();
-          }
-          helpers.appendTimeline(approval, {
-            type: "sent",
-            actor: actorName(helpers.actor),
-            role: helpers.actor.role,
-            text: `Approval issued via ${Object.keys(approval.deliveryChannels || {}).filter((channel) => approval.deliveryChannels[channel]).join(", ")}.`,
-          });
-          helpers.addMessage(
-            "approval",
-            approval.id,
-            [approval.ownerId, next.users.find((user) => user.clientId === approval.clientId)?.id].filter(Boolean),
-            `We've sent ${approval.title.toLowerCase()} for review with the current recommendation and supporting records.`,
-          );
-          helpers.addAudit({
-            action: "approval.send",
-            entityType: "approval",
-            entityId: approval.id,
-            before,
-            after: { status: approval.status, sentAt: approval.sentAt },
-            siteId: approval.siteId,
-          });
-          helpers.emit({
-            eventType: "approval.created",
-            title: `Approval sent - ${approval.title}`,
-            body: `${approval.summary} Magic-link access expires ${approval.portalExpiresAt}.`,
-            siteId: approval.siteId,
-            entityType: "approval",
-            entityId: approval.id,
-            recipients: [
-              ...getRecipientsForRoles(next, ["Project Manager"]),
-              ...getRecipientsForClient(next, approval.clientId),
-            ],
-            route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
-          });
-          if (approval.deliveryChannels?.teams) {
-            const client = next.clients.find((item) => item.id === approval.clientId);
-            const channel = next.teams.channelMap?.["approval.sent"] || "Client Approvals";
-            const event = buildTeamsApprovalDispatch({
-              approval,
-              client,
-              builder: next.org?.settings?.company || APP_CONFIG.builder,
-              channel,
-            });
-            const record = { id: randomId("teams"), ...event, status: next.teams.connected ? "sent" : "queued" };
-            next.teams.outbound.unshift(record);
-            next.notifications.eventLog.unshift({ id: randomId("tel"), ...record });
-            next.teams.outbound = next.teams.outbound.slice(0, 120);
-            next.notifications.eventLog = next.notifications.eventLog.slice(0, 240);
-          }
+          issueApprovalToClient(next, helpers, approval);
         });
       },
       bulkIssueApprovals(approvalIds = []) {
@@ -3714,7 +3941,7 @@ export function SiteForgeProvider({ children }) {
             approvalIds: approvals.map((approval) => approval.id),
             status: "draft",
             portalToken: uuid(),
-            portalUrl: `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${approvals[0].portalToken || approvals[0].id}`,
+            portalUrl: buildPortalUrl(approvals[0].portalToken || approvals[0].id),
             createdAt: nowStamp(),
             createdBy: helpers.actor.id,
           };
@@ -4322,6 +4549,7 @@ export function SiteForgeProvider({ children }) {
         });
       },
       createVariationFromRfi(rfiId) {
+        let targetRoute = null;
         mutate((next, helpers) => {
           const rfi = next.rfis.find((item) => item.id === rfiId);
           if (!rfi) return;
@@ -4340,10 +4568,10 @@ export function SiteForgeProvider({ children }) {
             createdBy: helpers.actor.id,
             clientApprovalId: null,
             contractPackId: null,
-            linkedRecords: [buildLink("rfi", rfi, rfi.siteId)],
+            linkedRecords: [],
           };
+          linkRecords(rfi, variation, "rfi", "variation", rfi.siteId);
           next.variations.unshift(variation);
-          upsertLinkedRecord(rfi, buildLink("variation", variation, rfi.siteId));
           helpers.addAudit({
             action: "variation.create",
             entityType: "variation",
@@ -4352,7 +4580,11 @@ export function SiteForgeProvider({ children }) {
             after: { status: variation.status, value: variation.value },
             siteId: variation.siteId,
           });
+          targetRoute = { kind: "internal", siteId: variation.siteId, page: "vos", entityId: variation.id };
         });
+        setTimeout(() => {
+          if (targetRoute) navigate(targetRoute);
+        }, 0);
       },
       createVariationDraft(payload) {
         mutate((next, helpers) => {
@@ -4387,9 +4619,10 @@ export function SiteForgeProvider({ children }) {
             siteId: variation.siteId,
           });
         });
-      },
-      sendVariationToClient(variationId, templateId = null) {
-        mutate((next, helpers) => {
+	      },
+	      sendVariationToClient(variationId, templateId = null) {
+	        let targetRoute = null;
+	        mutate((next, helpers) => {
           const variation = next.variations.find((item) => item.id === variationId);
           if (!variation) return;
           const selectedTemplateId = templateId || variation.templateId || next.settings?.contractDefaults?.standardVariationTemplate || null;
@@ -4405,17 +4638,17 @@ export function SiteForgeProvider({ children }) {
             summary: variation.description || `${variation.title} requires commercial approval before the builder can proceed cleanly.`,
             reason: variation.reason || "The linked field or consultant event has now changed the commercial basis of the work.",
             recommendation: "Approve now so the variation can be formalised without additional delay.",
-            status: "awaiting-client",
+            status: "awaiting-pm",
             priority: variation.priority,
             templateId: selectedTemplateId,
-            autoReleaseToClient: true,
+            autoReleaseToClient: false,
             portalToken,
-            portalUrl: `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${portalToken}`,
+            portalUrl: buildPortalUrl(portalToken),
             sourceType,
             sourceId: variation.sourceId || variation.id,
             createdBy: helpers.actor.id,
-            ownerId: next.sites.find((site) => site.id === variation.siteId)?.pmId || "u_pm_1",
-            sentAt: nowStamp(),
+	            ownerId: next.sites.find((site) => site.id === variation.siteId)?.pmId || helpers.actor.id,
+            sentAt: null,
             dueAt: addDays(formatDate(), 3),
             viewedAt: null,
             costImpact: variation.value,
@@ -4428,17 +4661,17 @@ export function SiteForgeProvider({ children }) {
             contractPackId: null,
           };
           helpers.appendTimeline(approval, {
-            type: "sent",
+            type: "awaiting-pm",
             actor: actorName(helpers.actor),
             role: helpers.actor.role,
-            text: "Variation sent to client from variation register.",
+            text: "Variation submitted for PM review before client issue.",
           });
           variation.clientApprovalId = approval.id;
-          variation.status = "sent";
+          variation.status = "review";
           variation.templateId = selectedTemplateId;
           next.approvals.unshift(approval);
           helpers.addAudit({
-            action: "variation.sent_to_client",
+            action: "variation.submit_internal_review",
             entityType: "variation",
             entityId: variation.id,
             before: { status: "submitted" },
@@ -4446,16 +4679,20 @@ export function SiteForgeProvider({ children }) {
             siteId: variation.siteId,
           });
           helpers.emit({
-            eventType: "approval.created",
-            title: `Variation sent to client - ${variation.title}`,
-            body: approval.summary,
+            eventType: "approval.internal-review",
+            title: `Variation ready for PM review - ${variation.title}`,
+            body: `${approval.number} is waiting for PM review before client issue.`,
             siteId: approval.siteId,
             entityType: "approval",
             entityId: approval.id,
             recipients: [...getRecipientsForRoles(next, ["Project Manager"]), ...getRecipientsForClient(next, approval.clientId)],
             route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
           });
+          targetRoute = { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id };
         });
+        setTimeout(() => {
+          if (targetRoute) navigate(targetRoute);
+        }, 0);
       },
       addProcurementRequest(payload) {
         mutate((next, helpers) => {
@@ -4471,6 +4708,8 @@ export function SiteForgeProvider({ children }) {
             supplier: payload.supplier || "",
             poNumber: payload.poNumber || "",
             cost: Number(payload.cost || 0),
+            linkedTaskIds: payload.linkedTaskIds || [],
+            schedulePhaseId: payload.schedulePhaseId || null,
             linkedApprovalId: null,
             linkedRecords: payload.linkedRecords || [],
           };
@@ -4514,11 +4753,25 @@ export function SiteForgeProvider({ children }) {
         });
       },
       createEotFromProcurement(itemId) {
+        let targetRoute = null;
         mutate((next, helpers) => {
           const item = next.procurement.find((entry) => entry.id === itemId);
           if (!item) return;
           const ai = draftApproval(item, "Extension of Time");
           const site = next.sites.find((entry) => entry.id === item.siteId);
+          if (!site) return;
+          const linkedTasks = (item.linkedTaskIds || [])
+            .map((taskId) => next.tasks.find((task) => task.id === taskId))
+            .filter(Boolean);
+          const schedule = next.schedules.find((entry) => entry.siteId === item.siteId);
+          const linkedPhase = schedule?.phases?.find((phase) => phase.id === item.schedulePhaseId);
+          const scheduleLinks = linkedPhase
+            ? [{ type: "schedule", id: linkedPhase.id, label: linkedPhase.label, siteId: item.siteId }]
+            : [];
+          const affectedLinks = [
+            ...linkedTasks.map((task) => buildLink("task", task, item.siteId)),
+            ...scheduleLinks,
+          ];
           const approval = {
             id: randomId("ap"),
             number: nextScopedNumber(next, "approvals", item.siteId, "CF"),
@@ -4540,9 +4793,12 @@ export function SiteForgeProvider({ children }) {
             viewedAt: null,
             costImpact: Number(item.cost || 0),
             timeImpact: 2,
-            linkedRecords: [buildLink("procurement", item, item.siteId)],
+            linkedRecords: [buildLink("procurement", item, item.siteId), ...affectedLinks],
             attachments: [],
-            aiDraft: ai,
+            aiDraft: {
+              ...ai,
+              summary: `${ai.summary}${affectedLinks.length ? ` Affected programme items: ${affectedLinks.map((link) => link.label).join(", ")}.` : ""}`,
+            },
             timeline: [],
             messageThread: [],
             contractPackId: null,
@@ -4555,8 +4811,21 @@ export function SiteForgeProvider({ children }) {
           });
           next.approvals.unshift(approval);
           item.linkedApprovalId = approval.id;
-          upsertLinkedRecord(item, buildLink("approval", approval, item.siteId));
+          linkRecords(item, approval, "procurement", "approval", item.siteId);
+          linkedTasks.forEach((task) => linkRecords(task, approval, "task", "approval", item.siteId));
+          helpers.addAudit({
+            action: "procurement.eot-created",
+            entityType: "approval",
+            entityId: approval.id,
+            before: null,
+            after: { procurementId: item.id, affectedLinks: affectedLinks.map((link) => link.id) },
+            siteId: item.siteId,
+          });
+          targetRoute = { kind: "internal", siteId: item.siteId, page: "clientflow", entityId: approval.id };
         });
+        setTimeout(() => {
+          if (targetRoute) navigate(targetRoute);
+        }, 0);
       },
       addQaRecord(payload) {
         mutate((next, helpers) => {
@@ -4645,10 +4914,12 @@ export function SiteForgeProvider({ children }) {
         });
       },
       createRainDayClaim(diaryId) {
+        let targetRoute = null;
         mutate((next, helpers) => {
           const diary = next.diary.find((entry) => entry.id === diaryId);
           if (!diary) return;
           const site = next.sites.find((entry) => entry.id === diary.siteId);
+          if (!site) return;
           const ai = draftApproval(diary, "Rain Day");
           const approval = {
             id: randomId("ap"),
@@ -4685,8 +4956,30 @@ export function SiteForgeProvider({ children }) {
             text: "Rain day claim drafted from site diary.",
           });
           next.approvals.unshift(approval);
-          upsertLinkedRecord(diary, buildLink("approval", approval, diary.siteId));
+          linkRecords(diary, approval, "diary", "approval", diary.siteId);
+          helpers.addAudit({
+            action: "diary.rain-day-claim",
+            entityType: "approval",
+            entityId: approval.id,
+            before: null,
+            after: { diaryId: diary.id, status: approval.status, timeImpact: approval.timeImpact },
+            siteId: diary.siteId,
+          });
+          helpers.emit({
+            eventType: "approval.created",
+            title: `Rain day claim drafted - ${approval.number}`,
+            body: approval.summary,
+            siteId: diary.siteId,
+            entityType: "approval",
+            entityId: approval.id,
+            recipients: getRecipientsForRoles(next, ["Project Manager", "Contract Admin"]),
+            route: { kind: "internal", siteId: diary.siteId, page: "clientflow", entityId: approval.id },
+          });
+          targetRoute = { kind: "internal", siteId: diary.siteId, page: "clientflow", entityId: approval.id };
         });
+        setTimeout(() => {
+          if (targetRoute) navigate(targetRoute);
+        }, 0);
       },
       createVariationFromDiary(diaryId, payload) {
         let targetRoute = null;
@@ -4722,7 +5015,7 @@ export function SiteForgeProvider({ children }) {
           upsertLinkedRecord(diary, buildLink("variation", variation, diary.siteId));
           if (payload.releaseToClient !== false && site && client) {
             const portalToken = uuid();
-            const approvalStatus = payload.sendImmediately === false ? "draft" : "awaiting-client";
+            const approvalStatus = payload.sendImmediately === false ? "draft" : "awaiting-pm";
             const approval = {
               id: randomId("ap"),
               number: nextScopedNumber(next, "approvals", diary.siteId, "CF"),
@@ -4739,7 +5032,7 @@ export function SiteForgeProvider({ children }) {
               sourceId: variation.id,
               createdBy: helpers.actor.id,
               ownerId: site.pmId || helpers.actor.id,
-              sentAt: approvalStatus === "awaiting-client" ? nowStamp() : null,
+              sentAt: null,
               dueAt: addDays(formatDate(), 3),
               viewedAt: null,
               costImpact: numericValue,
@@ -4758,20 +5051,20 @@ export function SiteForgeProvider({ children }) {
               messageThread: [],
               contractPackId: null,
               portalToken,
-              portalUrl: `${typeof window !== "undefined" ? window.location.origin : ""}/approve/${portalToken}`,
+              portalUrl: buildPortalUrl(portalToken),
             };
             helpers.appendTimeline(approval, {
-              type: approvalStatus === "awaiting-client" ? "sent" : "created",
+              type: approvalStatus === "awaiting-pm" ? "awaiting-pm" : "created",
               actor: actorName(helpers.actor),
               role: helpers.actor.role,
-              text: approvalStatus === "awaiting-client" ? "Diary variation issued to the client portal." : "Diary variation prepared as a ClientFlow draft.",
+              text: approvalStatus === "awaiting-pm" ? "Diary variation submitted for PM review." : "Diary variation prepared as a ClientFlow draft.",
             });
             next.approvals.unshift(approval);
             variation.clientApprovalId = approval.id;
             upsertLinkedRecord(variation, buildLink("approval", approval, diary.siteId));
             upsertLinkedRecord(diary, buildLink("approval", approval, diary.siteId));
             helpers.addAudit({
-              action: approvalStatus === "awaiting-client" ? "approval.send.from_diary" : "approval.create.from_diary",
+              action: approvalStatus === "awaiting-pm" ? "approval.submit-internal-review.from_diary" : "approval.create.from_diary",
               entityType: "approval",
               entityId: approval.id,
               before: null,
@@ -4781,7 +5074,7 @@ export function SiteForgeProvider({ children }) {
             helpers.emit({
               eventType: "approval.created",
               title: `${approval.number} created from diary variation`,
-              body: approvalStatus === "awaiting-client" ? `${approval.title} is awaiting client approval and signature.` : `${approval.title} is ready for PM review.`,
+              body: approvalStatus === "awaiting-pm" ? `${approval.title} is ready for PM review.` : `${approval.title} was saved as a ClientFlow draft.`,
               siteId: diary.siteId,
               entityType: "approval",
               entityId: approval.id,
@@ -4809,7 +5102,9 @@ export function SiteForgeProvider({ children }) {
             route: { kind: "internal", siteId: diary.siteId, page: "vos", entityId: variation.id },
           });
         });
-        if (targetRoute) navigate(targetRoute);
+        setTimeout(() => {
+          if (targetRoute) navigate(targetRoute);
+        }, 0);
       },
       addSafetyRecord(payload) {
         mutate((next, helpers) => {
@@ -4949,6 +5244,57 @@ export function SiteForgeProvider({ children }) {
             siteId: rfi.siteId,
           });
         });
+      },
+      createRfiFromProblem(problemId, payload = {}) {
+        let targetRoute = null;
+        mutate((next, helpers) => {
+          const problem = next.problems.find((item) => item.id === problemId);
+          if (!problem) return;
+          const rfi = {
+            id: randomId("rfi"),
+            siteId: problem.siteId,
+            number: nextScopedNumber(next, "rfis", problem.siteId, "RFI"),
+            title: payload.title || `Clarification required - ${problem.title}`,
+            trade: payload.trade || problem.trade || "General",
+            fromUserId: helpers.actor.id,
+            to: payload.to || "Consultant",
+            status: "open",
+            priority: payload.priority || problem.priority || "medium",
+            dueDate: payload.dueDate || addDays(formatDate(), 4),
+            costImpact: Number(payload.costImpact ?? problem.costImpact ?? 0),
+            timeImpact: Number(payload.timeImpact ?? problem.timeImpact ?? 0),
+            scopeCompanyId: helpers.actor.companyId,
+            description: payload.description || problem.description || problem.title,
+            sourceType: "problem",
+            sourceId: problem.id,
+            linkedRecords: [],
+            responses: [],
+          };
+          linkRecords(problem, rfi, "problem", "rfi", problem.siteId);
+          next.rfis.unshift(rfi);
+          helpers.addAudit({
+            action: "problem.convert-to-rfi",
+            entityType: "rfi",
+            entityId: rfi.id,
+            before: null,
+            after: { problemId: problem.id, number: rfi.number, title: rfi.title },
+            siteId: problem.siteId,
+          });
+          helpers.emit({
+            eventType: "rfi.created",
+            title: `RFI raised from problem - ${rfi.number}`,
+            body: rfi.title,
+            siteId: problem.siteId,
+            entityType: "rfi",
+            entityId: rfi.id,
+            recipients: getRecipientsForRoles(next, ["Project Manager", "Contract Admin"]),
+            route: { kind: "internal", siteId: problem.siteId, page: "rfis", entityId: rfi.id },
+          });
+          targetRoute = { kind: "internal", siteId: problem.siteId, page: "rfis", entityId: rfi.id };
+        });
+        setTimeout(() => {
+          if (targetRoute) navigate(targetRoute);
+        }, 0);
       },
       respondRfi(rfiId, message) {
         mutate((next, helpers) => {

@@ -1,4 +1,4 @@
-const CACHE_NAME = "siteforge-shell-v1";
+const CACHE_NAME = "siteforge-shell-v2";
 const APP_SHELL = ["/", "/index.html", "/offline.html", "/manifest.webmanifest", "/siteforge-icon.svg"];
 
 self.addEventListener("install", (event) => {
@@ -13,6 +13,15 @@ self.addEventListener("activate", (event) => {
     ),
   );
   self.clients.claim();
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
+  if (event.data?.type === "CLEAR_SITEFORGE_CACHES") {
+    event.waitUntil(caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key)))));
+  }
 });
 
 self.addEventListener("fetch", (event) => {

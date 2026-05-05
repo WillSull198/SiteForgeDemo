@@ -711,15 +711,18 @@ function ProblemsPage() {
                         label: "Raise Approval",
                         tone: "bt-p",
                         icon: Icons.link,
+                        dataTestId: "problem-raise-approval",
                         onClick: () => actions.createApprovalFromSource({ sourceType: "problem", sourceId: selected.id, approvalType: "Variation", handUp: mustHandUpForApproval(role) }),
                       }
                     : null,
                   {
-                    label: "Suggest RFI",
+                    label: "→ RFI",
                     icon: Icons.help,
+                    tone: "bt-p",
+                    dataTestId: "problem-raise-rfi",
                     onClick: () => {
                       const suggestion = suggestRFI(selected);
-                      actions.createRfi({
+                      actions.createRfiFromProblem(selected.id, {
                         title: suggestion.title,
                         description: suggestion.description,
                         to: suggestion.recommendedRecipient,
@@ -986,7 +989,7 @@ function ProcurementPage() {
           { label: "Edit", onClick: (row) => setForm({ item: row.item, quantity: row.quantity, supplier: row.supplier, cost: row.cost, eta: row.eta || "" }) || setTransitionItem(row) },
           { label: "Next", onClick: (row) => setTransitionItem(row) },
           { label: "Delay", tone: "bt-r", when: (row) => !["paid", "verified"].includes(row.status), onClick: (row) => actions.transitionProcurement(row.id, "delayed") },
-          { label: "Draft EOT", tone: "bt-p", when: (row) => ["delayed", "escalated"].includes(row.status), onClick: (row) => actions.createEotFromProcurement(row.id) },
+          { label: "Draft EOT", tone: "bt-p", dataTestId: "procurement-raise-eot", when: (row) => ["delayed", "escalated"].includes(row.status), onClick: (row) => actions.createEotFromProcurement(row.id) },
           { label: "Duplicate", onClick: (row) => actions.duplicateEntity("procurement", row.id) },
         ]}
       />
@@ -1150,7 +1153,7 @@ function RfisPage() {
               subtitle={`${selected.trade} · Due ${selected.dueDate}`}
               badges={[{ label: selected.status, tone: selected.status === "overdue" ? "critical" : "medium" }]}
               actions={[
-                { label: "Convert to Variation", tone: "bt-p", icon: Icons.shuffle, onClick: () => actions.createVariationFromRfi(selected.id) },
+                { label: "Convert to Variation", tone: "bt-p", icon: Icons.shuffle, dataTestId: "rfi-convert-variation", onClick: () => actions.createVariationFromRfi(selected.id) },
                 { label: "Close", tone: "", icon: Icons.check, onClick: () => actions.closeRfi(selected.id) },
               ]}
             />
@@ -1271,8 +1274,8 @@ function VariationsPage() {
                   </td>
                   <td>
                     {variation.status === "submitted" && can(role, "clientflow.send") ? (
-                      <Button small tone="bt-p" onClick={() => actions.sendVariationToClient(variation.id, variation.templateId)}>
-                        Send to Client
+                      <Button small tone="bt-p" data-testid="variation-create" onClick={() => actions.sendVariationToClient(variation.id, variation.templateId)}>
+                        Submit Review
                       </Button>
                     ) : null}
                   </td>
@@ -1528,7 +1531,7 @@ function DiaryPage() {
             <Badge tone="medium">{entry.weather}</Badge>
             <Badge tone="passed">{entry.crew} crew</Badge>
             {entry.rainEvent ? (
-              <Button small tone="bt-p" onClick={() => actions.createRainDayClaim(entry.id)}>
+              <Button small tone="bt-p" data-testid="diary-claim-rain-day" onClick={() => actions.createRainDayClaim(entry.id)}>
                 Claim Rain Day
               </Button>
             ) : null}
@@ -1599,6 +1602,7 @@ function DiaryPage() {
           <Button onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             tone="bt-p"
+            data-testid="diary-create-variation"
             onClick={() => {
               actions.addDiaryEntry(form);
               setOpen(false);
@@ -1668,19 +1672,20 @@ function DiaryPage() {
         </div>
         <label className="sig-check">
           <input type="checkbox" checked={variationForm.releaseToClient !== false} onChange={(event) => setVariationForm((current) => ({ ...current, releaseToClient: event.target.checked }))} />
-          Send to client immediately for approval and signature
+          Submit to internal review immediately
         </label>
         <div className="fa">
           <Button onClick={() => setVariationEntry(null)}>Cancel</Button>
           <Button
             tone="bt-p"
+            data-testid="variation-create"
             onClick={() => {
               if (!variationEntry) return;
               actions.createVariationFromDiary(variationEntry.id, variationForm);
               setVariationEntry(null);
             }}
           >
-            {variationForm.releaseToClient !== false ? "Create ClientFlow Approval" : "Create Variation Draft"}
+            {variationForm.releaseToClient !== false ? "Create ClientFlow Review" : "Create Variation Draft"}
           </Button>
         </div>
       </Modal>
@@ -2891,6 +2896,17 @@ function AdminPage() {
       window.location.reload();
     }
   };
+  const unregisterServiceWorker = async () => {
+    try {
+      const registrations = await navigator.serviceWorker?.getRegistrations?.();
+      await Promise.all((registrations || []).map((registration) => registration.unregister()));
+      const cacheNames = typeof caches !== "undefined" ? await caches.keys() : [];
+      await Promise.all(cacheNames.map((name) => caches.delete(name)));
+      setSettingsMessage("Service worker and offline caches cleared. Reload the app to fetch a clean shell.");
+    } catch (error) {
+      setSettingsMessage(`Could not clear service worker cache: ${error?.message || "browser support unavailable"}`);
+    }
+  };
 
   return (
     <div className="oy fin">
@@ -3105,6 +3121,7 @@ function AdminPage() {
               <input className="inline-input" style={{ maxWidth: 120 }} value={deleteConfirm} onChange={(event) => setDeleteConfirm(event.target.value)} />
             </div>
             <Button tone="bt-r" onClick={clearAllData}>Clear All Data</Button>
+            <Button onClick={unregisterServiceWorker}>Emergency Reset Offline Cache</Button>
           </div>
         </Card>
         <Card title="Billing & Subscription" icon={Icons.dollar}>

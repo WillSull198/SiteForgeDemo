@@ -149,6 +149,7 @@ function Shell() {
   const [syncStatus, setSyncStatus] = useState({ state: "synced", pending: 0, stuck: 0 });
   const [isOnline, setIsOnline] = useState(() => navigator.onLine);
   const [installPrompt, setInstallPrompt] = useState(null);
+  const [updateReady, setUpdateReady] = useState(false);
   const company = state.settings?.company || state.company || APP_CONFIG.builder;
   const currentSite = derived.currentSite || null;
   const activeSiteId =
@@ -288,13 +289,16 @@ function Shell() {
       event.preventDefault();
       setInstallPrompt(event);
     };
+    const onUpdateAvailable = () => setUpdateReady(true);
     window.addEventListener("online", updateOnline);
     window.addEventListener("offline", updateOnline);
     window.addEventListener("beforeinstallprompt", onInstallPrompt);
+    window.addEventListener("siteforge-update-available", onUpdateAvailable);
     return () => {
       window.removeEventListener("online", updateOnline);
       window.removeEventListener("offline", updateOnline);
       window.removeEventListener("beforeinstallprompt", onInstallPrompt);
+      window.removeEventListener("siteforge-update-available", onUpdateAvailable);
     };
   }, []);
 
@@ -510,6 +514,22 @@ function Shell() {
             <div className="demo-banner">
               <span>You're in demo mode. None of this data is real.</span>
               <Button small onClick={() => window.confirm("Switch to a real account? This clears demo data in this browser and starts real onboarding.") && actions.switchDemoToReal()}>Switch to a real account</Button>
+            </div>
+          ) : null}
+          {updateReady ? (
+            <div className="notice-banner" style={{ margin: "12px 24px 0" }}>
+              <b>SiteForge has updated.</b> Reload to use the latest version.
+              <Button
+                small
+                tone="bt-p"
+                style={{ marginLeft: 10 }}
+                onClick={() => {
+                  navigator.serviceWorker?.controller?.postMessage({ type: "SKIP_WAITING" });
+                  window.location.reload();
+                }}
+              >
+                Reload
+              </Button>
             </div>
           ) : null}
           <div className="T">
