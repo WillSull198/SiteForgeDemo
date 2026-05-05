@@ -19,6 +19,7 @@ import {
 import { createAuditEntry, exportAuditCsv, verifyAuditChain } from "./auditTrail";
 import { buildContractSummary, generateDraft, signContract } from "./contractService";
 import { Audit, bootstrapLocalDataLayer } from "./data";
+import { loadPersistedAppState } from "./dbService";
 import { generateOperationsReportPdfBlob, generateSignedContractPdfBlob, generateTransmittalPdfBlob } from "./pdfService";
 import { diffPlans, parseTemplate, removeFileEverywhere, uploadFile, uploadSeededTextFile, buildTemplatePreviewContent, getBlob, putBlob } from "./documentIntelligence";
 import { dispatchNotificationEvent } from "./notificationEngine";
@@ -2977,7 +2978,7 @@ export function SiteForgeProvider({ children }) {
 	        if (currentMode === targetMode) return;
 	        await persistence?.flushPendingWrites?.();
 	        setActiveMode(targetMode);
-	        const stored = readStateSlot(targetMode);
+	        const stored = readStateSlot(targetMode) || await loadPersistedAppState(getStateStorageKey(targetMode)).catch(() => null);
 	        let destinationState = stored
 	          ? hydrateModeState(stored, targetMode)
 	          : targetMode === "demo"

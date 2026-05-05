@@ -11,6 +11,7 @@ import PhotoUpload from "../components/PhotoUpload";
 import PDFViewer from "../components/PDFViewer";
 import { exportCsv, exportElementToPdf } from "../services/pdfService";
 import { previewPdf } from "../services/documentIntelligence";
+import { deletePersistedAppState, persistAppState } from "../services/dbService";
 import { useSiteForge } from "../services/siteforgeStore";
 import { can, canSeeAllSites, mustHandUpForApproval } from "../services/permissions";
 import { clearStateSlot, getStateStorageKey, readStateSlot, storageSlotExists, writeStateSlot } from "../services/storageMode";
@@ -2914,6 +2915,7 @@ function AdminPage() {
       return;
     }
     clearStateSlot(mode);
+    deletePersistedAppState(getStateStorageKey(mode)).catch(() => {});
     if (activeMode === mode) {
       actions.resetCurrentMode();
     }
@@ -3137,6 +3139,18 @@ function AdminPage() {
               <div className="xs ct3">Worked demo storage. Your real data is unaffected.</div>
               <div className="fa" style={{ marginTop: 10, justifyContent: "flex-start" }}>
                 <Button small onClick={() => exportModeState("demo")}>Export Demo</Button>
+                <label className="bt small">
+                  Import Demo
+                  <input
+                    type="file"
+                    accept="application/json,.json"
+                    style={{ display: "none" }}
+                    onChange={(event) => {
+                      handleImportFile(event.target.files?.[0], "demo");
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
                 <Button small tone="bt-p" onClick={() => actions.switchToMode("demo")}>Switch to Demo</Button>
                 <Button small tone="bt-r" onClick={() => clearModeData("demo")}>Reset Demo Slot</Button>
               </div>
@@ -3208,6 +3222,7 @@ function AdminPage() {
 	                actions.importState(importCandidate.payload);
 	              } else if (importCandidate?.mode) {
 	                writeStateSlot(importCandidate.mode, importCandidate.payload);
+	                persistAppState(getStateStorageKey(importCandidate.mode), importCandidate.payload).catch(() => {});
 	              }
 	              setImportCandidate(null);
 	              setSettingsMessage("Imported SiteForge data restored to the selected workspace.");
