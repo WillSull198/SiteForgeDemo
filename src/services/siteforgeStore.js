@@ -31,6 +31,15 @@ import {
   upsertByBuildxactId,
 } from "./integrations/buildxact/sync";
 import { DEFAULT_TEAMS_CHANNEL_MAP, buildTeamsApprovalDispatch, createTeamsEvent, handleTeamsSlashCommand } from "./integrations/teams/dispatcher";
+import {
+  getActiveMode,
+  getInitialStateStorageKey,
+  getStateStorageKey,
+  LEGACY_KEYS,
+  readStateSlot,
+  setActiveMode,
+  writeStateSlot,
+} from "./storageMode";
 
 const SiteForgeContext = createContext(null);
 
@@ -113,6 +122,69 @@ const COLLECTION_MAP = {
   site: "sites",
   client: "clients",
 };
+
+const MODE_ENTITY_PATHS = [
+  "users",
+  "companies",
+  "clients",
+  "sites",
+  "schedules",
+  "siteBudgets",
+  "tasks",
+  "problems",
+  "rfis",
+  "variations",
+  "approvals",
+  "contractTemplates",
+  "clauseLibrary",
+  "contractPacks",
+  "procurement",
+  "qa",
+  "diary",
+  "safety",
+  "toolboxTalks",
+  "swms",
+  "passports.records",
+  "passports.scanLog",
+  "passports.siteAccess",
+  "passports.expiringTickets",
+  "passports.visitorPasses",
+  "presence.anomalies",
+  "presence.shifts",
+  "presence.records",
+  "presence.events",
+  "presence.exports",
+  "presence.siteCompliance",
+  "documents",
+  "messages",
+  "invoices",
+  "notifications.items",
+  "notifications.eventLog",
+  "emailQueue",
+  "smsQueue",
+  "teamsQueue",
+  "buildxact.queue",
+  "buildxact.pendingPushes",
+  "buildxact.failedPushes",
+  "buildxact.syncEvents",
+  "buildxact.syncHistory",
+  "buildxact.payloadPreviews",
+  "auditTrail",
+  "boardReports",
+  "projectLogs",
+  "files.records",
+  "callbacks",
+  "pmAvailability",
+  "weatherForecasts",
+  "calculatorHistory",
+  "commandHistory",
+  "variationRegister",
+  "reportSchedules",
+  "reportQueue",
+  "recoveryOpportunities",
+  "transmittals",
+  "permits",
+];
 
 const INTERNAL_ROLES = new Set(["Supervisor", "Project Manager", "Contract Admin"]);
 const COMMERCIAL_APPROVALS = new Set([
@@ -391,8 +463,45 @@ function createBlankSlate() {
   };
 }
 
-function createDemoStore() {
+function pathValue(root, path) {
+  return path.split(".").reduce((cursor, part) => cursor?.[part], root);
+}
+
+function setPathValue(root, path, value) {
+  const parts = path.split(".");
+  let cursor = root;
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    const part = parts[index];
+    if (!cursor[part] || typeof cursor[part] !== "object") cursor[part] = {};
+    cursor = cursor[part];
+  }
+  cursor[parts[parts.length - 1]] = value;
+}
+
+function tagAllRecordsAsDemo(state) {
+  MODE_ENTITY_PATHS.forEach((path) => {
+    const records = pathValue(state, path);
+    if (!Array.isArray(records)) return;
+    setPathValue(
+      state,
+      path,
+      records.map((record) => (record && typeof record === "object" ? { ...record, isDemo: true } : record)),
+    );
+  });
+  return state;
+}
+
+function createRealOnboardingStore() {
+  const slate = createBlankSlate();
   return normaliseState({
+    ...slate,
+    onboarding: { ...slate.onboarding, mode: "real", step: "company" },
+    org: { ...slate.org, mode: "real" },
+  });
+}
+
+function createDemoStore() {
+  return normaliseState(tagAllRecordsAsDemo({
     version: APP_CONFIG.storageVersion,
     ...createInitialData(),
     onboarding: {
@@ -411,7 +520,7 @@ function createDemoStore() {
     },
     session: defaultSession(),
     ui: defaultUi(),
-  });
+  }));
 }
 
 const createInitialStore = () => {
@@ -419,19 +528,47 @@ const createInitialStore = () => {
     return createBlankSlate();
   }
 
-  for (const legacyKey of APP_CONFIG.legacyStorageKeys || []) {
+  const activeMode = getActiveMode();
+
+  for (const legacyKey of LEGACY_KEYS) {
     try {
       const raw = window.localStorage.getItem(legacyKey);
       if (!raw) continue;
       const parsed = JSON.parse(raw);
-      return normaliseState(migrateLegacyState({
+      const detectedMode = parsed.org?.mode === "demo" ? "demo" : "real";
+      const migrated = normaliseState(migrateLegacyState({
         ...parsed,
         session: { ...defaultSession(), ...(parsed.session || {}) },
         ui: { ...defaultUi(), ...(parsed.ui || {}) },
       }));
+      if (detectedMode === "demo") {
+        tagAllRecordsAsDemo(migrated);
+        migrated.org = { ...(migrated.org || DEFAULT_ORG), mode: "demo", id: DEFAULT_ORG.id };
+      } else {
+        migrated.org = {
+          ...(migrated.org || {}),
+          mode: "real",
+          id: migrated.org?.id && migrated.org.id !== DEFAULT_ORG.id ? migrated.org.id : uuid(),
+        };
+      }
+      setActiveMode(detectedMode);
+      writeStateSlot(detectedMode, migrated);
+      return migrated;
     } catch (error) {
       console.warn("Failed to migrate legacy SiteForge state", error);
     }
+  }
+
+  if (activeMode === "demo" || activeMode === "real") {
+    const stored = readStateSlot(activeMode);
+    if (stored) {
+      return normaliseState(migrateLegacyState({
+        ...stored,
+        session: { ...defaultSession(), ...(stored.session || {}) },
+        ui: { ...defaultUi(), ...(stored.ui || {}) },
+      }));
+    }
+    return activeMode === "demo" ? createDemoStore() : createRealOnboardingStore();
   }
 
   return normaliseState(createBlankSlate());
@@ -544,7 +681,11 @@ function withOrgId(record, orgId) {
 }
 
 function scopeOrgRecords(next) {
-  const orgId = next.org?.id || DEFAULT_ORG.id;
+  let orgId = next.org?.id || DEFAULT_ORG.id;
+  if (next.org?.mode === "real" && (!orgId || orgId === DEFAULT_ORG.id)) {
+    orgId = uuid();
+    next.org.id = orgId;
+  }
   [
     "sites",
     "clients",
@@ -575,6 +716,41 @@ function scopeOrgRecords(next) {
   if (Array.isArray(next.files?.records)) {
     next.files.records = next.files.records.map((record) => withOrgId(record, orgId));
   }
+}
+
+function lintModeIntegrity(state) {
+  const mode = state.org?.mode;
+  const issues = [];
+
+  if (mode === "demo") {
+    tagAllRecordsAsDemo(state);
+  }
+
+  if (mode === "real") {
+    if (state.org?.id === DEFAULT_ORG.id) {
+      state.org.id = uuid();
+      issues.push("Real org had reserved org-default id; reassigned a fresh UUID.");
+    }
+    MODE_ENTITY_PATHS.forEach((path) => {
+      const records = pathValue(state, path);
+      if (!Array.isArray(records)) return;
+      const leaked = records.filter((record) => record?.isDemo === true);
+      if (!leaked.length) return;
+      state.quarantine = state.quarantine || {};
+      state.quarantine[path] = [...(state.quarantine[path] || []), ...leaked].slice(-200);
+      setPathValue(state, path, records.filter((record) => record?.isDemo !== true));
+      issues.push(`Real mode contains ${leaked.length} demo-tagged records in ${path}. Quarantining.`);
+    });
+  }
+
+  if (issues.length) {
+    console.warn("[SiteForge] Mode integrity lint:", issues);
+    state._modeIntegrityWarnings = [
+      ...(state._modeIntegrityWarnings || []),
+      { at: nowStamp(), issues },
+    ].slice(-20);
+  }
+  return state;
 }
 
 function normaliseState(state) {
@@ -611,6 +787,7 @@ function normaliseState(state) {
     },
   };
   scopeOrgRecords(next);
+  lintModeIntegrity(next);
 
   next.demo = {
     ...(next.demo || {}),
@@ -2500,7 +2677,7 @@ function createHelpers(prev, next) {
 }
 
 export function SiteForgeProvider({ children }) {
-  const [state, setState] = usePersistentState(APP_CONFIG.storageKey, createInitialStore);
+  const [state, setState, persistence] = usePersistentState(getInitialStateStorageKey(), createInitialStore);
   const dataLayerBootstrapped = useRef(false);
   const stateRef = useRef(state);
 

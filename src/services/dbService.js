@@ -103,3 +103,7 @@ export function persistAppState(key, value) {
     updatedAt: new Date().toISOString(),
   });
 }
+
+export function deletePersistedAppState(key) {
+  return idbDelete("appState", key);
+}

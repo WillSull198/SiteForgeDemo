@@ -27,6 +27,9 @@ function mergeWithDefaults(savedValue, defaultValue) {
 export function usePersistentState(key, initialValue) {
   const resolvedInitialValueRef = useRef(null);
   const persistTimerRef = useRef(null);
+  const keyRef = useRef(key);
+  const valueRef = useRef(null);
+  const hydratedRef = useRef(false);
   if (resolvedInitialValueRef.current === null) {
     resolvedInitialValueRef.current = typeof initialValue === "function" ? initialValue() : initialValue;
   }
@@ -62,9 +65,37 @@ export function usePersistentState(key, initialValue) {
     return resolvedInitialValue;
   });
 
+  valueRef.current = value;
+  hydratedRef.current = hydrated;
+
+  const persistNow = (targetKey = keyRef.current, targetValue = valueRef.current) => {
+    if (!targetKey || targetValue === undefined || targetValue === null) return Promise.resolve();
+    if (typeof window === "undefined") return Promise.resolve();
+    try {
+      window.localStorage.setItem(targetKey, JSON.stringify(targetValue));
+    } catch (error) {
+      console.warn(`Failed to mirror state for ${targetKey}`, error);
+    }
+    if (!canUseIndexedDb) return Promise.resolve();
+    return persistAppState(targetKey, targetValue).catch((error) => {
+      console.warn(`Failed to persist state for ${targetKey}`, error);
+    });
+  };
+
   useEffect(() => {
     let cancelled = false;
     const resolvedInitialValue = resolvedInitialValueRef.current;
+    const previousKey = keyRef.current;
+
+    if (previousKey !== key && hydratedRef.current) {
+      if (persistTimerRef.current) {
+        window.clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+      }
+      persistNow(previousKey, valueRef.current);
+      setHydrated(false);
+    }
+    keyRef.current = key;
 
     loadPersistedAppState(key)
       .then((saved) => {
@@ -79,7 +110,7 @@ export function usePersistentState(key, initialValue) {
         ) {
           return;
         }
-        setValue(mergeWithDefaults(saved, resolvedInitialValue));
+	        setValue(mergeWithDefaults(saved, resolvedInitialValue));
       })
       .catch(() => {
         // Safari private mode and locked-down browsers can reject IndexedDB.
@@ -107,9 +138,9 @@ export function usePersistentState(key, initialValue) {
         persistAppState(key, value)
           .then(() => {
             try {
-              window.localStorage.removeItem(key);
+              window.localStorage.setItem(key, JSON.stringify(value));
             } catch (error) {
-              // Ignore cleanup failures in restricted contexts.
+              console.warn(`Failed to mirror state for ${key}`, error);
             }
           })
           .catch(() => {
@@ -136,5 +167,5 @@ export function usePersistentState(key, initialValue) {
     };
   }, [canUseIndexedDb, hydrated, key, value]);
 
-  return [value, setValue];
+  return [value, setValue, { hydrated, flushPendingWrites: () => persistNow(keyRef.current, valueRef.current) }];
 }
