@@ -147,7 +147,7 @@ export default function Onboarding({ state, actions }) {
       return;
     }
     setTestingAi(true);
-    const result = await askSiteForgeAi({ userMessage: "Reply with the word 'pong' only.", projectContext: {}, apiKey: integrations.anthropicApiKey.trim() });
+    const result = await askSiteForgeAi({ userMessage: "Reply with the word 'pong' only.", projectContext: { orgMode: state.org?.mode }, apiKey: integrations.anthropicApiKey.trim() });
     if (result.source === "claude" && /pong/i.test(result.text || "")) {
       window.localStorage.setItem("siteforge-anthropic-key", integrations.anthropicApiKey.trim());
       setAiStatus("Claude API key works.");
@@ -182,11 +182,11 @@ export default function Onboarding({ state, actions }) {
             <div className="g2">
               <Card title="Try the demo">
                 <p className="sm ct2">Explore SiteForge with Riverside Residence, Hargraves Family, example variations, Passport, Presence and Buildxact workflows.</p>
-                <Button tone="bt-p" onClick={actions.startDemoAccount}>Start Demo</Button>
+	                <Button tone="bt-p" onClick={() => actions.switchToMode("demo")}>Start Demo</Button>
               </Card>
               <Card title="Set up my company">
                 <p className="sm ct2">Start fresh. Demo data will not load, and every workflow will use your company, project, client and team records.</p>
-                <Button tone="bt-p" onClick={actions.beginRealOnboarding}>Set Up Company</Button>
+	                <Button tone="bt-p" onClick={() => actions.switchToMode("real")}>Set Up Company</Button>
               </Card>
             </div>
           </>

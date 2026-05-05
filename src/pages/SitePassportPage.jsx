@@ -213,7 +213,7 @@ export default function SitePassportPage() {
           <div className="restricted-badge">Session Recovery</div>
           <div className="b md" style={{ marginTop: 8 }}>Passport session unavailable</div>
           <div className="sm ct2" style={{ marginTop: 5 }}>The saved demo state for this user is out of sync. Resetting will restore the seeded passport profiles.</div>
-          <Button tone="bt-p" onClick={() => actions.resetDemo()} style={{ marginTop: 12 }}>
+          <Button tone="bt-p" onClick={() => actions.resetCurrentMode()} style={{ marginTop: 12 }}>
             Reset Demo State
           </Button>
         </div>

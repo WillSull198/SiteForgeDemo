@@ -376,7 +376,7 @@ function Shell() {
               </div>
               <div className="fx" style={{ gap: 8, marginTop: 12, flexWrap: "wrap" }}>
                 <Button onClick={() => actions.restartOnboarding()}>Restart Onboarding</Button>
-                <Button tone="bt-p" onClick={actions.resetDemo}>Reset Demo State</Button>
+                <Button tone="bt-p" onClick={actions.resetCurrentMode}>Reset Current Workspace</Button>
               </div>
               <details style={{ marginTop: 14 }}>
                 <summary className="xs ct3">Session debug</summary>
@@ -427,7 +427,7 @@ function Shell() {
 
   if (isClient) {
     return (
-      <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Client")} onReset={actions.resetDemo} debug={shellDebug}>
+      <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Client")} onReset={actions.resetCurrentMode} debug={shellDebug}>
         <Suspense fallback={<PageLoadingFallback />}>
           <ClientPortalPage />
         </Suspense>
@@ -436,7 +436,7 @@ function Shell() {
   }
   if (isWorker) {
     return (
-      <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Worker")} onReset={actions.resetDemo} debug={shellDebug}>
+      <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Worker")} onReset={actions.resetCurrentMode} debug={shellDebug}>
         <Suspense fallback={<PageLoadingFallback />}>
           <WorkerMobileView />
         </Suspense>
@@ -445,7 +445,7 @@ function Shell() {
   }
   if (isSubcontractor) {
     return (
-      <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Subcontractor")} onReset={actions.resetDemo} debug={shellDebug}>
+      <ViewBoundary key={routeKey} onRecover={() => actions.setRole("Subcontractor")} onReset={actions.resetCurrentMode} debug={shellDebug}>
         <Suspense fallback={<PageLoadingFallback />}>
           <SubcontractorPortal />
         </Suspense>
@@ -512,8 +512,8 @@ function Shell() {
         <main className="M">
           {state.org?.mode === "demo" ? (
             <div className="demo-banner">
-              <span>You're in demo mode. None of this data is real.</span>
-              <Button small onClick={() => window.confirm("Switch to a real account? This clears demo data in this browser and starts real onboarding.") && actions.switchDemoToReal()}>Switch to a real account</Button>
+	              <span>Demo mode. Your real data is in a separate workspace and is unaffected.</span>
+	              <Button small onClick={() => actions.switchToMode("real")}>Switch to my real account</Button>
             </div>
           ) : null}
           {updateReady ? (
@@ -552,7 +552,7 @@ function Shell() {
                 {renderIcon(Icons.search, 13)}
                 <span>Search or run a command...</span>
               </button>
-              {state.org?.mode === "demo" || state.settings?.developer?.allowDemoEvents ? (
+              {state.org?.mode === "demo" ? (
                 <Button small tone={state.demo.mode ? "bt-p" : ""} icon={Icons.clock} onClick={() => actions.setDemoMode(!state.demo.mode)}>
                   {state.demo.mode ? "Demo Mode" : "Live Mode"}
                 </Button>
@@ -612,7 +612,7 @@ function Shell() {
                     : { kind: "internal", siteId: activeSiteId, page: "dash", entityId: null },
                 )
               }
-              onReset={actions.resetDemo}
+	              onReset={actions.resetCurrentMode}
               debug={shellDebug}
             >
               <Suspense fallback={<PageLoadingFallback />}>{renderInternalPage()}</Suspense>

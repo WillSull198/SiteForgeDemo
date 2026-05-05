@@ -30,6 +30,13 @@ function localFallback(userMessage, projectContext = {}) {
 }
 
 export async function askSiteForgeAi({ userMessage, projectContext, apiKey }) {
+  if (projectContext?.orgMode === "demo" || projectContext?.mode === "demo") {
+    return {
+      text: `Demo mode: external Claude requests are skipped. ${localFallback(userMessage, projectContext)}`,
+      source: "skipped-demo",
+    };
+  }
+
   if (!apiKey) {
     return {
       text: localFallback(userMessage, projectContext),

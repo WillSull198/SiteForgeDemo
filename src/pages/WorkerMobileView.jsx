@@ -80,7 +80,7 @@ export default function WorkerMobileView() {
           <div className="worker-card">
             <div className="worker-card-title">Worker session unavailable</div>
             <div className="worker-card-copy">We couldn't restore the field-worker session from saved demo data.</div>
-            <Button tone="bt-p" onClick={() => actions.resetDemo()} className="touch-button" style={{ marginTop: 12 }}>
+            <Button tone="bt-p" onClick={() => actions.resetCurrentMode()} className="touch-button" style={{ marginTop: 12 }}>
               Reset Demo State
             </Button>
           </div>

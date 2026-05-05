@@ -500,6 +500,38 @@ function createRealOnboardingStore() {
   });
 }
 
+function hydrateModeState(rawState, mode) {
+  if (mode === "demo") {
+    return normaliseState(migrateLegacyState({
+      ...rawState,
+      session: { ...defaultSession(), ...(rawState.session || {}) },
+      ui: { ...defaultUi(), ...(rawState.ui || {}) },
+    }));
+  }
+  const base = createBlankSlate();
+  return normaliseState({
+    ...base,
+    ...rawState,
+    settings: {
+      ...base.settings,
+      ...(rawState.settings || {}),
+      company: { ...base.settings.company, ...(rawState.settings?.company || rawState.company || {}) },
+      user: { ...base.settings.user, ...(rawState.settings?.user || {}) },
+      notifications: { ...base.settings.notifications, ...(rawState.settings?.notifications || {}) },
+      integrations: { ...base.settings.integrations, ...(rawState.settings?.integrations || {}) },
+      contractDefaults: { ...base.settings.contractDefaults, ...(rawState.settings?.contractDefaults || {}) },
+    },
+    org: {
+      ...base.org,
+      ...(rawState.org || {}),
+      mode: "real",
+      id: rawState.org?.id && rawState.org.id !== DEFAULT_ORG.id ? rawState.org.id : base.org.id,
+    },
+    session: { ...blankSession(), ...(rawState.session || {}) },
+    ui: { ...base.ui, ...(rawState.ui || {}) },
+  });
+}
+
 function createDemoStore() {
   return normaliseState(tagAllRecordsAsDemo({
     version: APP_CONFIG.storageVersion,
@@ -536,11 +568,7 @@ const createInitialStore = () => {
       if (!raw) continue;
       const parsed = JSON.parse(raw);
       const detectedMode = parsed.org?.mode === "demo" ? "demo" : "real";
-      const migrated = normaliseState(migrateLegacyState({
-        ...parsed,
-        session: { ...defaultSession(), ...(parsed.session || {}) },
-        ui: { ...defaultUi(), ...(parsed.ui || {}) },
-      }));
+      const migrated = hydrateModeState(parsed, detectedMode);
       if (detectedMode === "demo") {
         tagAllRecordsAsDemo(migrated);
         migrated.org = { ...(migrated.org || DEFAULT_ORG), mode: "demo", id: DEFAULT_ORG.id };
@@ -562,11 +590,7 @@ const createInitialStore = () => {
   if (activeMode === "demo" || activeMode === "real") {
     const stored = readStateSlot(activeMode);
     if (stored) {
-      return normaliseState(migrateLegacyState({
-        ...stored,
-        session: { ...defaultSession(), ...(stored.session || {}) },
-        ui: { ...defaultUi(), ...(stored.ui || {}) },
-      }));
+      return hydrateModeState(stored, activeMode);
     }
     return activeMode === "demo" ? createDemoStore() : createRealOnboardingStore();
   }
@@ -1349,6 +1373,7 @@ function appendProjectLog(state, siteId, title, body) {
 
 function queueBuildxactSync(state, type, reference, siteId, payloadCurrent, payloadPrevious = null) {
   const readOnly = Boolean(state.buildxact?.readOnlyMode);
+  const demoOnly = state.org?.mode === "demo";
   const queueItem = {
     id: randomId("bxq"),
     resource: type,
@@ -1357,25 +1382,27 @@ function queueBuildxactSync(state, type, reference, siteId, payloadCurrent, payl
     reference,
     siteId,
     payloadSize: `${Math.max(2, Math.round(JSON.stringify(payloadCurrent).length / 1000))} KB`,
-    status: readOnly ? "read-only" : "pending",
+    status: demoOnly ? "skipped-demo" : readOnly ? "read-only" : "pending",
     attempts: 0,
     createdAt: nowStamp(),
-    lastError: readOnly ? "Read-only mode enabled. Payload retained for preview only." : null,
+    lastError: demoOnly ? "Demo mode: payload retained locally and never sent externally." : readOnly ? "Read-only mode enabled. Payload retained for preview only." : null,
+    demoOnly,
   };
   state.buildxact.queue.unshift(queueItem);
   state.buildxact.queue = state.buildxact.queue.slice(0, 120);
   state.buildxact.pendingPushes = Array.isArray(state.buildxact.pendingPushes) ? state.buildxact.pendingPushes : [];
-  state.buildxact.pendingPushes.unshift({
-    id: queueItem.id,
-    createdAt: queueItem.createdAt,
-    status: readOnly ? "queued" : "queued",
-    type,
-    payload: payloadCurrent,
-    relatedEntity: { type, id: reference },
-    attemptCount: 0,
-    lastError: queueItem.lastError,
-    buildxactRemoteId: null,
-  });
+	  state.buildxact.pendingPushes.unshift({
+	    id: queueItem.id,
+	    createdAt: queueItem.createdAt,
+	    status: demoOnly ? "skipped-demo" : "queued",
+	    type,
+	    payload: payloadCurrent,
+	    relatedEntity: { type, id: reference },
+	    attemptCount: 0,
+	    lastError: queueItem.lastError,
+	    buildxactRemoteId: null,
+	    demoOnly,
+	  });
   state.buildxact.pendingPushes = state.buildxact.pendingPushes.slice(0, 120);
   state.buildxact.payloadPreviews.unshift({
     id: randomId("bxp"),
@@ -1385,17 +1412,17 @@ function queueBuildxactSync(state, type, reference, siteId, payloadCurrent, payl
     previous: payloadPrevious,
   });
   state.buildxact.payloadPreviews = state.buildxact.payloadPreviews.slice(0, 120);
-  if (readOnly) {
-    state.buildxact.syncHistory.unshift(
-      createBuildxactSyncHistory({
-        type,
-        reference,
-        siteId,
-        status: "skipped",
-        payloadSize: queueItem.payloadSize,
-        error: "Read-only mode enabled.",
-      }),
-    );
+  if (readOnly || demoOnly) {
+	    state.buildxact.syncHistory.unshift(
+	      createBuildxactSyncHistory({
+	        type,
+	        reference,
+	        siteId,
+	        status: "skipped",
+	        payloadSize: queueItem.payloadSize,
+	        error: demoOnly ? "Demo mode never sends to Buildxact." : "Read-only mode enabled.",
+	      }),
+	    );
     state.buildxact.syncHistory = state.buildxact.syncHistory.slice(0, 180);
   }
   return queueItem;
@@ -2907,12 +2934,13 @@ export function SiteForgeProvider({ children }) {
     return () => window.clearInterval(timer);
   }, [mutate]);
 
-  useEffect(() => {
-    if (!state.demo?.mode) return undefined;
-    let timer = null;
-    const fireDemoEvent = () => {
-      mutate((next, helpers) => {
-        if (!next.demo.queuedEvents.length) return;
+	  useEffect(() => {
+	    if (state.org?.mode !== "demo" || !state.demo?.mode) return undefined;
+	    let timer = null;
+	    const fireDemoEvent = () => {
+	      mutate((next, helpers) => {
+	        if (next.org?.mode !== "demo" || !next.demo?.mode) return;
+	        if (!next.demo.queuedEvents.length) return;
         const event = next.demo.queuedEvents.shift();
         next.demo.queuedEvents.push(event);
         pushToast(next, {
@@ -2937,34 +2965,75 @@ export function SiteForgeProvider({ children }) {
     timer = window.setTimeout(fireDemoEvent, 26000 + Math.floor(Math.random() * 28000));
 
     return () => window.clearTimeout(timer);
-  }, [mutate, state.demo?.mode]);
+	  }, [mutate, state.demo?.mode, state.org?.mode]);
 
   const actions = useMemo(
-    () => ({
-      navigate,
-      resetDemo() {
-        setState(createDemoStore());
-        window.location.hash = buildHash(DEFAULT_ROLE_PAGES.Supervisor);
-      },
-      startDemoAccount() {
-        const demoState = createDemoStore();
-        setState(demoState);
-        window.location.hash = buildHash(demoState.session.route || DEFAULT_ROLE_PAGES.Supervisor);
-      },
-      switchDemoToReal() {
-        const slate = createBlankSlate();
-        const blank = normaliseState({
-          ...slate,
-          onboarding: { ...slate.onboarding, mode: "real", step: "company" },
-          org: { ...slate.org, mode: "real" },
-        });
-        setState(blank);
-        window.location.hash = "#/site/setup/dash";
-      },
-      beginRealOnboarding() {
-        setState((previous) => {
-          const next = cloneState(previous);
-          next.org = { ...(next.org || {}), mode: "real" };
+	    () => ({
+	      navigate,
+	      async switchToMode(targetMode) {
+	        if (targetMode !== "demo" && targetMode !== "real") return;
+	        const currentState = stateRef.current;
+	        const currentMode = currentState?.org?.mode || getActiveMode();
+	        if (currentMode === targetMode) return;
+	        await persistence?.flushPendingWrites?.();
+	        setActiveMode(targetMode);
+	        const stored = readStateSlot(targetMode);
+	        let destinationState = stored
+	          ? hydrateModeState(stored, targetMode)
+	          : targetMode === "demo"
+	            ? createDemoStore()
+	            : createRealOnboardingStore();
+	        if (targetMode === "demo") {
+	          tagAllRecordsAsDemo(destinationState);
+	          destinationState.org = { ...(destinationState.org || DEFAULT_ORG), mode: "demo", id: DEFAULT_ORG.id };
+	        } else {
+	          destinationState.org = {
+	            ...(destinationState.org || {}),
+	            mode: "real",
+	            id: destinationState.org?.id && destinationState.org.id !== DEFAULT_ORG.id ? destinationState.org.id : uuid(),
+	          };
+	        }
+	        const actor = currentState?.users?.find((user) => user.id === currentState?.session?.userId) || currentState?.users?.[0];
+	        const auditEntry = createAuditEntry({
+	          actor: actor?.name || "User",
+	          actorRole: currentState?.session?.role || actor?.role || "Director",
+	          action: "mode.switch",
+	          entityType: "mode",
+	          entityId: targetMode,
+	          before: { mode: currentMode || null },
+	          after: { mode: targetMode },
+	          siteId: destinationState.session?.siteId || null,
+	        });
+	        auditEntry.orgId = destinationState.org?.id || (targetMode === "demo" ? DEFAULT_ORG.id : uuid());
+	        destinationState.auditTrail = [auditEntry, ...(destinationState.auditTrail || [])].slice(0, 600);
+	        destinationState = normaliseState(destinationState);
+	        writeStateSlot(targetMode, destinationState);
+	        setState(destinationState);
+	        setTimeout(() => {
+	          if (!destinationState.onboarding?.complete) {
+	            window.location.hash = "";
+	            return;
+	          }
+	          const role = destinationState.session?.role || "Director";
+	          const route = destinationState.session?.route || getDefaultRouteForRole(role, destinationState);
+	          const hash = buildHash(route);
+	          if (window.location.hash !== hash) window.location.hash = hash;
+	        }, 0);
+	      },
+	      resetCurrentMode() {
+	        const mode = stateRef.current?.org?.mode;
+	        if (mode !== "demo" && mode !== "real") return;
+	        const fresh = mode === "demo" ? createDemoStore() : createRealOnboardingStore();
+	        setActiveMode(mode);
+	        writeStateSlot(mode, fresh);
+	        setState(fresh);
+	        window.location.hash = mode === "demo" ? buildHash(fresh.session.route || DEFAULT_ROLE_PAGES.Supervisor) : "";
+	      },
+	      beginRealOnboarding() {
+	        setActiveMode("real");
+	        setState((previous) => {
+	          const next = cloneState(previous);
+	          next.org = { ...(next.org || {}), mode: "real" };
           next.onboarding = { ...(next.onboarding || {}), complete: false, mode: "real", step: "company" };
           next.demo = { ...(next.demo || {}), mode: false, queuedEvents: [], recentToasts: [] };
           return normaliseState(next);
@@ -3152,11 +3221,14 @@ export function SiteForgeProvider({ children }) {
           return normaliseState(next);
         });
       },
-      importState(importedState) {
-        const imported = normaliseState(migrateLegacyState(cloneState(importedState)));
-        setState(imported);
-        window.location.hash = buildHash(imported.session?.route || DEFAULT_ROLE_PAGES.Supervisor);
-      },
+	      importState(importedState) {
+	        const mode = importedState?.org?.mode === "demo" ? "demo" : "real";
+	        const imported = hydrateModeState(cloneState(importedState), mode);
+	        setActiveMode(mode);
+	        writeStateSlot(mode, imported);
+	        setState(imported);
+	        window.location.hash = imported.onboarding?.complete ? buildHash(imported.session?.route || getDefaultRouteForRole(imported.session?.role, imported)) : "";
+	      },
       completeOnboarding(mode = "demo") {
         if (mode === "demo") {
           const demoState = createDemoStore();
@@ -3497,9 +3569,10 @@ export function SiteForgeProvider({ children }) {
           next.tableViews.saved[tableKey] = (next.tableViews.saved[tableKey] || []).filter((view) => view.id !== viewId);
         });
       },
-      setDemoMode(enabled) {
-        mutate((next) => {
-          next.demo.mode = enabled;
+	      setDemoMode(enabled) {
+	        mutate((next) => {
+	          if (next.org?.mode !== "demo") return;
+	          next.demo.mode = enabled;
           next.demo.userControlled = true;
           if (enabled && (!Array.isArray(next.demo.queuedEvents) || !next.demo.queuedEvents.length)) {
             next.demo.queuedEvents = createInitialData().demo.queuedEvents;

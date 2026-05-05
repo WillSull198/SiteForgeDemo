@@ -2,7 +2,8 @@
    expected by Contract Viewer and ClientFlow, fixing uploaded-template contract
    generation where merge tokens previously populated text but not sections. */
 
-const DB_NAME = "siteforge-files";
+import { getFilesStorageKey } from "./storageMode";
+
 const STORE_NAME = "blobs";
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const PDFJS_VERSION = "3.11.174";
@@ -26,8 +27,8 @@ const KEYWORDS = {
   "SWMS / JSA": ["swms", "safe work", "jsa", "job safety"],
 };
 
-let cachedDbPromise = null;
-let memoryFallback = new Map();
+let cachedDbPromises = new Map();
+let memoryFallbacks = new Map();
 let cachedScripts = new Map();
 
 const randomId = (prefix = "file") => `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
@@ -51,14 +52,15 @@ const isDocx = (type = "", name = "") =>
 const isTextLike = (type = "", name = "") => type.startsWith("text/") || /\.(txt|md)$/i.test(name);
 
 function openDb() {
-  if (cachedDbPromise) return cachedDbPromise;
-  cachedDbPromise = new Promise((resolve) => {
+  const dbName = getFilesStorageKey() || "siteforge-files-bootstrap";
+  if (cachedDbPromises.has(dbName)) return cachedDbPromises.get(dbName);
+  const openPromise = new Promise((resolve) => {
     if (typeof window === "undefined" || !window.indexedDB) {
       resolve(null);
       return;
     }
     try {
-      const request = window.indexedDB.open(DB_NAME, 1);
+      const request = window.indexedDB.open(dbName, 1);
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains(STORE_NAME)) {
@@ -71,7 +73,14 @@ function openDb() {
       resolve(null);
     }
   });
-  return cachedDbPromise;
+  cachedDbPromises.set(dbName, openPromise);
+  return openPromise;
+}
+
+function memoryFallback() {
+  const dbName = getFilesStorageKey() || "siteforge-files-bootstrap";
+  if (!memoryFallbacks.has(dbName)) memoryFallbacks.set(dbName, new Map());
+  return memoryFallbacks.get(dbName);
 }
 
 async function withStore(mode, callback) {
@@ -89,7 +98,7 @@ async function withStore(mode, callback) {
 export async function putBlob(id, blob) {
   const db = await openDb();
   if (!db) {
-    memoryFallback.set(id, blob);
+    memoryFallback().set(id, blob);
     return { ok: true, fallback: true };
   }
   return new Promise((resolve, reject) => {
@@ -102,7 +111,7 @@ export async function putBlob(id, blob) {
 
 export async function getBlob(id) {
   const db = await openDb();
-  if (!db) return memoryFallback.get(id) || null;
+  if (!db) return memoryFallback().get(id) || null;
   return new Promise((resolve) => {
     const tx = db.transaction(STORE_NAME, "readonly");
     const request = tx.objectStore(STORE_NAME).get(id);
@@ -114,7 +123,7 @@ export async function getBlob(id) {
 export async function deleteBlob(id) {
   const db = await openDb();
   if (!db) {
-    memoryFallback.delete(id);
+    memoryFallback().delete(id);
     return { ok: true, fallback: true };
   }
   return new Promise((resolve, reject) => {

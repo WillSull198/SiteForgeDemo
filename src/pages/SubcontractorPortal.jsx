@@ -42,7 +42,7 @@ export default function SubcontractorPortal() {
           <div className="client-panel">
             <h3>Subcontractor session unavailable</h3>
             <div className="client-copy">This subcontractor view needs a clean user session to render properly.</div>
-            <Button tone="bt-p" onClick={() => actions.resetDemo()} style={{ marginTop: 12 }}>
+            <Button tone="bt-p" onClick={() => actions.resetCurrentMode()} style={{ marginTop: 12 }}>
               Reset Demo State
             </Button>
           </div>

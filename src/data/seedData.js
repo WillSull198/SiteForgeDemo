@@ -31,6 +31,8 @@ const approvalTypes = [
 ];
 
 export const APP_CONFIG = {
+  // Deprecated: runtime persistence now uses src/services/storageMode.js to
+  // select isolated demo/real slots. Kept only for legacy migration tools.
   storageKey: "siteforge-v6-enterprise-demo",
   legacyStorageKeys: ["siteforge-v5-enterprise-demo"],
   storageVersion: 3,
@@ -2692,8 +2694,95 @@ const makeTemplateMarketplace = () => [
   { id: "mkt-003", name: "MBA Template", status: "Coming Soon" },
 ];
 
+const DEMO_COLLECTION_PATHS = [
+  "users",
+  "companies",
+  "clients",
+  "sites",
+  "schedules",
+  "siteBudgets",
+  "tasks",
+  "problems",
+  "rfis",
+  "variations",
+  "approvals",
+  "contractTemplates",
+  "clauseLibrary",
+  "contractPacks",
+  "procurement",
+  "qa",
+  "diary",
+  "safety",
+  "toolboxTalks",
+  "swms",
+  "passports.records",
+  "passports.scanLog",
+  "passports.siteAccess",
+  "passports.expiringTickets",
+  "passports.visitorPasses",
+  "presence.anomalies",
+  "presence.shifts",
+  "presence.records",
+  "presence.events",
+  "presence.exports",
+  "presence.siteCompliance",
+  "documents",
+  "messages",
+  "invoices",
+  "notifications.items",
+  "notifications.eventLog",
+  "buildxact.queue",
+  "buildxact.pendingPushes",
+  "buildxact.failedPushes",
+  "buildxact.syncEvents",
+  "buildxact.syncHistory",
+  "buildxact.payloadPreviews",
+  "auditTrail",
+  "boardReports",
+  "projectLogs",
+  "files.records",
+  "callbacks",
+  "pmAvailability",
+  "weatherForecasts",
+  "variationRegister",
+  "reportSchedules",
+  "reportQueue",
+  "recoveryOpportunities",
+  "transmittals",
+  "permits",
+];
+
+function pathValue(root, path) {
+  return path.split(".").reduce((cursor, part) => cursor?.[part], root);
+}
+
+function setPathValue(root, path, value) {
+  const parts = path.split(".");
+  let cursor = root;
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    const part = parts[index];
+    if (!cursor[part] || typeof cursor[part] !== "object") cursor[part] = {};
+    cursor = cursor[part];
+  }
+  cursor[parts[parts.length - 1]] = value;
+}
+
+function tagAsDemo(record) {
+  return record && typeof record === "object" ? { ...record, isDemo: true } : record;
+}
+
+function tagDemoState(state) {
+  DEMO_COLLECTION_PATHS.forEach((path) => {
+    const records = pathValue(state, path);
+    if (Array.isArray(records)) {
+      setPathValue(state, path, records.map(tagAsDemo));
+    }
+  });
+  return state;
+}
+
 export function createInitialData() {
-  return {
+  return tagDemoState({
     company: APP_CONFIG.builder,
     settings: {
       company: {
@@ -2805,7 +2894,7 @@ export function createInitialData() {
       suggestedActions: ["Escalate Northshore steel allowance decision to director", "Close Riverside revision acknowledgements before payroll", "Resolve Buildxact labour cost-code mapping"],
       summary: "Commercial recovery remains strongest on Riverside, while Northshore carries the highest margin-at-risk due to unresolved steel escalation and coordination issues.",
     },
-  };
+  });
 }
 
 export function migrateLegacyState(rawState = {}) {

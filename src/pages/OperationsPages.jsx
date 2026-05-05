@@ -13,6 +13,7 @@ import { exportCsv, exportElementToPdf } from "../services/pdfService";
 import { previewPdf } from "../services/documentIntelligence";
 import { useSiteForge } from "../services/siteforgeStore";
 import { can, canSeeAllSites, mustHandUpForApproval } from "../services/permissions";
+import { clearStateSlot, getStateStorageKey, readStateSlot, storageSlotExists, writeStateSlot } from "../services/storageMode";
 import { Icons } from "../components/icons";
 import {
   Badge,
@@ -1883,7 +1884,7 @@ function DocumentsPage() {
     try {
       const result = await askSiteForgeAi({
         apiKey,
-        projectContext: { siteId, documents: documentContext },
+	        projectContext: { siteId, documents: documentContext, orgMode: state.org?.mode },
         userMessage: `Plan search query: "${planQuery}".
 
 Search these SiteForge construction documents and respond only as JSON:
@@ -2824,7 +2825,7 @@ function AdminPage() {
     try {
       const result = await askSiteForgeAi({
         userMessage: "Reply with the word 'pong' only.",
-        projectContext: {},
+	        projectContext: { orgMode: state.org?.mode },
         apiKey: integrationsForm.anthropicApiKey.trim(),
       });
       if (result.source === "claude" && /pong/i.test(result.text || "")) {
@@ -2868,7 +2869,27 @@ function AdminPage() {
     payload.session &&
     payload.settings;
 
-  const handleImportFile = async (file) => {
+  const modeLabel = (mode) => (mode === "demo" ? "Demo data" : "My data");
+  const activeMode = state.org?.mode === "demo" || state.org?.mode === "real" ? state.org.mode : "blank";
+  const todayStamp = new Date().toISOString().slice(0, 10);
+  const realSlotExists = storageSlotExists("real") || activeMode === "real";
+  const demoSlotExists = storageSlotExists("demo") || activeMode === "demo";
+  const storageSummary = [
+    ["Current mode", activeMode === "blank" ? "Not set up" : modeLabel(activeMode)],
+    ["Real slot", realSlotExists ? "present" : "empty"],
+    ["Demo slot", demoSlotExists ? "present" : "empty"],
+  ];
+
+  const exportModeState = (mode) => {
+    const payload = activeMode === mode ? state : readStateSlot(mode);
+    if (!payload) {
+      setSettingsMessage(`${modeLabel(mode)} has no saved state yet.`);
+      return;
+    }
+    downloadJson(`siteforge-${mode}-export-${todayStamp}.json`, payload);
+  };
+
+  const handleImportFile = async (file, mode = activeMode === "demo" ? "demo" : "real") => {
     if (!file) return;
     try {
       const parsed = JSON.parse(await file.text());
@@ -2876,25 +2897,28 @@ function AdminPage() {
         setSettingsMessage("Import file does not match SiteForge schema.");
         return;
       }
-      setImportCandidate(parsed);
-      setSettingsMessage("Import file validated. Confirm replacement to restore it.");
+      if (parsed.org?.mode && parsed.org.mode !== mode) {
+        setSettingsMessage(`This file is a ${parsed.org.mode} export. Import it under ${modeLabel(parsed.org.mode)} instead.`);
+        return;
+      }
+      setImportCandidate({ mode, payload: { ...parsed, org: { ...(parsed.org || {}), mode } } });
+      setSettingsMessage(`${modeLabel(mode)} import validated. Confirm replacement to restore it.`);
     } catch (error) {
       setSettingsMessage(`Import failed: ${error?.message || "Invalid JSON file."}`);
     }
   };
 
-  const clearAllData = () => {
+  const clearModeData = (mode) => {
     if (deleteConfirm !== "DELETE") {
-      setSettingsMessage('Type "DELETE" to confirm clearing all local data.');
+      setSettingsMessage(`Type "DELETE" to confirm clearing ${modeLabel(mode)}.`);
       return;
     }
-    try {
-      window.localStorage.clear();
-      window.indexedDB?.deleteDatabase?.("siteforge-enterprise-db");
-      window.indexedDB?.deleteDatabase?.("siteforge-files");
-    } finally {
-      window.location.reload();
+    clearStateSlot(mode);
+    if (activeMode === mode) {
+      actions.resetCurrentMode();
     }
+    setDeleteConfirm("");
+    setSettingsMessage(`${modeLabel(mode)} cleared. The other workspace was not touched.`);
   };
   const unregisterServiceWorker = async () => {
     try {
@@ -3067,7 +3091,7 @@ function AdminPage() {
           <Card title="Demo Controls" icon={Icons.gear}>
             <div className="sm ct2">Reset the demo data back to the seeded construction scenario at any time.</div>
             <div className="sm ct2" style={{ marginTop: 8 }}>Current simulated time: {derived.currentNow}</div>
-            <Button tone="bt-p" onClick={() => actions.resetDemo()} style={{ marginTop: 12 }}>
+            <Button tone="bt-p" onClick={() => actions.resetCurrentMode()} style={{ marginTop: 12 }}>
               Reset Demo
             </Button>
             <div className="fa" style={{ marginTop: 10, justifyContent: "flex-start" }}>
@@ -3087,40 +3111,60 @@ function AdminPage() {
           </Card>
         ) : null}
         <Card title="Data Management" icon={Icons.help}>
-          <div className="list-stack">
-            <div className="linked-row">
-              <div>
-                <div className="b sm">Export all data</div>
-                <div className="xs ct3">Download the current SiteForge state as JSON.</div>
+          <div className="g2">
+            <div className="mini-card">
+              <div className="b sm">My data</div>
+              <div className="xs ct3">Real company storage. Demo data is rejected on import.</div>
+              <div className="fa" style={{ marginTop: 10, justifyContent: "flex-start" }}>
+                <Button small onClick={() => exportModeState("real")}>Export My Data</Button>
+                <label className="bt small">
+                  Import My Data
+                  <input
+                    type="file"
+                    accept="application/json,.json"
+                    style={{ display: "none" }}
+                    onChange={(event) => {
+                      handleImportFile(event.target.files?.[0], "real");
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
+                <Button small tone="bt-r" onClick={() => clearModeData("real")}>Clear My Data</Button>
               </div>
-              <Button small onClick={() => downloadJson(`siteforge-export-${new Date().toISOString().slice(0, 10)}.json`, state)}>Export JSON</Button>
+            </div>
+            <div className="mini-card">
+              <div className="b sm">Demo data</div>
+              <div className="xs ct3">Worked demo storage. Your real data is unaffected.</div>
+              <div className="fa" style={{ marginTop: 10, justifyContent: "flex-start" }}>
+                <Button small onClick={() => exportModeState("demo")}>Export Demo</Button>
+                <Button small tone="bt-p" onClick={() => actions.switchToMode("demo")}>Switch to Demo</Button>
+                <Button small tone="bt-r" onClick={() => clearModeData("demo")}>Reset Demo Slot</Button>
+              </div>
+            </div>
+          </div>
+          <div className="mini-card" style={{ marginTop: 10 }}>
+            <div className="b sm">Mode switching summary</div>
+            {storageSummary.map(([label, value]) => (
+              <div className="linked-row" key={label}>
+                <span>{label}</span>
+                <Badge tone={value === "empty" ? "medium" : "passed"}>{value}</Badge>
+              </div>
+            ))}
+            <div className="linked-row">
+              <span>Real key</span>
+              <span className="mono xs">{getStateStorageKey("real")}</span>
+            </div>
+            <div className="linked-row">
+              <span>Demo key</span>
+              <span className="mono xs">{getStateStorageKey("demo")}</span>
             </div>
             <div className="linked-row">
               <div>
-                <div className="b sm">Import data</div>
-                <div className="xs ct3">Restore a previously exported SiteForge JSON file.</div>
-              </div>
-              <label className="bt small">
-                Import JSON
-                <input
-                  type="file"
-                  accept="application/json,.json"
-                  style={{ display: "none" }}
-                  onChange={(event) => {
-                    handleImportFile(event.target.files?.[0]);
-                    event.target.value = "";
-                  }}
-                />
-              </label>
-            </div>
-            <div className="linked-row">
-              <div>
-                <div className="b sm">Clear all local data</div>
-                <div className="xs ct3">Type DELETE to wipe IndexedDB and local browser settings.</div>
+                <div className="b sm">Confirm destructive actions</div>
+                <div className="xs ct3">Type DELETE before clearing either workspace.</div>
               </div>
               <input className="inline-input" style={{ maxWidth: 120 }} value={deleteConfirm} onChange={(event) => setDeleteConfirm(event.target.value)} />
             </div>
-            <Button tone="bt-r" onClick={clearAllData}>Clear All Data</Button>
             <Button onClick={unregisterServiceWorker}>Emergency Reset Offline Cache</Button>
           </div>
         </Card>
@@ -3153,16 +3197,20 @@ function AdminPage() {
       </div>
       <Modal open={Boolean(importCandidate)} close={() => setImportCandidate(null)} title="Import SiteForge Data">
         <div className="sm ct2">
-          Replace current state with the imported data? Current local data will be overwritten.
+	          Replace {modeLabel(importCandidate?.mode)} with the imported data? The other workspace will not be touched.
         </div>
         <div className="fa">
           <Button onClick={() => setImportCandidate(null)}>Cancel</Button>
           <Button
             tone="bt-r"
             onClick={() => {
-              actions.importState(importCandidate);
-              setImportCandidate(null);
-              setSettingsMessage("Imported SiteForge data restored.");
+	              if (importCandidate?.mode === activeMode) {
+	                actions.importState(importCandidate.payload);
+	              } else if (importCandidate?.mode) {
+	                writeStateSlot(importCandidate.mode, importCandidate.payload);
+	              }
+	              setImportCandidate(null);
+	              setSettingsMessage("Imported SiteForge data restored to the selected workspace.");
             }}
           >
             Replace Current State

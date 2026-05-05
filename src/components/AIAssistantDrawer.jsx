@@ -152,7 +152,7 @@ export default function AIAssistantDrawer({ open, onClose }) {
                 setLoading(true);
                 const result = await askSiteForgeAi({
                   userMessage: outgoing.text,
-                  projectContext,
+	                  projectContext: { ...projectContext, orgMode: state.org?.mode },
                   apiKey:
                     (typeof window !== "undefined" ? window.localStorage.getItem("siteforge-anthropic-key") : "") ||
                     state.settings?.integrations?.anthropicApiKey,

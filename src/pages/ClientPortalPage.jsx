@@ -109,7 +109,7 @@ export default function ClientPortalPage() {
           <div className="client-panel">
             <h3>Client session unavailable</h3>
             <div className="client-copy">This portal session could not be restored from saved demo state.</div>
-            <Button tone="bt-p" onClick={() => actions.resetDemo()} style={{ marginTop: 12 }}>
+            <Button tone="bt-p" onClick={() => actions.resetCurrentMode()} style={{ marginTop: 12 }}>
               Reset Demo State
             </Button>
           </div>

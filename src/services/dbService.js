@@ -1,27 +1,29 @@
 /* SiteForge audit: Added a production-safe IndexedDB persistence layer for the live
-   browser prototype. The previous app-state persistence relied only on localStorage,
-   which is too small and brittle once uploads, contracts, and audit history grow. */
+   browser prototype. The app currently uses only the appState store below; the
+   per-resource stores are reserved infrastructure for the future resource layer.
+   Mode-specific file blobs live separately in siteforge-files-demo/real via
+   documentIntelligence.js. */
 
 const DB_NAME = "siteforge-enterprise-db";
 const DB_VERSION = 1;
 
 export const DB_STORES = {
   appState: { keyPath: "key" },
-  projects: { keyPath: "id", autoIncrement: true },
-  variations: { keyPath: "id", autoIncrement: true },
-  approvals: { keyPath: "id", autoIncrement: true },
-  contracts: { keyPath: "id", autoIncrement: true },
-  templates: { keyPath: "id", autoIncrement: true },
-  documents: { keyPath: "id", autoIncrement: true },
-  photos: { keyPath: "id", autoIncrement: true },
-  diary: { keyPath: "id", autoIncrement: true },
-  problems: { keyPath: "id", autoIncrement: true },
-  rfis: { keyPath: "id", autoIncrement: true },
-  inspections: { keyPath: "id", autoIncrement: true },
-  incidents: { keyPath: "id", autoIncrement: true },
-  plans: { keyPath: "id", autoIncrement: true },
-  settings: { keyPath: "key" },
-  auditLog: { keyPath: "id", autoIncrement: true },
+  projects: { keyPath: "id", autoIncrement: true }, // reserved
+  variations: { keyPath: "id", autoIncrement: true }, // reserved
+  approvals: { keyPath: "id", autoIncrement: true }, // reserved
+  contracts: { keyPath: "id", autoIncrement: true }, // reserved
+  templates: { keyPath: "id", autoIncrement: true }, // reserved
+  documents: { keyPath: "id", autoIncrement: true }, // reserved
+  photos: { keyPath: "id", autoIncrement: true }, // reserved
+  diary: { keyPath: "id", autoIncrement: true }, // reserved
+  problems: { keyPath: "id", autoIncrement: true }, // reserved
+  rfis: { keyPath: "id", autoIncrement: true }, // reserved
+  inspections: { keyPath: "id", autoIncrement: true }, // reserved
+  incidents: { keyPath: "id", autoIncrement: true }, // reserved
+  plans: { keyPath: "id", autoIncrement: true }, // reserved
+  settings: { keyPath: "key" }, // reserved
+  auditLog: { keyPath: "id", autoIncrement: true }, // reserved
 };
 
 let openPromise = null;

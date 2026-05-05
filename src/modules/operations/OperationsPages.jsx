@@ -2237,7 +2237,7 @@ export function AdminPage({ store }) {
         <Card title="Demo">
           <div className="sm ct2">Reset all persisted demo data back to the seeded SiteForge operating model.</div>
           <div style={{ marginTop: 10 }}>
-            <Button tone="bt-r" onClick={() => store.actions.resetDemo()}>
+            <Button tone="bt-r" onClick={() => store.actions.resetCurrentMode()}>
               Reset Demo Data
             </Button>
           </div>
