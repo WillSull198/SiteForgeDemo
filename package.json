@@ -7,8 +7,8 @@
     "dev": "vite",
     "build": "vite build && node scripts/copy-serve-json.mjs",
     "preview": "vite preview",
-    "start": "serve -s dist -l tcp://0.0.0.0:${PORT:-4173}",
-    "start:prod": "npm run build && npm start"
+    "start": "node scripts/start.mjs",
+    "start:prod": "npm run build && PORT=4173 npm start"
   },
   "dependencies": {
     "react": "^18.3.1",
