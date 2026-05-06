@@ -45,9 +45,11 @@ Then open `http://localhost:4173`.
 6. Check Railway build logs:
    - `npm install` should complete.
    - `npm run build` should produce `dist/index.html` and assets.
+   - If `dist/index.html`, `dist/assets`, or `dist/serve.json` are missing, `npm start` will fail loudly instead of serving a blank page.
    - `npm start` should log `[start] Starting serve on 0.0.0.0:<PORT>`.
    - `serve` should log that it is accepting connections on `0.0.0.0:<PORT>`.
 7. If Railway still cannot reach the service, clear the Target Port field in Public Networking and redeploy.
+8. Open `/railway-debug.html` on the Railway domain. If it loads, static serving works and any blank app is a bundle/runtime/cache issue.
 
 ### Cloudflare Worker proxy
 

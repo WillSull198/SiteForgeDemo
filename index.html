@@ -48,26 +48,58 @@
     </style>
   </head>
   <body>
-    <div id="root">
-      <noscript>
-        <div class="siteforge-boot-fallback">
-          <h1>SiteForge needs JavaScript</h1>
-          <p>Enable JavaScript in your browser to use SiteForge.</p>
-        </div>
-      </noscript>
-      <div id="boot-fallback" class="siteforge-boot-fallback" style="display: none;">
-        <h1>SiteForge didn't start</h1>
-        <p>The app's JavaScript bundle failed to load or run. This usually means a stale offline cache or a deployment issue.</p>
-        <p><strong>Try this:</strong> click <em>Reset offline cache</em> below to unregister any stuck service worker and clear caches, then reload.</p>
-        <p><button onclick="window.__siteforgeResetOfflineCache()">Reset offline cache</button></p>
-        <p style="font-size: 13px; margin-top: 24px;">Still seeing this? Open browser DevTools, check the Console tab for red errors, and share them with the SiteForge team.</p>
+    <div id="root"></div>
+    <noscript>
+      <div class="siteforge-boot-fallback">
+        <h1>SiteForge needs JavaScript</h1>
+        <p>Enable JavaScript in your browser to use SiteForge.</p>
       </div>
+    </noscript>
+    <div id="boot-fallback" class="siteforge-boot-fallback" style="display: none;">
+      <h1>SiteForge didn't start</h1>
+      <p id="boot-fallback-reason">The app's JavaScript bundle failed to load or run. This usually means a stale offline cache, missing build asset, or deployment issue.</p>
+      <p><strong>Try this:</strong> click <em>Reset offline cache</em> below to unregister any stuck service worker and clear caches, then reload.</p>
+      <p><button onclick="window.__siteforgeResetOfflineCache()">Reset offline cache</button></p>
+      <p style="font-size: 13px; margin-top: 24px;">Still seeing this? Open browser DevTools, check the Console tab for red errors, and share them with the SiteForge team.</p>
     </div>
     <script>
-      window.__siteforgeBootTimeout = setTimeout(function () {
+      window.__siteforgeShowBootFailure = function (reason) {
         var fallback = document.getElementById("boot-fallback");
+        var reasonNode = document.getElementById("boot-fallback-reason");
+        if (reasonNode && reason) {
+          reasonNode.textContent = reason;
+        }
         if (fallback) fallback.style.display = "block";
+      };
+
+      window.__siteforgeMarkBooted = function () {
+        if (window.__siteforgeBootTimeout) {
+          clearTimeout(window.__siteforgeBootTimeout);
+          window.__siteforgeBootTimeout = null;
+        }
+        var fallback = document.getElementById("boot-fallback");
+        if (fallback) fallback.style.display = "none";
+      };
+
+      window.__siteforgeBootTimeout = setTimeout(function () {
+        window.__siteforgeShowBootFailure("SiteForge did not finish booting within 5 seconds. The JavaScript bundle may be missing, cached, or failing during startup.");
       }, 5000);
+
+      window.addEventListener("error", function (event) {
+        var target = event.target || {};
+        if (target.tagName === "SCRIPT") {
+          window.__siteforgeShowBootFailure("SiteForge's JavaScript asset failed to load. This usually means the Railway build did not produce the asset referenced by index.html.");
+          return;
+        }
+        if (event.message) {
+          window.__siteforgeShowBootFailure("SiteForge crashed during startup: " + event.message);
+        }
+      }, true);
+
+      window.addEventListener("unhandledrejection", function (event) {
+        var reason = event.reason && (event.reason.message || String(event.reason));
+        window.__siteforgeShowBootFailure("SiteForge hit an unhandled startup error: " + (reason || "unknown error"));
+      });
 
       window.__siteforgeResetOfflineCache = async function () {
         try {

@@ -71,13 +71,43 @@ if ("serviceWorker" in navigator) {
   });
 }
 
+class RootBootBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  componentDidCatch(error) {
+    this.setState({ error });
+    window.__siteforgeShowBootFailure?.(`SiteForge crashed while rendering: ${error?.message || "unknown error"}`);
+  }
+
+  render() {
+    if (this.state.error) return null;
+    return this.props.children;
+  }
+}
+
+function BootedApp() {
+  React.useEffect(() => {
+    window.requestAnimationFrame(() => {
+      const root = document.getElementById("root");
+      const hasVisibleApp = Boolean(root?.children?.length) && (root.getBoundingClientRect().height > 0 || root.textContent.trim().length > 0);
+      if (hasVisibleApp) {
+        window.__siteforgeMarkBooted?.();
+      } else {
+        window.__siteforgeShowBootFailure?.("React mounted but rendered no visible SiteForge UI. This points to a route/state render issue rather than Railway networking.");
+      }
+    });
+  }, []);
+
+  return <App />;
+}
+
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <App />
+    <RootBootBoundary>
+      <BootedApp />
+    </RootBootBoundary>
   </React.StrictMode>,
 );
-
-if (typeof window !== "undefined" && window.__siteforgeBootTimeout) {
-  clearTimeout(window.__siteforgeBootTimeout);
-  window.__siteforgeBootTimeout = null;
-}
