@@ -302,6 +302,42 @@ function Shell() {
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.storage?.estimate) return;
+    try {
+      if (window.sessionStorage.getItem("siteforge-storage-quota-notified")) return;
+    } catch (error) {
+      // Private browsing can block sessionStorage; the quota check can still run.
+    }
+    navigator.storage.estimate().then((estimate) => {
+      const usage = estimate.usage || 0;
+      const quota = estimate.quota || 0;
+      if (!quota) return;
+      const ratio = usage / quota;
+      if (ratio <= 0.7) return;
+      const percent = Math.round(ratio * 100);
+      actions.pushNotification({
+        eventType: ratio > 0.85 ? "storage.critical" : "storage.warning",
+        title: `Storage ${percent}% full`,
+        body: ratio > 0.85
+          ? "Clear old documents in Settings -> Data Management to free space."
+          : "Consider archiving older projects in Settings -> Data Management.",
+        priority: ratio > 0.85 ? "high" : "medium",
+        route: { kind: routeKindForRole(role), siteId: activeSiteId, page: "admin", entityId: null },
+      });
+      try {
+        window.sessionStorage.setItem("siteforge-storage-quota-notified", "true");
+      } catch (error) {
+        // Ignore storage issues; notification has already been queued.
+      }
+    }).catch(() => {});
+  }, [actions, activeSiteId, role]);
+
+  useEffect(() => {
+    if (!state.onboarding?.complete) return;
+    actions.refreshAiInsightCache?.({ siteId: activeSiteId });
+  }, [activeSiteId, state.onboarding?.complete, state.diary.length, state.approvals.length, state.problems.length, state.procurement.length]);
+
   const isClient = route.kind === "client";
   const isWorker = route.kind === "worker";
   const isSubcontractor = route.kind === "subcontractor";

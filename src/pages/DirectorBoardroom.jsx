@@ -250,6 +250,9 @@ export default function DirectorBoardroom() {
           </Card>
 
           <Card title="AI Insights" icon={Icons.zap}>
+            <Badge tone={derived.boardInsight?.source === "openai" || derived.boardInsight?.source === "claude" ? "passed" : "medium"}>
+              {derived.boardInsight?.source === "openai" ? "ChatGPT" : derived.boardInsight?.source === "claude" ? "Claude" : "Local template"}
+            </Badge>
             <div className="client-copy">{derived.boardInsight?.summary || "No portfolio signals are available yet. Add projects and operational activity to generate board insights."}</div>
             <div className="g3" style={{ marginTop: 10 }}>
               <div className="mini-panel">

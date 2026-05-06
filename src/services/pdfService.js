@@ -153,6 +153,15 @@ export async function generateSignedContractPdfBlob({ contractPack, approval, bu
   y += 5;
   doc.text(`Date / time: ${signature?.signedAt || "Pending"}`, margin, y);
   y += 5;
+  if (signature?.ip) {
+    doc.text(`IP: ${signature.ip}`, margin, y);
+    y += 5;
+  }
+  if (signature?.ua) {
+    const uaLines = doc.splitTextToSize(`User-agent: ${signature.ua}`, contentWidth);
+    doc.text(uaLines, margin, y);
+    y += uaLines.length * 5;
+  }
   if (signature?.documentHash) {
     doc.text(`Document hash: ${signature.documentHash}`, margin, y);
     y += 5;

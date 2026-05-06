@@ -36,11 +36,12 @@ export default function IntegrationsPage() {
   const aiConfig = getStoredAiConfig(integrationSettings);
   const aiConnected = aiConfig.provider === "openai" ? Boolean(aiConfig.openaiKey) : Boolean(aiConfig.anthropicKey);
   const aiProviderLabel = aiConfig.provider === "openai" ? "ChatGPT / OpenAI" : "Claude / Anthropic";
+  const aiLastTestStatus = integrationSettings.aiLastTestProvider === aiConfig.provider ? integrationSettings.aiLastTestStatus : null;
   const aiStatusLabel = !aiConnected
     ? "not configured"
-    : integrationSettings.aiLastTestStatus === "ok"
+    : aiLastTestStatus === "ok"
       ? "configured + last test ok"
-      : integrationSettings.aiLastTestStatus === "failed"
+      : aiLastTestStatus === "failed"
         ? "configured + test failed"
         : "configured + untested";
 
@@ -89,7 +90,19 @@ export default function IntegrationsPage() {
                   <div className="b sm">{name}</div>
                   <div className="xs ct3">{status}</div>
                 </div>
-                <Badge tone={String(status).includes("connected") ? "passed" : String(status).includes("queued") ? "medium" : "critical"}>{status}</Badge>
+                <Badge
+                  tone={
+                    String(status).includes("test failed")
+                      ? "critical"
+                      : String(status).includes("connected") || String(status).includes("last test ok")
+                        ? "passed"
+                        : String(status).includes("queued") || String(status).includes("untested")
+                          ? "medium"
+                          : "critical"
+                  }
+                >
+                  {status}
+                </Badge>
                 <Button
                   small
                   onClick={() =>

@@ -81,6 +81,10 @@ export default function AIAssistantDrawer({ open, onClose }) {
   const [chat, setChat] = useState([]);
   const [loading, setLoading] = useState(false);
   const suggestions = useMemo(() => buildSuggestions(state, derived, actions), [actions, derived, state]);
+  const integrationSettings = state.device?.settings?.integrations || state.settings?.integrations || {};
+  const aiConfig = getStoredAiConfig(integrationSettings);
+  const providerLabel = aiConfig.provider === "openai" ? "ChatGPT" : "Claude";
+  const testStatus = integrationSettings.aiLastTestProvider === aiConfig.provider ? integrationSettings.aiLastTestStatus || "untested" : "untested";
   const projectContext = useMemo(() => {
     const siteId = state.session.siteId;
     const site = state.sites.find((entry) => entry.id === siteId);
@@ -104,6 +108,16 @@ export default function AIAssistantDrawer({ open, onClose }) {
           <div>
             <div className="xs ct3">AI-assisted</div>
             <div className="b md">Assistant</div>
+            <div className="xs ct3" style={{ marginTop: 4 }}>
+              {providerLabel} ·{" "}
+              {testStatus === "ok" ? (
+                <Badge tone="passed">connected</Badge>
+              ) : testStatus === "failed" ? (
+                <Badge tone="critical">test failed</Badge>
+              ) : (
+                <Badge tone="medium">untested</Badge>
+              )}
+            </div>
           </div>
           <button className="bt-i" onClick={onClose} type="button">
             {renderIcon(Icons.x, 13)}
@@ -150,7 +164,6 @@ export default function AIAssistantDrawer({ open, onClose }) {
                 setChat((current) => [...current, outgoing]);
                 setMessage("");
                 setLoading(true);
-                const aiConfig = getStoredAiConfig(state.device?.settings?.integrations || state.settings?.integrations || {});
                 const result = await askSiteForgeAi({
                   userMessage: outgoing.text,
                   projectContext: { ...projectContext, orgMode: state.org?.mode },

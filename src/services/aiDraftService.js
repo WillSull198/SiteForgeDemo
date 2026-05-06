@@ -121,6 +121,8 @@ export function draftApproval(sourceEntity, type) {
     costImpact: impacts.costImpact,
     timeImpact: impacts.timeImpact,
     attachmentsSummary: impacts.attachmentsSummary,
+    source: "local-template",
+    upgradeStartedAt: new Date().toISOString(),
   };
 }
 

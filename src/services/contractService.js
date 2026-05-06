@@ -235,6 +235,7 @@ export function signContract(contractPack, side, signer) {
         role: signer.role,
         signedAt,
         ip: signer.ip || "198.51.100.200",
+        ua: signer.ua || signer.userAgent || "SiteForge Browser",
         documentHash,
       },
     },

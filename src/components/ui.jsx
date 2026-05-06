@@ -33,8 +33,8 @@ export function MetricGrid({ columns = 4, items }) {
   );
 }
 
-export function Badge({ tone, children, className = "" }) {
-  return <span className={`bg ${tone} ${className}`.trim()}>{children}</span>;
+export function Badge({ tone, children, className = "", ...props }) {
+  return <span className={`bg ${tone} ${className}`.trim()} {...props}>{children}</span>;
 }
 
 export function EmptyState({ icon, title = "Nothing here yet", description = "When records are created, they will appear here.", action = null }) {

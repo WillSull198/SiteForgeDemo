@@ -3389,6 +3389,51 @@ button:disabled {
   }
 }
 
+@media (max-width: 420px) {
+  html,
+  body {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  .onboarding-shell,
+  .client-shell,
+  .subbie-shell,
+  .worker-shell {
+    padding: 10px !important;
+  }
+
+  .onboarding-card,
+  .client-panel,
+  .worker-card,
+  .ai-drawer {
+    border-radius: 14px;
+    padding: 14px !important;
+    width: 100% !important;
+  }
+
+  .onboarding-step-header h1,
+  .client-hero h1,
+  .client-detail-head h1 {
+    font-size: 24px;
+    line-height: 1.12;
+  }
+
+  .ai-drawer-head,
+  .linked-row,
+  .fb,
+  .fx {
+    min-width: 0;
+  }
+
+  .bt,
+  .bt-p,
+  .bt-r,
+  .bt-i {
+    min-height: 44px;
+  }
+}
+
 @media print {
   .S,
   .T,

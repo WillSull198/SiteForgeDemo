@@ -89,15 +89,20 @@ export default function Onboarding({ state, actions }) {
     pmId: "",
     notes: "",
   });
+  const onboardingIntegrationSettings = state.device?.settings?.integrations || state.settings?.integrations || {};
+  const readAiKey = (key) => {
+    if (typeof window === "undefined") return "";
+    return window.localStorage.getItem(key) || "";
+  };
   const [integrations, setIntegrations] = useState({
-    aiProvider: AI_PROVIDERS.ANTHROPIC,
-    anthropicApiKey: "",
-    openaiApiKey: "",
-    openaiProxyUrl: "",
-    anthropicModel: DEFAULT_AI_MODELS.anthropic,
-    openaiModel: DEFAULT_AI_MODELS.openai,
-    buildxactApiKey: "",
-    buildxactWorkspaceId: "",
+    aiProvider: normaliseAiProvider(onboardingIntegrationSettings.aiProvider || AI_PROVIDERS.ANTHROPIC),
+    anthropicApiKey: readAiKey(AI_STORAGE_KEYS.anthropic),
+    openaiApiKey: readAiKey(AI_STORAGE_KEYS.openai),
+    openaiProxyUrl: readAiKey(AI_STORAGE_KEYS.openaiProxy),
+    anthropicModel: onboardingIntegrationSettings.anthropicModel || onboardingIntegrationSettings.aiModel || DEFAULT_AI_MODELS.anthropic,
+    openaiModel: onboardingIntegrationSettings.openaiModel || DEFAULT_AI_MODELS.openai,
+    buildxactApiKey: onboardingIntegrationSettings.buildxactApiKey || "",
+    buildxactWorkspaceId: onboardingIntegrationSettings.buildxactWorkspaceId || "",
   });
   const [aiStatus, setAiStatus] = useState("");
   const [aiTestResult, setAiTestResult] = useState(null);

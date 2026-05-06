@@ -222,6 +222,9 @@ export default function ClientPortalPage() {
             </div>
             <div className="client-panel">
               <h3>Weekly Summary & Photos</h3>
+              <Badge tone={derived.weeklyClientSummarySource === "openai" || derived.weeklyClientSummarySource === "claude" ? "passed" : "medium"}>
+                {derived.weeklyClientSummarySource === "openai" ? "ChatGPT" : derived.weeklyClientSummarySource === "claude" ? "Claude" : "Local template"}
+              </Badge>
               <div className="client-copy">{derived.weeklyClientSummary}</div>
               <div className="client-photo-row">
                 {derived.photoTimeline

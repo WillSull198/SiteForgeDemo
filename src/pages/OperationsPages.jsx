@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { flagBudgetAnomaly, suggestRFI } from "../services/aiDraftService";
-import { AI_PROVIDERS, AI_STORAGE_KEYS, DEFAULT_AI_MODELS, askSiteForgeAi, getStoredAiConfig, normaliseAiProvider, testAiConnection as runProviderConnectionTest } from "../services/aiService";
+import { AI_PROVIDERS, AI_STORAGE_KEYS, DEFAULT_AI_MODELS, askSiteForgeAi, getStoredAiConfig, normaliseAiProvider, testAiConnection as runProviderConnectionTest, verifyOpenAiProxy } from "../services/aiService";
 import DataTable from "../components/DataTable";
 import FileDropZone from "../components/FileDropZone";
 import PhotoUpload from "../components/PhotoUpload";
@@ -2012,13 +2012,24 @@ ${JSON.stringify(documentContext)}`,
                       {(selected.impactAnalysis.affectedZones || []).join(", ") || "General plan revision"}
                     </div>
                   </div>
+	                  <div className="mini-panel" style={{ marginTop: 12 }}>
+	                    <div className="xs ct3">Revision notes</div>
+	                    <div className="sm ct2" style={{ marginTop: 6 }}>
+	                      {(selected.impactAnalysis.notes || []).join(" ") || selected.impactAnalysis.summary}
+	                    </div>
+	                  </div>
                   <div className="mini-panel" style={{ marginTop: 12 }}>
-                    <div className="xs ct3">Revision notes</div>
+                    <div className="fb">
+                      <div className="xs ct3">AI summary</div>
+                      <Badge tone={selected.impactAnalysis.aiSource ? "passed" : "medium"}>
+                        {selected.impactAnalysis.aiSource === "openai" ? "ChatGPT" : selected.impactAnalysis.aiSource === "claude" ? "Claude" : "Keyword diff"}
+                      </Badge>
+                    </div>
                     <div className="sm ct2" style={{ marginTop: 6 }}>
-                      {(selected.impactAnalysis.notes || []).join(" ") || selected.impactAnalysis.summary}
+                      {selected.impactAnalysis.aiSummary || "AI revision summary will appear here after upload when a real AI provider is connected."}
                     </div>
                   </div>
-                  <div className="list-stack" style={{ marginTop: 12 }}>
+	                  <div className="list-stack" style={{ marginTop: 12 }}>
                     {(selected.impactAnalysis.acknowledgementsRequired || []).map((userId) => {
                       const user = state.users.find((entry) => entry.id === userId);
                       const done = selected.impactAnalysis.acknowledgedBy?.includes(userId);
@@ -2799,6 +2810,7 @@ function AdminPage() {
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [importCandidate, setImportCandidate] = useState(null);
   const [testingAi, setTestingAi] = useState(false);
+  const [testingProxy, setTestingProxy] = useState(false);
 
   const saveCompany = () => {
     if (!companyForm.name.trim()) {
@@ -2889,6 +2901,18 @@ function AdminPage() {
       setSettingsMessage(`${providerName} API key test failed: ${error?.message || "Unknown error"}`);
     } finally {
       setTestingAi(false);
+    }
+  };
+
+  const runProxyVerification = async () => {
+    setTestingProxy(true);
+    try {
+      const result = await verifyOpenAiProxy(integrationsForm.openaiProxyUrl.trim());
+      setSettingsMessage(result.ok ? `✓ ${result.text}` : result.text);
+    } catch (error) {
+      setSettingsMessage(`Proxy verification failed: ${error?.message || "Unknown error"}`);
+    } finally {
+      setTestingProxy(false);
     }
   };
 
@@ -3097,6 +3121,11 @@ function AdminPage() {
             <label>OpenAI proxy URL</label>
             <input value={integrationsForm.openaiProxyUrl} onChange={(event) => setIntegrationsForm((current) => ({ ...current, openaiProxyUrl: event.target.value }))} placeholder="https://your-worker.workers.dev" />
             <div className="xs ct3" style={{ marginTop: 4 }}>Required for OpenAI in the browser. See docs/setup-openai-proxy.md.</div>
+            <div style={{ marginTop: 8 }}>
+              <Button small onClick={runProxyVerification} disabled={testingProxy}>
+                {testingProxy ? "Verifying..." : "Verify proxy"}
+              </Button>
+            </div>
           </div>
           {integrationSettings.aiLastTestedAt ? (
             <div className="notice-banner" style={{ marginBottom: 8 }}>

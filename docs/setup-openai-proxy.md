@@ -8,11 +8,13 @@ OpenAI API keys must not be exposed directly in browser fetches. SiteForge can u
 2. Paste `docs/proxies/openai-proxy.js`.
 3. Add a secret named `OPENAI_API_KEY`.
 4. Deploy the Worker.
-5. In SiteForge, open Settings -> Device Settings: Integrations.
-6. Select `ChatGPT / OpenAI`.
-7. Paste your OpenAI key into the OpenAI key field.
-8. Paste the Worker URL into `OpenAI proxy URL`.
-9. Save and click `Test AI Connection`.
+5. Open `https://<your-worker>.workers.dev/health`.
+6. Confirm it returns `{"ok":true,"secretConfigured":true,"service":"siteforge-openai-proxy"}`.
+7. In SiteForge, open Settings -> Device Settings: Integrations.
+8. Select `ChatGPT / OpenAI`.
+9. Paste your OpenAI key into the OpenAI key field.
+10. Paste the Worker URL into `OpenAI proxy URL`.
+11. Click `Verify proxy`, then save and click `Test AI Connection`.
 
 ## Vercel Edge
 
@@ -32,3 +34,5 @@ OpenAI API keys must not be exposed directly in browser fetches. SiteForge can u
 ## Expected Result
 
 The SiteForge test should show `OpenAI API key works.` Routine assistant calls in demo mode still skip external AI. Real-mode assistant, plan search, and AI draft upgrades can use OpenAI through the proxy.
+
+Before production, restrict `Access-Control-Allow-Origin` in the proxy templates from `*` to the deployed SiteForge domain.

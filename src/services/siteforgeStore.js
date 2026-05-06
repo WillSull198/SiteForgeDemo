@@ -24,6 +24,7 @@ import { loadPersistedAppState } from "./dbService";
 import { generateOperationsReportPdfBlob, generateSignedContractPdfBlob, generateTransmittalPdfBlob } from "./pdfService";
 import { diffPlans, parseTemplate, removeFileEverywhere, uploadFile, uploadSeededTextFile, buildTemplatePreviewContent, getBlob, putBlob } from "./documentIntelligence";
 import { dispatchNotificationEvent } from "./notificationEngine";
+import { askSiteForgeAi, getStoredAiConfig } from "./aiService";
 import { can, canSeeAllSites, routeKindForRole } from "./permissions";
 import {
   buildBuildxactPullSnapshot,
@@ -463,6 +464,7 @@ function createBlankSlate() {
     templateMarketplace: getReferenceTemplateMarketplace(),
     variationRegister: [],
     boardInsightsCache: null,
+    aiCache: { weeklyClientSummary: {}, boardInsights: {} },
     reportSchedules: [],
     reportQueue: [],
     recoveryOpportunities: [],
@@ -852,6 +854,10 @@ function normaliseState(state) {
   next.teamsQueue = Array.isArray(next.teamsQueue) ? next.teamsQueue.slice(0, 160) : [];
   next.auditTrail = Array.isArray(next.auditTrail) ? next.auditTrail.slice(0, 600) : [];
   next.projectLogs = Array.isArray(next.projectLogs) ? next.projectLogs.slice(0, 240) : [];
+  next.aiCache = {
+    weeklyClientSummary: { ...(next.aiCache?.weeklyClientSummary || {}) },
+    boardInsights: { ...(next.aiCache?.boardInsights || {}) },
+  };
   next.transmittals = Array.isArray(next.transmittals) ? next.transmittals.slice(0, 160) : [];
   next.permits = Array.isArray(next.permits) ? next.permits.slice(0, 160) : [];
   next.recoveryOpportunities = Array.isArray(next.recoveryOpportunities) ? next.recoveryOpportunities.slice(0, 180) : [];
@@ -1092,6 +1098,15 @@ function buildMetrics(state) {
           Math.max(0, 80 - presenceConfidence) / 2,
       ),
     );
+    const weeklySummarySiteId = currentClient?.siteId || currentSite?.id || state.session.siteId;
+    const weeklySummaryCache = weeklySummarySiteId ? state.aiCache?.weeklyClientSummary?.[weeklySummarySiteId] : null;
+    const localBoardInsight = boardInsights({
+      sites: state.sites,
+      approvals: openApprovals,
+      presence: state.presence.records,
+    });
+    const cachedBoardInsight = state.aiCache?.boardInsights?.portfolio;
+
     return {
       siteId: site.id,
       siteName: site.name,
@@ -2363,7 +2378,7 @@ function finaliseClientSignedContract(next, helpers, contractPack, approval, sig
   const signedPack = signContract(contractPack, "client", {
     name: signerName || client?.primaryContact || "Client",
     role: "Client",
-    ip: "203.0.113.51",
+    ...getBrowserEvidence(),
   });
   Object.assign(contractPack, signedPack);
   if (approval) {
@@ -2953,6 +2968,79 @@ export function SiteForgeProvider({ children }) {
           siteId: target.siteId,
         });
       });
+    },
+    [mutate],
+  );
+
+  const refreshAiInsightCache = useCallback(
+    async ({ siteId = null } = {}) => {
+      const snapshot = stateRef.current;
+      if (!snapshot?.onboarding?.complete || snapshot.org?.mode === "demo") return;
+      const integrationSettings = snapshot.device?.settings?.integrations || snapshot.settings?.integrations || {};
+      const aiConfig = getStoredAiConfig(integrationSettings);
+      if (!aiConfig.apiKey) return;
+      const resolvedSiteId = siteId || snapshot.session.siteId || snapshot.sites[0]?.id || null;
+      const now = Date.now();
+      const cacheFresh = (entry, ttlMs) => {
+        const generated = Date.parse(entry?.generatedAt || "");
+        return Number.isFinite(generated) && now - generated < ttlMs;
+      };
+
+      if (resolvedSiteId) {
+        const diary = snapshot.diary.filter((entry) => entry.siteId === resolvedSiteId).slice(0, 12);
+        const diaryHash = hashString(diary.map((entry) => `${entry.id}:${entry.updatedAt || entry.createdAt || entry.date}:${entry.summary}`).join("|"));
+        const currentWeekly = snapshot.aiCache?.weeklyClientSummary?.[resolvedSiteId];
+        if (diary.length && (!currentWeekly || currentWeekly.basedOnDiaryHash !== diaryHash || !cacheFresh(currentWeekly, 86400000))) {
+          const result = await askSiteForgeAi({
+            userMessage: `Summarise these SiteForge diary entries into a concise client-facing weekly operations summary for an Australian residential build. Mention rain, blockers, evidence, and next actions only where present.\n\n${JSON.stringify(diary)}`,
+            projectContext: { orgMode: snapshot.org?.mode, site: snapshot.sites.find((entry) => entry.id === resolvedSiteId), diary },
+            provider: aiConfig.provider,
+            apiKey: aiConfig.apiKey,
+            model: aiConfig.model,
+            openaiProxyUrl: aiConfig.openaiProxyUrl,
+          });
+          if (result.source === "claude" || result.source === "openai") {
+            mutate((next) => {
+              next.aiCache = next.aiCache || { weeklyClientSummary: {}, boardInsights: {} };
+              next.aiCache.weeklyClientSummary = next.aiCache.weeklyClientSummary || {};
+              next.aiCache.weeklyClientSummary[resolvedSiteId] = {
+                summary: result.text,
+                generatedAt: new Date().toISOString(),
+                basedOnDiaryHash: diaryHash,
+                source: result.source,
+              };
+            });
+          }
+        }
+      }
+
+      const openApprovals = snapshot.approvals.filter((approval) => !["signed", "declined", "archived"].includes(approval.status));
+      const openProblems = snapshot.problems.filter((problem) => !["closed", "resolved"].includes(problem.status));
+      const delayedProcurement = snapshot.procurement.filter((item) => ["delayed", "escalated"].includes(item.status));
+      const boardHash = hashString([...openApprovals, ...openProblems, ...delayedProcurement].map((entry) => `${entry.id}:${entry.status}:${entry.updatedAt || entry.createdAt || entry.sentAt || ""}`).join("|"));
+      const currentBoard = snapshot.aiCache?.boardInsights?.portfolio;
+      if ((openApprovals.length || openProblems.length || delayedProcurement.length) && (!currentBoard || currentBoard.basedOnPortfolioHash !== boardHash || !cacheFresh(currentBoard, 21600000))) {
+        const result = await askSiteForgeAi({
+          userMessage: `Create a Director Boardroom operations insight for SiteForge. Use only operations/compliance/commercial-recovery language, not P&L. Return one sharp paragraph plus 3 recommended actions.\n\n${JSON.stringify({ sites: snapshot.sites, openApprovals, openProblems, delayedProcurement })}`,
+          projectContext: { orgMode: snapshot.org?.mode, sites: snapshot.sites, openApprovals, openProblems, delayedProcurement },
+          provider: aiConfig.provider,
+          apiKey: aiConfig.apiKey,
+          model: aiConfig.model,
+          openaiProxyUrl: aiConfig.openaiProxyUrl,
+        });
+        if (result.source === "claude" || result.source === "openai") {
+          mutate((next) => {
+            next.aiCache = next.aiCache || { weeklyClientSummary: {}, boardInsights: {} };
+            next.aiCache.boardInsights = next.aiCache.boardInsights || {};
+            next.aiCache.boardInsights.portfolio = {
+              summary: result.text,
+              generatedAt: new Date().toISOString(),
+              basedOnPortfolioHash: boardHash,
+              source: result.source,
+            };
+          });
+        }
+      }
     },
     [mutate],
   );
@@ -3622,6 +3710,36 @@ export function SiteForgeProvider({ children }) {
           next.notifications.eventLog = next.notifications.eventLog.slice(0, 240);
         });
       },
+      pushNotification({ eventType = "system.notice", title, body, priority = "medium", route = null }) {
+        mutate((next) => {
+          const now = nowStamp();
+          const recipientId = next.session.userId || next.users[0]?.id || null;
+          const item = {
+            id: randomId("ntf"),
+            eventType,
+            channel: "in-app",
+            recipientId,
+            recipientRole: next.session.role || next.users[0]?.role || "Director",
+            siteId: next.session.siteId || null,
+            entityType: "system",
+            entityId: eventType,
+            title,
+            body,
+            severity: priority,
+            readAt: null,
+            createdAt: now,
+            group: "System",
+            route: route || { kind: routeKindForRole(next.session.role || "Director"), siteId: next.session.siteId, page: "admin", entityId: null },
+          };
+          const duplicate = next.notifications.items.some((entry) => entry.eventType === item.eventType && !entry.readAt && entry.title === item.title);
+          if (duplicate) return;
+          next.notifications.items.unshift(item);
+          next.notifications.items = next.notifications.items.slice(0, 180);
+          if (["high", "critical"].includes(priority)) {
+            pushToast(next, { eventType, tone: priority === "critical" ? "critical" : "high", title, body });
+          }
+        });
+      },
       saveTableViewState(tableKey, payload) {
         mutate((next) => {
           next.tableViews.state[tableKey] = {
@@ -3897,6 +4015,8 @@ export function SiteForgeProvider({ children }) {
               recommendation: "Recommended for issue to client for review and signature.",
               costImpact: numericCost,
               timeImpact: numericDays,
+              source: "local-template",
+              upgradeStartedAt: nowStamp(),
             },
             timeline: [],
             messageThread: [],
@@ -5398,6 +5518,8 @@ export function SiteForgeProvider({ children }) {
                 recommendation: "Recommended for issue to client for review and signature.",
                 costImpact: numericValue,
                 timeImpact: numericDays,
+                source: "local-template",
+                upgradeStartedAt: nowStamp(),
               },
               timeline: [],
               messageThread: [],
@@ -6900,6 +7022,7 @@ export function SiteForgeProvider({ children }) {
           runTimedAutomationSweep(next, helpers);
         });
       },
+      refreshAiInsightCache,
       async verifyIndexedAuditChain() {
         const result = await Audit.verify();
         mutate((next) => {
@@ -7542,6 +7665,7 @@ export function SiteForgeProvider({ children }) {
           siteId,
           entityType: "document",
         });
+        let aiDiffRequest = null;
         setState((previous) => {
           const next = cloneState(previous);
           const helpers = createHelpers(previous, next);
@@ -7590,6 +7714,13 @@ export function SiteForgeProvider({ children }) {
           if (existing) {
             existing.archived = true;
             existing.supersededBy = document.id;
+            const oldFile = next.files.records.find((entry) => entry.id === existing.fileId);
+            aiDiffRequest = {
+              documentId: document.id,
+              siteId,
+              oldText: oldFile?.extractedText || oldFile?.text || existing.impactAnalysis?.summary || "",
+              newText: metadata.extractedText || metadata.text || changeSummary.summary || "",
+            };
           }
           next.documents.unshift(document);
           acknowledgementUsers.forEach((userId) => {
@@ -7632,6 +7763,39 @@ export function SiteForgeProvider({ children }) {
           });
           return normaliseState(next);
         });
+        const snapshot = stateRef.current;
+        const integrationSettings = snapshot.device?.settings?.integrations || snapshot.settings?.integrations || {};
+        const aiConfig = getStoredAiConfig(integrationSettings);
+        if (aiDiffRequest && snapshot.org?.mode !== "demo" && aiConfig.apiKey && (aiDiffRequest.oldText || aiDiffRequest.newText)) {
+          const result = await askSiteForgeAi({
+            userMessage: `These are two revisions of a construction drawing. Identify meaningful construction changes. Focus on window/door schedule changes, dimensions, electrical fixture additions, finishes, and site execution risk. Reply only as JSON: {"changes":[{"type":"string","location":"string","before":"string","after":"string","severity":"low|medium|high"}],"summary":"one paragraph plain-English summary"}.\n\nOLD REVISION:\n${aiDiffRequest.oldText.slice(0, 12000)}\n\nNEW REVISION:\n${aiDiffRequest.newText.slice(0, 12000)}`,
+            projectContext: { orgMode: snapshot.org?.mode, site: snapshot.sites.find((entry) => entry.id === aiDiffRequest.siteId) },
+            provider: aiConfig.provider,
+            apiKey: aiConfig.apiKey,
+            model: aiConfig.model,
+            openaiProxyUrl: aiConfig.openaiProxyUrl,
+          });
+          if (result.source === "claude" || result.source === "openai") {
+            setState((previous) => {
+              const next = cloneState(previous);
+              const document = next.documents.find((entry) => entry.id === aiDiffRequest.documentId);
+              if (!document) return previous;
+              let parsed = null;
+              try {
+                const match = result.text.match(/\{[\s\S]*\}/);
+                parsed = JSON.parse(match ? match[0] : result.text);
+              } catch {
+                parsed = null;
+              }
+              document.impactAnalysis = document.impactAnalysis || {};
+              document.impactAnalysis.aiSummary = parsed?.summary || result.text;
+              document.impactAnalysis.aiChanges = Array.isArray(parsed?.changes) ? parsed.changes : [];
+              document.impactAnalysis.aiSource = result.source;
+              document.impactAnalysis.aiGeneratedAt = new Date().toISOString();
+              return normaliseState(next);
+            });
+          }
+        }
       },
       addDocumentAnnotation(documentId, payload) {
         mutate((next, helpers) => {
@@ -8002,7 +8166,7 @@ export function SiteForgeProvider({ children }) {
         return exportAuditCsv(state.auditTrail);
       },
     }),
-    [improveApprovalDraft, mutate, navigate, persistExecutedPdf, setState, state],
+    [improveApprovalDraft, mutate, navigate, persistExecutedPdf, refreshAiInsightCache, setState, state],
   );
 
   const derived = useMemo(() => {
@@ -8038,12 +8202,11 @@ export function SiteForgeProvider({ children }) {
       auditVerification: state.ui.auditVerification || verifyAuditChain(state.auditTrail),
       search: (query) => buildSearchResults(state, query),
       resolveRecord: (type, id) => findInCollection(state, type, id),
-      weeklyClientSummary: summariseDiary(state.diary.filter((entry) => entry.siteId === currentClient?.siteId)),
-      boardInsight: boardInsights({
-        sites: state.sites,
-        approvals: openApprovals,
-        presence: state.presence.records,
-      }),
+      weeklyClientSummary: weeklySummaryCache?.summary || summariseDiary(state.diary.filter((entry) => entry.siteId === weeklySummarySiteId)),
+      weeklyClientSummarySource: weeklySummaryCache?.source || "local-template",
+      boardInsight: cachedBoardInsight?.summary
+        ? { ...localBoardInsight, summary: cachedBoardInsight.summary, source: cachedBoardInsight.source, generatedAt: cachedBoardInsight.generatedAt }
+        : { ...localBoardInsight, source: "local-template" },
       photoTimeline: [
         ...state.files.records
           .filter((file) => file.classification === "Photo / Site Image")

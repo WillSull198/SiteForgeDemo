@@ -9,6 +9,27 @@ export default {
     }
 
     const url = new URL(request.url);
+
+    if (request.method === "GET" && url.pathname === "/health") {
+      const ok = Boolean(env.OPENAI_API_KEY);
+      return new Response(
+        JSON.stringify({
+          ok,
+          secretConfigured: ok,
+          service: "siteforge-openai-proxy",
+          error: ok ? undefined : "OPENAI_API_KEY secret not set on the worker. Add it under Settings -> Variables and Secrets.",
+        }),
+        { status: ok ? 200 : 500, headers: { ...corsHeaders(), "Content-Type": "application/json" } },
+      );
+    }
+
+    if (!url.pathname.startsWith("/v1/")) {
+      return new Response(
+        JSON.stringify({ error: "This proxy only forwards /v1/* requests to api.openai.com" }),
+        { status: 404, headers: { ...corsHeaders(), "Content-Type": "application/json" } },
+      );
+    }
+
     const target = `https://api.openai.com${url.pathname}${url.search}`;
     const upstream = await fetch(target, {
       method: request.method,

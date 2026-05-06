@@ -2,13 +2,20 @@ import { useEffect, useState } from "react";
 import { Icons, renderIcon } from "./icons";
 import { Badge, Button } from "./ui";
 
-const sourceLabel = (source) => {
-  if (source === "openai") return "ChatGPT";
-  if (source === "claude") return "Claude";
+const sourceLabel = (source, upgrading = false) => {
+  if (source === "openai") return "✓ AI-improved by ChatGPT";
+  if (source === "claude") return "✓ AI-improved by Claude";
   if (source === "skipped-demo") return "Demo skipped";
-  if (source === "local-template") return "Local template";
-  if (source === "ai-parse-error") return "AI parse fallback";
+  if (source === "local-template") return upgrading ? "Upgrading draft with AI..." : "Local template";
+  if (source === "ai-parse-error" || String(source || "").endsWith("-error")) return "AI draft unavailable, using template";
   return source || "Local template";
+};
+
+const sourceTone = (source, upgrading = false) => {
+  if (source === "openai" || source === "claude") return "passed";
+  if (upgrading) return "medium";
+  if (source === "ai-parse-error" || String(source || "").endsWith("-error")) return "medium";
+  return "medium";
 };
 
 export default function AIBlock({
@@ -21,15 +28,33 @@ export default function AIBlock({
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(data || {});
+  const [upgradeTimedOut, setUpgradeTimedOut] = useState(false);
 
   useEffect(() => {
     setDraft(data || {});
   }, [data]);
 
+  useEffect(() => {
+    setUpgradeTimedOut(false);
+    if (data?.source !== "local-template") return undefined;
+    const started = Date.parse(data?.upgradeStartedAt || "");
+    const elapsed = Number.isFinite(started) ? Date.now() - started : 0;
+    const remaining = Math.max(0, 30000 - elapsed);
+    if (!remaining) {
+      setUpgradeTimedOut(true);
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setUpgradeTimedOut(true), remaining);
+    return () => window.clearTimeout(timer);
+  }, [data?.source, data?.upgradeStartedAt]);
+
   const save = () => {
     onSave?.(draft);
     setEditing(false);
   };
+  const upgrading = data?.source === "local-template" && !upgradeTimedOut;
+  const badgeText = sourceLabel(data?.source, upgrading);
+  const badgeTone = sourceTone(data?.source, upgrading);
 
   return (
     <div className="ai-block">
@@ -37,7 +62,7 @@ export default function AIBlock({
         <div>
           <div className="fx" style={{ gap: 6 }}>
             <span className="ai-badge">{renderIcon(Icons.zap, 12)} AI</span>
-            <Badge tone={data?.source === "openai" || data?.source === "claude" ? "passed" : "medium"}>{sourceLabel(data?.source)}</Badge>
+            <Badge tone={badgeTone} title={data?.error || ""} aria-busy={upgrading ? "true" : undefined}>{badgeText}</Badge>
             <div className="b sm">{title}</div>
           </div>
           <div className="xs ct3" style={{ marginTop: 4 }}>

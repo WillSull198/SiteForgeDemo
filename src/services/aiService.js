@@ -171,6 +171,31 @@ async function askOpenAi({ userMessage, projectContext, apiKey, model, openaiPro
   };
 }
 
+export async function verifyOpenAiProxy(proxyUrl) {
+  if (!proxyUrl) {
+    return { ok: false, source: "no-url", text: "Paste your worker URL first." };
+  }
+  const cleanUrl = String(proxyUrl || "").trim().replace(/\/+$/, "");
+  try {
+    const response = await fetch(`${cleanUrl}/health`);
+    const body = await response.json().catch(() => ({}));
+    if (response.ok && body.ok) {
+      return { ok: true, source: "proxy", text: "Proxy reachable and OPENAI_API_KEY is set." };
+    }
+    return {
+      ok: false,
+      source: "proxy",
+      text: body.error || `Proxy returned HTTP ${response.status}.`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      source: "proxy-network",
+      text: `Could not reach the proxy URL. ${error?.message || ""}`.trim(),
+    };
+  }
+}
+
 export async function askSiteForgeAi({ userMessage, projectContext, apiKey, provider, model, openaiProxyUrl }) {
   const resolvedProvider = normaliseAiProvider(provider);
   if (projectContext?.orgMode === "demo" || projectContext?.mode === "demo") {
@@ -207,6 +232,10 @@ export async function testAiConnection({ provider, apiKey, model, openaiProxyUrl
     return { ok: false, source: "no-key", text: "No API key provided." };
   }
   try {
+    if (resolvedProvider === AI_PROVIDERS.OPENAI && openaiProxyUrl) {
+      const proxyCheck = await verifyOpenAiProxy(openaiProxyUrl);
+      if (!proxyCheck.ok) return proxyCheck;
+    }
     const result =
       resolvedProvider === AI_PROVIDERS.OPENAI
         ? await askOpenAi({ userMessage: "Reply with the word pong only.", projectContext: {}, apiKey, model, openaiProxyUrl })
