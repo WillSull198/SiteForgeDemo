@@ -10,6 +10,7 @@ import { usePersistentState } from "../hooks/usePersistentState";
 import {
   boardInsights,
   draftApproval,
+  draftApprovalSmart,
   generateEndOfDay,
   suggestRFI,
   structureFieldNote,
@@ -357,10 +358,15 @@ function createBlankSlate() {
         aiProvider: "anthropic",
         aiModel: "claude-sonnet-4-20250514",
         anthropicModel: "claude-sonnet-4-20250514",
-        openaiModel: "gpt-5.2",
+        openaiModel: "gpt-4.1",
         anthropicApiKey: "",
         anthropicConfigured: false,
         openaiConfigured: false,
+        openaiProxyConfigured: false,
+        aiLastTestedAt: null,
+        aiLastTestStatus: "untested",
+        aiLastTestProvider: null,
+        aiLastTestMessage: "",
         buildxactApiKey: "",
         buildxactWorkspaceId: "",
         buildxactConnected: false,
@@ -2895,6 +2901,62 @@ export function SiteForgeProvider({ children }) {
     [mutate],
   );
 
+  const improveApprovalDraft = useCallback(
+    async ({ approvalId, sourceEntity, approvalType, siteId }) => {
+      const snapshot = stateRef.current;
+      const approval = snapshot.approvals.find((entry) => entry.id === approvalId);
+      if (!approval) return;
+      const resolvedSiteId = siteId || approval.siteId || snapshot.session.siteId;
+      const projectContext = {
+        orgMode: snapshot.org?.mode,
+        site: snapshot.sites.find((entry) => entry.id === resolvedSiteId),
+        company: snapshot.company,
+        client: snapshot.clients.find((entry) => entry.id === approval.clientId),
+        sourceEntity,
+        relatedApprovals: snapshot.approvals.filter((entry) => entry.siteId === resolvedSiteId).slice(0, 8),
+      };
+      const smartDraft = await draftApprovalSmart(
+        sourceEntity,
+        approvalType || approval.type,
+        projectContext,
+        snapshot.device?.settings?.integrations || snapshot.settings?.integrations || {},
+      );
+      mutate((next, helpers) => {
+        const target = next.approvals.find((entry) => entry.id === approvalId);
+        if (!target) return;
+        const before = { summary: target.summary, reason: target.reason, recommendation: target.recommendation, source: target.aiDraft?.source };
+        const isAi = smartDraft.source === "claude" || smartDraft.source === "openai";
+        target.aiDraft = {
+          ...(target.aiDraft || {}),
+          ...smartDraft,
+          costImpact: target.costImpact,
+          timeImpact: target.timeImpact,
+          source: smartDraft.source,
+        };
+        if (isAi) {
+          target.summary = smartDraft.summary || target.summary;
+          target.reason = smartDraft.reason || target.reason;
+          target.recommendation = smartDraft.recommendation || target.recommendation;
+          helpers.appendTimeline(target, {
+            type: "ai-draft-updated",
+            actor: "SiteForge AI",
+            role: "System",
+            text: `Draft copy improved by ${smartDraft.source === "openai" ? "ChatGPT" : "Claude"}.`,
+          });
+        }
+        helpers.addAudit({
+          action: "approval.ai-draft.update",
+          entityType: "approval",
+          entityId: target.id,
+          before,
+          after: { summary: target.summary, reason: target.reason, recommendation: target.recommendation, source: smartDraft.source },
+          siteId: target.siteId,
+        });
+      });
+    },
+    [mutate],
+  );
+
   useEffect(() => {
     if (typeof window !== "undefined") {
       window.__siteforgeNow = state.demo?.simulatedNow || nowStamp();
@@ -3126,9 +3188,14 @@ export function SiteForgeProvider({ children }) {
             aiProvider: payload.aiProvider || next.settings.integrations?.aiProvider || "anthropic",
             aiModel: payload.aiModel || next.settings.integrations?.aiModel || "claude-sonnet-4-20250514",
             anthropicModel: payload.anthropicModel || next.settings.integrations?.anthropicModel || "claude-sonnet-4-20250514",
-            openaiModel: payload.openaiModel || next.settings.integrations?.openaiModel || "gpt-5.2",
+            openaiModel: payload.openaiModel || next.settings.integrations?.openaiModel || "gpt-4.1",
             anthropicConfigured: Boolean(payload.anthropicConfigured),
             openaiConfigured: Boolean(payload.openaiConfigured),
+            openaiProxyConfigured: Boolean(payload.openaiProxyConfigured),
+            aiLastTestedAt: payload.aiLastTestedAt || next.settings.integrations?.aiLastTestedAt || null,
+            aiLastTestStatus: payload.aiLastTestStatus || next.settings.integrations?.aiLastTestStatus || "untested",
+            aiLastTestProvider: payload.aiLastTestProvider || next.settings.integrations?.aiLastTestProvider || null,
+            aiLastTestMessage: payload.aiLastTestMessage || next.settings.integrations?.aiLastTestMessage || "",
             buildxactConnected: false,
             buildxactApiKey: payload.buildxactApiKey || "",
             buildxactWorkspaceId: payload.buildxactWorkspaceId || "",
@@ -3720,6 +3787,7 @@ export function SiteForgeProvider({ children }) {
         });
       },
       createApprovalFromSource({ sourceType, sourceId, approvalType, handUp = false }) {
+        let aiUpgrade = null;
         mutate((next, helpers) => {
           const source = findInCollection(next, sourceType, sourceId);
           if (!source) return;
@@ -3784,10 +3852,13 @@ export function SiteForgeProvider({ children }) {
             after: { status: approval.status, type: approval.type },
             siteId,
           });
+          aiUpgrade = { approvalId: approval.id, sourceEntity: { ...source }, approvalType, siteId };
         });
+        if (aiUpgrade) improveApprovalDraft(aiUpgrade);
       },
       createApprovalFromBlank({ approvalType = "Variation", clientId, title, description, reason, costImpact = 0, timeImpactDays = 0, templateId = null }) {
         let targetRoute = null;
+        let aiUpgrade = null;
         mutate((next, helpers) => {
           const siteId = next.session.siteId;
           const site = next.sites.find((item) => item.id === siteId) || next.sites[0];
@@ -3864,7 +3935,14 @@ export function SiteForgeProvider({ children }) {
             route: { kind: "internal", siteId: site.id, page: "clientflow", entityId: approval.id },
           });
           targetRoute = { kind: "internal", siteId: site.id, page: "clientflow", entityId: approval.id };
+          aiUpgrade = {
+            approvalId: approval.id,
+            sourceEntity: { title, description, reason, costImpact: numericCost, timeImpact: numericDays, siteId: site.id },
+            approvalType,
+            siteId: site.id,
+          };
         });
+        if (aiUpgrade) improveApprovalDraft(aiUpgrade);
         setTimeout(() => {
           if (targetRoute) navigate(targetRoute);
         }, 0);
@@ -3893,6 +3971,7 @@ export function SiteForgeProvider({ children }) {
       },
       raiseRecoveryApproval({ opportunityId = null, sourceType, sourceId, approvalType, title, summary, reason, costImpact, timeImpact, templateId } = {}) {
         let targetRoute = null;
+        let aiUpgrade = null;
         mutate((next, helpers) => {
           const opportunity = opportunityId ? next.recoveryOpportunities.find((item) => item.id === opportunityId) : null;
           const resolvedSourceType = sourceType || opportunity?.sourceType;
@@ -3918,8 +3997,10 @@ export function SiteForgeProvider({ children }) {
             opportunityId: opportunity?.id || opportunityId,
           });
           if (!approval) return;
+          aiUpgrade = { approvalId: approval.id, sourceEntity: { ...source }, approvalType: approval.type, siteId: approval.siteId };
           targetRoute = { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id };
         });
+        if (aiUpgrade) improveApprovalDraft(aiUpgrade);
         setTimeout(() => {
           if (targetRoute) navigate(targetRoute);
         }, 0);
@@ -4883,6 +4964,7 @@ export function SiteForgeProvider({ children }) {
 	      },
 	      sendVariationToClient(variationId, templateId = null) {
 	        let targetRoute = null;
+	        let aiUpgrade = null;
 	        mutate((next, helpers) => {
           const variation = next.variations.find((item) => item.id === variationId);
           if (!variation) return;
@@ -4950,7 +5032,9 @@ export function SiteForgeProvider({ children }) {
             route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
           });
           targetRoute = { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id };
+          aiUpgrade = { approvalId: approval.id, sourceEntity: { ...variation }, approvalType: "Variation", siteId: approval.siteId };
         });
+        if (aiUpgrade) improveApprovalDraft(aiUpgrade);
         setTimeout(() => {
           if (targetRoute) navigate(targetRoute);
         }, 0);
@@ -5015,6 +5099,7 @@ export function SiteForgeProvider({ children }) {
       },
       createEotFromProcurement(itemId) {
         let targetRoute = null;
+        let aiUpgrade = null;
         mutate((next, helpers) => {
           const item = next.procurement.find((entry) => entry.id === itemId);
           if (!item) return;
@@ -5083,7 +5168,9 @@ export function SiteForgeProvider({ children }) {
             siteId: item.siteId,
           });
           targetRoute = { kind: "internal", siteId: item.siteId, page: "clientflow", entityId: approval.id };
+          aiUpgrade = { approvalId: approval.id, sourceEntity: { ...item }, approvalType: "Extension of Time", siteId: item.siteId };
         });
+        if (aiUpgrade) improveApprovalDraft(aiUpgrade);
         setTimeout(() => {
           if (targetRoute) navigate(targetRoute);
         }, 0);
@@ -5176,6 +5263,7 @@ export function SiteForgeProvider({ children }) {
       },
       createRainDayClaim(diaryId) {
         let targetRoute = null;
+        let aiUpgrade = null;
         mutate((next, helpers) => {
           const diary = next.diary.find((entry) => entry.id === diaryId);
           if (!diary) return;
@@ -5237,13 +5325,16 @@ export function SiteForgeProvider({ children }) {
             route: { kind: "internal", siteId: diary.siteId, page: "clientflow", entityId: approval.id },
           });
           targetRoute = { kind: "internal", siteId: diary.siteId, page: "clientflow", entityId: approval.id };
+          aiUpgrade = { approvalId: approval.id, sourceEntity: { ...diary }, approvalType: "Rain Day", siteId: diary.siteId };
         });
+        if (aiUpgrade) improveApprovalDraft(aiUpgrade);
         setTimeout(() => {
           if (targetRoute) navigate(targetRoute);
         }, 0);
       },
       createVariationFromDiary(diaryId, payload) {
         let targetRoute = null;
+        let aiUpgrade = null;
         mutate((next, helpers) => {
           const diary = next.diary.find((entry) => entry.id === diaryId);
           if (!diary) return;
@@ -5343,6 +5434,7 @@ export function SiteForgeProvider({ children }) {
               route: { kind: "internal", siteId: diary.siteId, page: "clientflow", entityId: approval.id },
             });
             targetRoute = { kind: "internal", siteId: diary.siteId, page: "clientflow", entityId: approval.id };
+            aiUpgrade = { approvalId: approval.id, sourceEntity: { ...variation }, approvalType: "Variation", siteId: diary.siteId };
           }
           helpers.addAudit({
             action: "diary.convert_to_variation",
@@ -5363,6 +5455,7 @@ export function SiteForgeProvider({ children }) {
             route: { kind: "internal", siteId: diary.siteId, page: "vos", entityId: variation.id },
           });
         });
+        if (aiUpgrade) improveApprovalDraft(aiUpgrade);
         setTimeout(() => {
           if (targetRoute) navigate(targetRoute);
         }, 0);
@@ -5405,6 +5498,7 @@ export function SiteForgeProvider({ children }) {
         });
       },
       createDelayNoticeFromSafety(safetyId) {
+        let aiUpgrade = null;
         mutate((next, helpers) => {
           const record = next.safety.find((item) => item.id === safetyId);
           if (!record) return;
@@ -5440,7 +5534,9 @@ export function SiteForgeProvider({ children }) {
           };
           next.approvals.unshift(approval);
           upsertLinkedRecord(record, buildLink("approval", approval, record.siteId));
+          aiUpgrade = { approvalId: approval.id, sourceEntity: { ...record }, approvalType: "Delay Notice", siteId: record.siteId };
         });
+        if (aiUpgrade) improveApprovalDraft(aiUpgrade);
       },
       createReworkTaskFromQa(qaId) {
         mutate((next, helpers) => {
@@ -7906,7 +8002,7 @@ export function SiteForgeProvider({ children }) {
         return exportAuditCsv(state.auditTrail);
       },
     }),
-    [mutate, navigate, persistExecutedPdf, setState, state],
+    [improveApprovalDraft, mutate, navigate, persistExecutedPdf, setState, state],
   );
 
   const derived = useMemo(() => {

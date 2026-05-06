@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { flagBudgetAnomaly, suggestRFI } from "../services/aiDraftService";
-import { AI_PROVIDERS, AI_STORAGE_KEYS, DEFAULT_AI_MODELS, askSiteForgeAi, getStoredAiConfig, normaliseAiProvider } from "../services/aiService";
+import { AI_PROVIDERS, AI_STORAGE_KEYS, DEFAULT_AI_MODELS, askSiteForgeAi, getStoredAiConfig, normaliseAiProvider, testAiConnection as runProviderConnectionTest } from "../services/aiService";
 import DataTable from "../components/DataTable";
 import FileDropZone from "../components/FileDropZone";
 import PhotoUpload from "../components/PhotoUpload";
@@ -1813,6 +1813,7 @@ function DocumentsPage() {
   const [previewHtml, setPreviewHtml] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
   const [pdfViewerFile, setPdfViewerFile] = useState(null);
+  const [pdfViewerPage, setPdfViewerPage] = useState(1);
   const [planQuery, setPlanQuery] = useState("");
   const [planResults, setPlanResults] = useState([]);
   const [planSearchLoading, setPlanSearchLoading] = useState(false);
@@ -1887,6 +1888,7 @@ function DocumentsPage() {
         provider: aiConfig.provider,
         apiKey: aiConfig.apiKey,
         model: aiConfig.model,
+        openaiProxyUrl: aiConfig.openaiProxyUrl,
         projectContext: { siteId, documents: documentContext, orgMode: state.org?.mode },
         userMessage: `Plan search query: "${planQuery}".
 
@@ -2069,7 +2071,7 @@ ${JSON.stringify(documentContext)}`,
                     {previewLoading ? "Opening..." : "Open Preview"}
                   </Button>
                   {selectedFile?.type?.includes("pdf") ? (
-                    <Button small tone="bt-p" onClick={() => setPdfViewerFile(selectedFile)}>
+                    <Button small tone="bt-p" onClick={() => { setPdfViewerPage(1); setPdfViewerFile(selectedFile); }}>
                       Full PDF Viewer
                     </Button>
                   ) : null}
@@ -2097,6 +2099,11 @@ ${JSON.stringify(documentContext)}`,
                     <Badge tone="medium">Keyword match</Badge> Add a Claude or ChatGPT API key in Settings for AI plan search.
                   </div>
                 ) : null}
+                {["claude", "openai"].includes(planSearchSource) ? (
+                  <div className="xs ct3" style={{ marginTop: 8 }}>
+                    <Badge tone="passed">{planSearchSource === "openai" ? "ChatGPT" : "Claude"}</Badge> AI plan search completed.
+                  </div>
+                ) : null}
                 {planSearchSummary ? <div className="mini-panel sm ct2" style={{ marginTop: 8 }}>{planSearchSummary}</div> : null}
                 <div className="list-stack" style={{ marginTop: 8 }}>
                   {planResults.map((result, index) => (
@@ -2111,7 +2118,10 @@ ${JSON.stringify(documentContext)}`,
                           small
                           onClick={() => {
                             const file = state.files.records.find((entry) => entry.id === result.fileId);
-                            if (file) setPdfViewerFile(file);
+                            if (file) {
+                              setPdfViewerPage(Number.parseInt(result.page, 10) || 1);
+                              setPdfViewerFile(file);
+                            }
                           }}
                         >
                           Open
@@ -2291,7 +2301,7 @@ ${JSON.stringify(documentContext)}`,
           </Card>
         </div>
       </div>
-      {pdfViewerFile ? <PDFViewer fileMeta={pdfViewerFile} onClose={() => setPdfViewerFile(null)} /> : null}
+      {pdfViewerFile ? <PDFViewer fileMeta={pdfViewerFile} initialPage={pdfViewerPage} onClose={() => setPdfViewerFile(null)} /> : null}
     </div>
   );
 }
@@ -2765,6 +2775,7 @@ function AdminPage() {
     aiProvider: storedAiConfig.provider,
     anthropicApiKey: storedAiConfig.anthropicKey,
     openaiApiKey: storedAiConfig.openaiKey,
+    openaiProxyUrl: storedAiConfig.openaiProxyUrl,
     aiModel: storedAiConfig.model,
     anthropicModel: integrationSettings.anthropicModel || integrationSettings.aiModel || DEFAULT_AI_MODELS.anthropic,
     openaiModel: integrationSettings.openaiModel || DEFAULT_AI_MODELS.openai,
@@ -2825,13 +2836,18 @@ function AdminPage() {
       } else {
         window.localStorage.removeItem(AI_STORAGE_KEYS.openai);
       }
-      window.localStorage.setItem(AI_STORAGE_KEYS.provider, provider);
+      if (integrationsForm.openaiProxyUrl.trim()) {
+        window.localStorage.setItem(AI_STORAGE_KEYS.openaiProxy, integrationsForm.openaiProxyUrl.trim());
+      } else {
+        window.localStorage.removeItem(AI_STORAGE_KEYS.openaiProxy);
+      }
     }
     actions.updateSettings("integrations", {
       aiProvider: provider,
       aiModel: activeModel,
       anthropicModel: integrationsForm.anthropicModel,
       openaiModel: integrationsForm.openaiModel,
+      openaiProxyConfigured: Boolean(integrationsForm.openaiProxyUrl.trim()),
       anthropicConfigured: Boolean(integrationsForm.anthropicApiKey.trim()),
       openaiConfigured: Boolean(integrationsForm.openaiApiKey.trim()),
       buildxactApiKey: integrationsForm.buildxactApiKey,
@@ -2851,19 +2867,23 @@ function AdminPage() {
     }
     setTestingAi(true);
     try {
-      const result = await askSiteForgeAi({
-        userMessage: "Reply with the word 'pong' only.",
-        projectContext: { orgMode: state.org?.mode },
+      const result = await runProviderConnectionTest({
         provider,
         apiKey,
         model,
+        openaiProxyUrl: integrationsForm.openaiProxyUrl.trim(),
       });
-      if ((result.source === "claude" || result.source === "openai") && /pong/i.test(result.text || "")) {
+      const testPatch = {
+        aiLastTestedAt: new Date().toISOString(),
+        aiLastTestStatus: result.ok ? "ok" : "failed",
+        aiLastTestProvider: provider,
+        aiLastTestMessage: result.text || "",
+      };
+      actions.updateSettings("integrations", testPatch);
+      if (result.ok) {
         setSettingsMessage(`✓ ${providerName} API key works.`);
-      } else if (result.source === "claude-error" || result.source === "openai-error") {
-        setSettingsMessage(result.text || `${providerName} API key test failed.`);
       } else {
-        setSettingsMessage(`Key did not produce a ${providerName} response. Check the key, model name, and that your account has API access.`);
+        setSettingsMessage(result.text || `${providerName} API key test failed.`);
       }
     } catch (error) {
       setSettingsMessage(`${providerName} API key test failed: ${error?.message || "Unknown error"}`);
@@ -3058,6 +3078,7 @@ function AdminPage() {
           <div className="ff">
             <label>Claude API key</label>
             <input type="password" value={integrationsForm.anthropicApiKey} onChange={(event) => setIntegrationsForm((current) => ({ ...current, anthropicApiKey: event.target.value }))} placeholder="sk-ant-..." />
+            <div className="xs ct3" style={{ marginTop: 4 }}>Works directly from this browser. Get a key at console.anthropic.com.</div>
           </div>
           <div className="ff">
             <label>Claude model</label>
@@ -3066,11 +3087,25 @@ function AdminPage() {
           <div className="ff">
             <label>ChatGPT / OpenAI API key</label>
             <input type="password" value={integrationsForm.openaiApiKey} onChange={(event) => setIntegrationsForm((current) => ({ ...current, openaiApiKey: event.target.value }))} placeholder="sk-..." />
+            <div className="xs ct3" style={{ marginTop: 4 }}>OpenAI API keys must go through a proxy for browser apps. Get a key at platform.openai.com.</div>
           </div>
           <div className="ff">
             <label>OpenAI model</label>
             <input value={integrationsForm.openaiModel} onChange={(event) => setIntegrationsForm((current) => ({ ...current, openaiModel: event.target.value, aiModel: current.aiProvider === AI_PROVIDERS.OPENAI ? event.target.value : current.aiModel }))} />
           </div>
+          <div className="ff">
+            <label>OpenAI proxy URL</label>
+            <input value={integrationsForm.openaiProxyUrl} onChange={(event) => setIntegrationsForm((current) => ({ ...current, openaiProxyUrl: event.target.value }))} placeholder="https://your-worker.workers.dev" />
+            <div className="xs ct3" style={{ marginTop: 4 }}>Required for OpenAI in the browser. See docs/setup-openai-proxy.md.</div>
+          </div>
+          {integrationSettings.aiLastTestedAt ? (
+            <div className="notice-banner" style={{ marginBottom: 8 }}>
+              Last AI test: {new Date(integrationSettings.aiLastTestedAt).toLocaleString("en-AU")} · {integrationSettings.aiLastTestProvider || "AI"} · {integrationSettings.aiLastTestStatus || "unknown"}
+              {integrationSettings.aiLastTestMessage ? <div className="xs ct3" style={{ marginTop: 4 }}>{integrationSettings.aiLastTestMessage}</div> : null}
+            </div>
+          ) : (
+            <div className="notice-banner" style={{ marginBottom: 8 }}>AI provider not tested yet.</div>
+          )}
           <div className="ff">
             <label>Buildxact API key</label>
             <input type="password" value={integrationsForm.buildxactApiKey} onChange={(event) => setIntegrationsForm((current) => ({ ...current, buildxactApiKey: event.target.value }))} />
@@ -3088,15 +3123,20 @@ function AdminPage() {
             </Button>
             <Button
               onClick={() => {
+                const provider = normaliseAiProvider(integrationsForm.aiProvider);
                 if (typeof window !== "undefined") {
-                  window.localStorage.removeItem(AI_STORAGE_KEYS.anthropic);
-                  window.localStorage.removeItem(AI_STORAGE_KEYS.openai);
+                  window.localStorage.removeItem(provider === AI_PROVIDERS.OPENAI ? AI_STORAGE_KEYS.openai : AI_STORAGE_KEYS.anthropic);
+                  if (provider === AI_PROVIDERS.OPENAI) window.localStorage.removeItem(AI_STORAGE_KEYS.openaiProxy);
                 }
-                setIntegrationsForm((current) => ({ ...current, anthropicApiKey: "", openaiApiKey: "" }));
-                setSettingsMessage("AI API keys cleared from this device.");
+                setIntegrationsForm((current) =>
+                  provider === AI_PROVIDERS.OPENAI
+                    ? { ...current, openaiApiKey: "", openaiProxyUrl: "" }
+                    : { ...current, anthropicApiKey: "" },
+                );
+                setSettingsMessage(`${provider === AI_PROVIDERS.OPENAI ? "OpenAI" : "Claude"} key cleared from this device.`);
               }}
             >
-              Clear AI Keys
+              Clear Active Provider Key
             </Button>
           </div>
         </Card>

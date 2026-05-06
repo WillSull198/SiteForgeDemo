@@ -157,6 +157,7 @@ export default function AIAssistantDrawer({ open, onClose }) {
                   provider: aiConfig.provider,
                   apiKey: aiConfig.apiKey,
                   model: aiConfig.model,
+                  openaiProxyUrl: aiConfig.openaiProxyUrl,
                 });
                 setChat((current) => [...current, { id: `a-${Date.now()}`, role: "assistant", text: result.text, source: result.source }]);
                 setLoading(false);

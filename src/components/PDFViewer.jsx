@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { getStoredFileBlob, loadPdfJs } from "../services/documentIntelligence";
 import { Icons, renderIcon } from "./icons";
 
-export default function PDFViewer({ fileMeta, onClose }) {
+export default function PDFViewer({ fileMeta, onClose, initialPage = 1 }) {
   const canvasRef = useRef(null);
   const [pdfDoc, setPdfDoc] = useState(null);
   const [pageNum, setPageNum] = useState(1);
@@ -45,7 +45,8 @@ export default function PDFViewer({ fileMeta, onClose }) {
         }
         if (!cancelled) {
           setPdfDoc(pdf);
-          setPageNum(1);
+          const targetPage = Math.min(Math.max(Number(initialPage) || 1, 1), pdf.numPages || 1);
+          setPageNum(targetPage);
         }
       } catch (loadError) {
         if (!cancelled) setError(loadError.message || "Unable to render this PDF.");
@@ -58,7 +59,7 @@ export default function PDFViewer({ fileMeta, onClose }) {
       cancelled = true;
       loadedPdf?.destroy?.();
     };
-  }, [fileMeta]);
+  }, [fileMeta, initialPage]);
 
   useEffect(() => {
     if (!pdfDoc || !canvasRef.current) return;

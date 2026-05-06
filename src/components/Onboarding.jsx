@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { AI_PROVIDERS, AI_STORAGE_KEYS, DEFAULT_AI_MODELS, askSiteForgeAi, normaliseAiProvider } from "../services/aiService";
+import { AI_PROVIDERS, AI_STORAGE_KEYS, DEFAULT_AI_MODELS, normaliseAiProvider, testAiConnection as runProviderConnectionTest } from "../services/aiService";
 import { formatters } from "../utils/formatters";
 import { validateStructuredAddress, validators } from "../utils/validators";
 import { Badge, Button, Card } from "./ui";
@@ -93,12 +93,14 @@ export default function Onboarding({ state, actions }) {
     aiProvider: AI_PROVIDERS.ANTHROPIC,
     anthropicApiKey: "",
     openaiApiKey: "",
+    openaiProxyUrl: "",
     anthropicModel: DEFAULT_AI_MODELS.anthropic,
     openaiModel: DEFAULT_AI_MODELS.openai,
     buildxactApiKey: "",
     buildxactWorkspaceId: "",
   });
   const [aiStatus, setAiStatus] = useState("");
+  const [aiTestResult, setAiTestResult] = useState(null);
   const [testingAi, setTestingAi] = useState(false);
 
   const companyValid = useMemo(() => {
@@ -164,20 +166,27 @@ export default function Onboarding({ state, actions }) {
     }
     setTestingAi(true);
     try {
-      const result = await askSiteForgeAi({
-        userMessage: "Reply with the word 'pong' only.",
-        projectContext: { orgMode: state.org?.mode },
+      const result = await runProviderConnectionTest({
         provider,
         apiKey,
         model,
+        openaiProxyUrl: integrations.openaiProxyUrl.trim(),
       });
-      if ((result.source === "claude" || result.source === "openai") && /pong/i.test(result.text || "")) {
+      if (result.ok) {
         window.localStorage.setItem(provider === AI_PROVIDERS.OPENAI ? AI_STORAGE_KEYS.openai : AI_STORAGE_KEYS.anthropic, apiKey);
-        window.localStorage.setItem(AI_STORAGE_KEYS.provider, provider);
+        if (provider === AI_PROVIDERS.OPENAI && integrations.openaiProxyUrl.trim()) {
+          window.localStorage.setItem(AI_STORAGE_KEYS.openaiProxy, integrations.openaiProxyUrl.trim());
+        }
         setAiStatus(`${providerName} API key works.`);
       } else {
         setAiStatus(result.text || `${providerName} did not return a valid test response.`);
       }
+      setAiTestResult({
+        aiLastTestedAt: new Date().toISOString(),
+        aiLastTestStatus: result.ok ? "ok" : "failed",
+        aiLastTestProvider: provider,
+        aiLastTestMessage: result.text || "",
+      });
     } catch (error) {
       setAiStatus(`${providerName} test failed: ${error?.message || "Unknown error"}`);
     } finally {
@@ -188,12 +197,14 @@ export default function Onboarding({ state, actions }) {
   const saveIntegrations = () => {
     const provider = normaliseAiProvider(integrations.aiProvider);
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(AI_STORAGE_KEYS.provider, provider);
       if (integrations.anthropicApiKey.trim()) {
         window.localStorage.setItem(AI_STORAGE_KEYS.anthropic, integrations.anthropicApiKey.trim());
       }
       if (integrations.openaiApiKey.trim()) {
         window.localStorage.setItem(AI_STORAGE_KEYS.openai, integrations.openaiApiKey.trim());
+      }
+      if (integrations.openaiProxyUrl.trim()) {
+        window.localStorage.setItem(AI_STORAGE_KEYS.openaiProxy, integrations.openaiProxyUrl.trim());
       }
     }
     actions.saveOnboardingIntegrations({
@@ -201,8 +212,10 @@ export default function Onboarding({ state, actions }) {
       aiModel: provider === AI_PROVIDERS.OPENAI ? integrations.openaiModel : integrations.anthropicModel,
       anthropicModel: integrations.anthropicModel,
       openaiModel: integrations.openaiModel,
+      openaiProxyConfigured: Boolean(integrations.openaiProxyUrl.trim()),
       anthropicConfigured: Boolean(integrations.anthropicApiKey.trim()),
       openaiConfigured: Boolean(integrations.openaiApiKey.trim()),
+      ...(aiTestResult || {}),
       buildxactConnected: Boolean(integrations.buildxactApiKey.trim() && integrations.buildxactWorkspaceId.trim()),
       buildxactApiKey: integrations.buildxactApiKey.trim(),
       buildxactWorkspaceId: integrations.buildxactWorkspaceId.trim(),
@@ -339,6 +352,8 @@ export default function Onboarding({ state, actions }) {
                   <>
                     <input type="password" placeholder="sk-..." value={integrations.openaiApiKey} onChange={(event) => setIntegrations({ ...integrations, openaiApiKey: event.target.value })} style={{ marginTop: 8 }} />
                     <input value={integrations.openaiModel} onChange={(event) => setIntegrations({ ...integrations, openaiModel: event.target.value })} style={{ marginTop: 8 }} />
+                    <input placeholder="https://your-worker.workers.dev" value={integrations.openaiProxyUrl} onChange={(event) => setIntegrations({ ...integrations, openaiProxyUrl: event.target.value })} style={{ marginTop: 8 }} />
+                    <div className="xs ct3" style={{ marginTop: 4 }}>OpenAI requires a proxy for browser apps. You can add this later in Settings.</div>
                   </>
                 ) : (
                   <>

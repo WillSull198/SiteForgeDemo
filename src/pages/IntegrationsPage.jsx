@@ -32,10 +32,17 @@ export default function IntegrationsPage() {
   const [tab, setTab] = useState("status");
   const [payloadPreview, setPayloadPreview] = useState(null);
   const [slashCommand, setSlashCommand] = useState("/siteforge approvals stalled");
-  const integrationSettings = state.settings?.integrations || {};
-  const aiConfig = getStoredAiConfig(state.device?.settings?.integrations || integrationSettings);
+  const integrationSettings = state.device?.settings?.integrations || state.settings?.integrations || {};
+  const aiConfig = getStoredAiConfig(integrationSettings);
   const aiConnected = aiConfig.provider === "openai" ? Boolean(aiConfig.openaiKey) : Boolean(aiConfig.anthropicKey);
   const aiProviderLabel = aiConfig.provider === "openai" ? "ChatGPT / OpenAI" : "Claude / Anthropic";
+  const aiStatusLabel = !aiConnected
+    ? "not configured"
+    : integrationSettings.aiLastTestStatus === "ok"
+      ? "configured + last test ok"
+      : integrationSettings.aiLastTestStatus === "failed"
+        ? "configured + test failed"
+        : "configured + untested";
 
   const metrics = [
     { label: "Email Queue", value: state.emailQueue?.filter((item) => item.status === "queued").length || 0, color: "b" },
@@ -72,7 +79,7 @@ export default function IntegrationsPage() {
           <Card title="Integration Status" icon={Icons.gear}>
             {[
               ["Buildxact", state.buildxact.connection.status || "disconnected", "Connect Buildxact"],
-              ["AI Provider", `${aiProviderLabel} · ${aiConnected ? "connected" : "not configured"}`, "Add API key"],
+              ["AI Provider", `${aiProviderLabel} · ${aiStatusLabel}`, "Add API key"],
               ["Email", integrationSettings.emailProvider || "queued-only", "Open email queue"],
               ["SMS", integrationSettings.smsProvider || "queued-only", "Open SMS queue"],
               ["Microsoft Teams", state.teams?.connected ? "connected" : "disconnected", "Open Teams queue"],

@@ -1,3 +1,5 @@
+import { askSiteForgeAi, getStoredAiConfig } from "./aiService";
+
 const formatCurrency = (value = 0) =>
   new Intl.NumberFormat("en-AU", {
     style: "currency",
@@ -120,6 +122,59 @@ export function draftApproval(sourceEntity, type) {
     timeImpact: impacts.timeImpact,
     attachmentsSummary: impacts.attachmentsSummary,
   };
+}
+
+export async function draftApprovalSmart(sourceEntity, type, projectContext = {}, integrationSettings = {}) {
+  const local = draftApproval(sourceEntity, type);
+  const aiConfig = getStoredAiConfig(integrationSettings);
+  if (!aiConfig.apiKey) return { ...local, source: "local-template" };
+  if (projectContext.orgMode === "demo") return { ...local, source: "skipped-demo" };
+
+  const prompt = `You are drafting a formal ${type} approval for an Australian residential building project.
+
+Source event:
+${JSON.stringify(sourceEntity)}
+
+Project context:
+${JSON.stringify(projectContext)}
+
+Reply ONLY as JSON:
+{
+  "summary": "2-3 sentence client-facing summary of what is being approved and why",
+  "reason": "1-2 sentence explanation of why this is needed, citing the trigger event",
+  "recommendation": "1 sentence recommendation to the client",
+  "costImpact": ${Number(sourceEntity?.costImpact ?? sourceEntity?.value ?? sourceEntity?.cost ?? local.costImpact ?? 0)},
+  "timeImpact": ${Number(sourceEntity?.timeImpact ?? sourceEntity?.days ?? local.timeImpact ?? 0)}
+}
+
+Use Australian construction terminology. Reference HIA, AS4000, MBA, or relevant contract administration language only where useful. Be commercially clear, not theatrical.`;
+
+  try {
+    const result = await askSiteForgeAi({
+      userMessage: prompt,
+      projectContext,
+      provider: aiConfig.provider,
+      apiKey: aiConfig.apiKey,
+      model: aiConfig.model,
+      openaiProxyUrl: aiConfig.openaiProxyUrl,
+    });
+    if (result.source === "claude" || result.source === "openai") {
+      const match = result.text.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(match ? match[0] : result.text);
+      return {
+        summary: parsed.summary || local.summary,
+        reason: parsed.reason || local.reason,
+        recommendation: parsed.recommendation || local.recommendation,
+        costImpact: parsed.costImpact ?? local.costImpact,
+        timeImpact: parsed.timeImpact ?? local.timeImpact,
+        attachmentsSummary: local.attachmentsSummary,
+        source: result.source,
+      };
+    }
+    return { ...local, source: result.source || "local-template", error: result.text };
+  } catch (error) {
+    return { ...local, source: "ai-parse-error", error: error?.message || "Unable to parse AI draft." };
+  }
 }
 
 export function summariseDiary(entries = []) {

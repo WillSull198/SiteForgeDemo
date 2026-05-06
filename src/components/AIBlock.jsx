@@ -1,6 +1,15 @@
 import { useEffect, useState } from "react";
 import { Icons, renderIcon } from "./icons";
-import { Button } from "./ui";
+import { Badge, Button } from "./ui";
+
+const sourceLabel = (source) => {
+  if (source === "openai") return "ChatGPT";
+  if (source === "claude") return "Claude";
+  if (source === "skipped-demo") return "Demo skipped";
+  if (source === "local-template") return "Local template";
+  if (source === "ai-parse-error") return "AI parse fallback";
+  return source || "Local template";
+};
 
 export default function AIBlock({
   title = "AI Draft",
@@ -28,6 +37,7 @@ export default function AIBlock({
         <div>
           <div className="fx" style={{ gap: 6 }}>
             <span className="ai-badge">{renderIcon(Icons.zap, 12)} AI</span>
+            <Badge tone={data?.source === "openai" || data?.source === "claude" ? "passed" : "medium"}>{sourceLabel(data?.source)}</Badge>
             <div className="b sm">{title}</div>
           </div>
           <div className="xs ct3" style={{ marginTop: 4 }}>
