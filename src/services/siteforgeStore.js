@@ -1098,15 +1098,6 @@ function buildMetrics(state) {
           Math.max(0, 80 - presenceConfidence) / 2,
       ),
     );
-    const weeklySummarySiteId = currentClient?.siteId || currentSite?.id || state.session.siteId;
-    const weeklySummaryCache = weeklySummarySiteId ? state.aiCache?.weeklyClientSummary?.[weeklySummarySiteId] : null;
-    const localBoardInsight = boardInsights({
-      sites: state.sites,
-      approvals: openApprovals,
-      presence: state.presence.records,
-    });
-    const cachedBoardInsight = state.aiCache?.boardInsights?.portfolio;
-
     return {
       siteId: site.id,
       siteName: site.name,
@@ -8177,7 +8168,7 @@ export function SiteForgeProvider({ children }) {
     const accessibleSites = state.sites.filter((site) => accessibleSiteIds.includes(site.id));
     const notificationsForUser = state.notifications.items.filter((item) => {
       if (routeKindForRole(state.session.role) === "client") {
-        return item.recipientId === currentClient.id || item.recipientId === state.session.userId;
+        return item.recipientId === currentClient?.id || item.recipientId === state.session.userId;
       }
       return item.recipientId === state.session.userId || item.recipientRole === state.session.role;
     });
@@ -8186,6 +8177,14 @@ export function SiteForgeProvider({ children }) {
     const openApprovals = state.approvals.filter((approval) => !["signed", "declined"].includes(approval.status));
     const currentContract = state.contractPacks.find((pack) => pack.docId === state.ui.activeContractId) || state.contractPacks[0] || null;
     const currentApproval = state.approvals.find((approval) => approval.id === state.ui.activeApprovalId) || state.approvals[0] || null;
+    const weeklySummarySiteId = currentClient?.siteId || currentSite?.id || state.session.siteId;
+    const weeklySummaryCache = weeklySummarySiteId ? state.aiCache?.weeklyClientSummary?.[weeklySummarySiteId] : null;
+    const localBoardInsight = boardInsights({
+      sites: state.sites,
+      approvals: openApprovals,
+      presence: state.presence?.records || [],
+    });
+    const cachedBoardInsight = state.aiCache?.boardInsights?.portfolio;
 
     return {
       currentUser,
