@@ -7,6 +7,7 @@ import "./siteforge.css";
 
 document.title = APP_CONFIG.appTitle;
 initObservability();
+console.info("[SiteForge] booting. build:", import.meta.env?.MODE, "version:", "f36209b-or-newer", "ua:", navigator.userAgent.slice(0, 80));
 
 const PDFJS_VERSION = "3.11.174";
 
@@ -75,3 +76,8 @@ ReactDOM.createRoot(document.getElementById("root")).render(
     <App />
   </React.StrictMode>,
 );
+
+if (typeof window !== "undefined" && window.__siteforgeBootTimeout) {
+  clearTimeout(window.__siteforgeBootTimeout);
+  window.__siteforgeBootTimeout = null;
+}
