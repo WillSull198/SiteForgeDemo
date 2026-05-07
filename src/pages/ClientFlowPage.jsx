@@ -500,14 +500,25 @@ export default function ClientFlowPage() {
                     <AIBlock
                       title="AI Assist Panel"
                       data={selected.aiDraft}
-                      onRegenerate={() =>
+                      onRegenerate={() => {
                         actions.updateApprovalDraft(selected.id, {
                           aiDraft: {
-                            ...selected.aiDraft,
-                            summary: `${selected.aiDraft.summary} Regenerated to sharpen programme and recovery language.`,
+                            ...(selected.aiDraft || {}),
+                            source: "local-template",
+                            upgradeStartedAt: new Date().toISOString(),
                           },
-                        })
-                      }
+                        });
+                        actions.improveApprovalDraft({
+                          approvalId: selected.id,
+                          sourceEntity: selected.aiDraft || {
+                            ...selected,
+                            costImpact: selected.costImpact,
+                            timeImpact: selected.timeImpact,
+                          },
+                          approvalType: selected.type,
+                          siteId: selected.siteId,
+                        });
+                      }}
                       onSave={(data) => actions.updateApprovalDraft(selected.id, { aiDraft: data, summary: data.summary, reason: data.reason, recommendation: data.recommendation })}
                     />
                     {selected.portalUrl ? (

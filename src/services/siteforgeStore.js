@@ -3114,10 +3114,11 @@ export function SiteForgeProvider({ children }) {
     return () => window.clearTimeout(timer);
 	  }, [mutate, state.demo?.mode, state.org?.mode]);
 
-  const actions = useMemo(
-	    () => ({
-	      navigate,
-	      async switchToMode(targetMode) {
+	  const actions = useMemo(
+		    () => ({
+		      navigate,
+		      improveApprovalDraft,
+		      async switchToMode(targetMode) {
 	        if (targetMode !== "demo" && targetMode !== "real") return;
 	        const currentState = stateRef.current;
 	        const currentMode = currentState?.org?.mode || getActiveMode();
@@ -5717,6 +5718,7 @@ export function SiteForgeProvider({ children }) {
       },
       createRfiFromProblem(problemId, payload = {}) {
         let targetRoute = null;
+        let createdRfiId = null;
         mutate((next, helpers) => {
           const problem = next.problems.find((item) => item.id === problemId);
           if (!problem) return;
@@ -5761,10 +5763,31 @@ export function SiteForgeProvider({ children }) {
             route: { kind: "internal", siteId: problem.siteId, page: "rfis", entityId: rfi.id },
           });
           targetRoute = { kind: "internal", siteId: problem.siteId, page: "rfis", entityId: rfi.id };
+          createdRfiId = rfi.id;
         });
         setTimeout(() => {
           if (targetRoute) navigate(targetRoute);
         }, 0);
+        return createdRfiId;
+      },
+      updateRfi(rfiId, patch = {}) {
+        mutate((next, helpers) => {
+          const rfi = next.rfis.find((item) => item.id === rfiId);
+          if (!rfi) return;
+          const before = { title: rfi.title, description: rfi.description, to: rfi.to, aiSource: rfi.aiSource };
+          ["title", "description", "to", "trade", "priority", "dueDate", "aiSource"].forEach((key) => {
+            if (patch[key] !== undefined) rfi[key] = patch[key];
+          });
+          rfi.updatedAt = nowStamp();
+          helpers.addAudit({
+            action: "rfi.update",
+            entityType: "rfi",
+            entityId: rfi.id,
+            before,
+            after: { title: rfi.title, description: rfi.description, to: rfi.to, aiSource: rfi.aiSource },
+            siteId: rfi.siteId,
+          });
+        });
       },
       respondRfi(rfiId, message) {
         mutate((next, helpers) => {
@@ -6898,29 +6921,124 @@ export function SiteForgeProvider({ children }) {
           }
         });
       },
-      generateWeeklyOperationsSummary() {
+      async generateWeeklyOperationsSummary() {
+        const snapshot = stateRef.current;
+        const integrationSettings = snapshot.device?.settings?.integrations || snapshot.settings?.integrations || {};
+        const aiConfig = getStoredAiConfig(integrationSettings);
+        const signed = snapshot.approvals.filter((approval) => approval.status === "signed");
+        const stalled = snapshot.approvals.filter((approval) => ["awaiting-client", "question", "changes-requested"].includes(approval.status));
+        const openProblems = snapshot.problems.filter((problem) => problem.status !== "closed");
+        const activeSites = snapshot.sites.filter((site) => site.status === "active");
+        const localSummary = `Last week across ${activeSites.length} active sites: ${signed.length} approvals signed (${formatCurrency(signed.reduce((sum, approval) => sum + Number(approval.costImpact || 0), 0))} recovered), ${stalled.length} approvals awaiting client response, ${openProblems.length} open problems.`;
+
         mutate((next, helpers) => {
-          const signed = next.approvals.filter((approval) => approval.status === "signed");
-          const stalled = next.approvals.filter((approval) => ["awaiting-client", "question", "changes-requested"].includes(approval.status));
-          const openProblems = next.problems.filter((problem) => problem.status !== "closed");
-          const summary = `Last week across ${next.sites.filter((site) => site.status === "active").length} active sites: ${signed.length} approvals signed (${formatCurrency(signed.reduce((sum, approval) => sum + Number(approval.costImpact || 0), 0))} recovered), ${stalled.length} approvals awaiting client response, ${openProblems.length} open problems, and ${next.recoveryOpportunities.filter((item) => item.status === "open").length} recovery opportunities awaiting review.`;
           next.boardInsightsCache = {
             ...(next.boardInsightsCache || {}),
             generatedAt: nowStamp(),
-            aiWeeklySummary: summary,
+            aiWeeklySummary: localSummary,
             suggestedActions: ["Review stalled ClientFlow approvals", "Convert open recovery opportunities", "Close compliance acknowledgement gaps"],
+            source: "local-template",
+            upgradeStartedAt: nowStamp(),
           };
-          helpers.emit({
-            eventType: "ai.weekly-summary",
-            title: "AI weekly operations summary ready",
-            body: summary,
-            siteId: next.session.siteId,
-            entityType: "boardReport",
-            entityId: "ai-weekly-summary",
-            recipients: getRecipientsForRoles(next, ["Director", "Project Manager"]),
-            route: { kind: "director", page: "boardroom" },
-          });
+          if (!aiConfig.apiKey || snapshot.org?.mode === "demo") {
+            helpers.emit({
+              eventType: "ai.weekly-summary",
+              title: "Weekly operations summary ready",
+              body: localSummary,
+              siteId: next.session.siteId,
+              entityType: "boardReport",
+              entityId: "ai-weekly-summary",
+              recipients: getRecipientsForRoles(next, ["Director", "Project Manager"]),
+              route: { kind: "director", page: "boardroom" },
+            });
+          }
         });
+
+        if (!aiConfig.apiKey || snapshot.org?.mode === "demo") return;
+
+        const projectContext = {
+          orgMode: snapshot.org?.mode,
+          activeSites: activeSites.map((site) => ({ id: site.id, name: site.name, contractValue: site.contractValue, status: site.status })),
+          signedThisWeek: signed.slice(0, 8).map((approval) => ({ title: approval.title, costImpact: approval.costImpact, type: approval.type })),
+          stalledApprovals: stalled.slice(0, 8).map((approval) => ({ title: approval.title, status: approval.status, dueAt: approval.dueAt, sentAt: approval.sentAt })),
+          openProblems: openProblems.slice(0, 8).map((problem) => ({ title: problem.title, severity: problem.severity, status: problem.status })),
+          recoveryOpportunities: (snapshot.recoveryOpportunities || []).filter((opportunity) => opportunity.status === "open").slice(0, 6),
+        };
+        const result = await askSiteForgeAi({
+          userMessage: `You are writing a weekly operations briefing for the building company's director. Reply ONLY as JSON:
+{
+  "summary": "3-4 sentence executive briefing covering financial recovery, stalled commercial items, and operational risk",
+  "suggestedActions": ["short action 1", "short action 2", "short action 3"],
+  "riskFlags": ["specific risk worth attention 1", "specific risk worth attention 2"]
+}
+
+Context:
+${JSON.stringify(projectContext)}
+
+Be specific about numbers. Reference Australian construction realities such as HIA contracts, weather, and council inspections. Be commercially direct.`,
+          projectContext,
+          provider: aiConfig.provider,
+          apiKey: aiConfig.apiKey,
+          model: aiConfig.model,
+          openaiProxyUrl: aiConfig.openaiProxyUrl,
+          allowInDemo: false,
+        });
+
+        if (result.source !== "claude" && result.source !== "openai") {
+          mutate((next) => {
+            if (next.boardInsightsCache) {
+              next.boardInsightsCache.source = result.source || "ai-failed";
+              next.boardInsightsCache.aiError = result.text;
+            }
+          });
+          return;
+        }
+
+        try {
+          const match = result.text.match(/\{[\s\S]*\}/);
+          const parsed = JSON.parse(match ? match[0] : result.text);
+          mutate((next, helpers) => {
+            const suggestedActions = Array.isArray(parsed.suggestedActions) ? parsed.suggestedActions.slice(0, 6) : [];
+            const riskFlags = Array.isArray(parsed.riskFlags) ? parsed.riskFlags.slice(0, 6) : [];
+            const generatedAt = nowStamp();
+            next.boardInsightsCache = {
+              ...(next.boardInsightsCache || {}),
+              generatedAt,
+              aiWeeklySummary: parsed.summary || localSummary,
+              suggestedActions,
+              riskFlags,
+              source: result.source,
+              aiError: null,
+            };
+            next.aiCache = next.aiCache || { weeklyClientSummary: {}, boardInsights: {} };
+            next.aiCache.boardInsights = next.aiCache.boardInsights || {};
+            next.aiCache.boardInsights.portfolio = {
+              summary: parsed.summary || localSummary,
+              actions: suggestedActions,
+              riskFlags,
+              generatedAt,
+              source: result.source,
+              basedOnPortfolioHash: `manual-${generatedAt}`,
+            };
+            helpers.emit({
+              eventType: "ai.weekly-summary",
+              title: `AI weekly briefing ready (${result.source === "openai" ? "ChatGPT" : "Claude"})`,
+              body: String(parsed.summary || localSummary).slice(0, 200),
+              siteId: snapshot.session.siteId,
+              entityType: "boardReport",
+              entityId: "ai-weekly-summary",
+              recipients: getRecipientsForRoles(next, ["Director", "Project Manager"]),
+              route: { kind: "director", page: "boardroom" },
+            });
+          });
+        } catch (error) {
+          mutate((next) => {
+            if (next.boardInsightsCache) {
+              next.boardInsightsCache.source = "ai-parse-error";
+              next.boardInsightsCache.aiError = "AI responded but could not be parsed.";
+            }
+          });
+        }
       },
       generateBoardReport() {
         mutate((next) => {

@@ -3,7 +3,7 @@
    plan search, annotations, and settings persistence. */
 
 import { useEffect, useMemo, useState } from "react";
-import { flagBudgetAnomaly, suggestRFI } from "../services/aiDraftService";
+import { flagBudgetAnomaly, suggestRFI, suggestRfiSmart } from "../services/aiDraftService";
 import { AI_PROVIDERS, AI_STORAGE_KEYS, DEFAULT_AI_MODELS, askSiteForgeAi, getStoredAiConfig, normaliseAiProvider, normaliseOpenAiProxyUrl, testAiConnection as runProviderConnectionTest, verifyOpenAiProxy } from "../services/aiService";
 import DataTable from "../components/DataTable";
 import FileDropZone from "../components/FileDropZone";
@@ -722,14 +722,27 @@ function ProblemsPage() {
                     icon: Icons.help,
                     tone: "bt-p",
                     dataTestId: "problem-raise-rfi",
-                    onClick: () => {
+                    onClick: async () => {
                       const suggestion = suggestRFI(selected);
-                      actions.createRfiFromProblem(selected.id, {
+                      const rfiId = actions.createRfiFromProblem(selected.id, {
                         title: suggestion.title,
                         description: suggestion.description,
                         to: suggestion.recommendedRecipient,
                         trade: "General",
                       });
+                      const integrationSettings = state.device?.settings?.integrations || state.settings?.integrations || {};
+                      const aiConfig = getStoredAiConfig(integrationSettings);
+                      if (!aiConfig.apiKey || state.org?.mode === "demo") return;
+                      const site = state.sites.find((entry) => entry.id === selected.siteId);
+                      const smart = await suggestRfiSmart(selected, { orgMode: state.org?.mode, problem: selected, site, company: state.company }, integrationSettings);
+                      if (smart.source === "openai" || smart.source === "claude") {
+                        actions.updateRfi(rfiId, {
+                          title: smart.title,
+                          description: smart.description,
+                          to: smart.recommendedRecipient,
+                          aiSource: smart.source,
+                        });
+                      }
                     },
                   },
                   canResolveProblem

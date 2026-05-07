@@ -215,6 +215,55 @@ export function suggestRFI(problem) {
   };
 }
 
+export async function suggestRfiSmart(problem, projectContext = {}, integrationSettings = {}) {
+  const local = suggestRFI(problem);
+  const aiConfig = getStoredAiConfig(integrationSettings);
+  if (!aiConfig.apiKey) return { ...local, source: "local-template" };
+  if (projectContext.orgMode === "demo") return { ...local, source: "skipped-demo" };
+
+  const prompt = `You are drafting a formal RFI (Request for Information) for an Australian residential building project.
+
+Source problem:
+${JSON.stringify(problem)}
+
+Project context:
+${JSON.stringify(projectContext)}
+
+Reply ONLY as JSON:
+{
+  "title": "concise RFI title (max 80 chars)",
+  "description": "2-3 sentence formal RFI description that asks for the specific clarification needed",
+  "recommendedRecipient": "best recipient role (e.g. Architect, Structural Engineer, Services Coordinator)"
+}
+
+Use Australian construction terminology. Be specific about what information is needed before work can proceed.`;
+
+  try {
+    const result = await askSiteForgeAi({
+      userMessage: prompt,
+      projectContext,
+      provider: aiConfig.provider,
+      apiKey: aiConfig.apiKey,
+      model: aiConfig.model,
+      openaiProxyUrl: aiConfig.openaiProxyUrl,
+      allowInDemo: false,
+    });
+    if (result.source === "claude" || result.source === "openai") {
+      const match = result.text.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(match ? match[0] : result.text);
+      return {
+        title: parsed.title || local.title,
+        description: parsed.description || local.description,
+        recommendedRecipient: parsed.recommendedRecipient || local.recommendedRecipient,
+        source: result.source,
+      };
+    }
+    return { ...local, source: result.source || "local-template" };
+  } catch (error) {
+    return { ...local, source: "ai-parse-error", error: error?.message };
+  }
+}
+
 export function summariseRevision(oldPlan, newPlan) {
   if (!newPlan) {
     return "A new revision has been issued and the linked work fronts should be checked before work continues.";

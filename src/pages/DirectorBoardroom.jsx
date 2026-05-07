@@ -68,6 +68,19 @@ export default function DirectorBoardroom() {
     client: Math.min(100, Math.round((100 - Object.values(state.clientSentiment || {}).reduce((sum, entry) => sum + (entry.score || 60), 0) / Math.max(1, Object.keys(state.clientSentiment || {}).length)))),
     procurement: Math.min(100, Math.round((procurement.filter((entry) => ["delayed", "escalated"].includes(entry.status)).length / Math.max(1, procurement.length)) * 100)),
   };
+  const realBoardInsight = state.aiCache?.boardInsights?.portfolio;
+  const manualBoardInsight = state.boardInsightsCache;
+  const boardSummary = realBoardInsight?.summary || manualBoardInsight?.aiWeeklySummary;
+  const boardActions = realBoardInsight?.actions || manualBoardInsight?.suggestedActions || derived.boardInsight?.actions || [];
+  const boardRisks = realBoardInsight?.riskFlags || manualBoardInsight?.riskFlags || [];
+  const boardSource = realBoardInsight?.source || manualBoardInsight?.source || "local-template";
+  const boardUpgrading =
+    boardSource === "local-template" &&
+    manualBoardInsight?.upgradeStartedAt &&
+    Date.now() - new Date(manualBoardInsight.upgradeStartedAt).getTime() < 30000;
+  const boardSourceLabel =
+    boardSource === "openai" ? "ChatGPT" : boardSource === "claude" ? "Claude" : boardUpgrading ? "Upgrading with AI..." : "Local template";
+  const boardSourceTone = boardSource === "openai" || boardSource === "claude" ? "passed" : "medium";
 
   return (
     <div className="oy fin">
@@ -91,20 +104,39 @@ export default function DirectorBoardroom() {
         </div>
       </div>
 
-      {state.boardInsightsCache?.aiWeeklySummary ? (
+      {boardSummary ? (
         <Card title="AI Weekly Operations Briefing" icon={Icons.zap} className="mb8">
-          <div className="client-copy">{state.boardInsightsCache.aiWeeklySummary}</div>
-          <div className="list-stack" style={{ marginTop: 10 }}>
-            {(state.boardInsightsCache.suggestedActions || []).map((action) => (
-              <div className="linked-row" key={action}>
-                <span>{action}</span>
-                <Badge tone="medium">recommended</Badge>
-              </div>
-            ))}
+          <div className="fx" style={{ gap: 8, alignItems: "center", marginBottom: 8 }}>
+            <Badge tone={boardSourceTone}>{boardSourceLabel}</Badge>
+            {realBoardInsight?.generatedAt ? <span className="xs ct3">Generated {new Date(realBoardInsight.generatedAt).toLocaleString("en-AU")}</span> : null}
           </div>
+          <div className="client-copy">{boardSummary}</div>
+          {boardActions.length ? (
+            <div className="list-stack" style={{ marginTop: 10 }}>
+              {boardActions.map((action, index) => (
+                <div className="linked-row" key={`${action}-${index}`}>
+                  <span>{action}</span>
+                  <Badge tone="medium">recommended</Badge>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {boardRisks.length ? (
+            <div style={{ marginTop: 10 }}>
+              <div className="xs ct3 mb4">Risk flags</div>
+              <div className="list-stack">
+                {boardRisks.map((risk, index) => (
+                  <div className="linked-row" key={`${risk}-${index}`}>
+                    <span>{risk}</span>
+                    <Badge tone="critical">attention</Badge>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {manualBoardInsight?.aiError ? <div className="xs ct3" style={{ marginTop: 8 }}>{manualBoardInsight.aiError}</div> : null}
         </Card>
       ) : null}
-
       {!sites.length ? (
         <Card title="Boardroom setup" icon={Icons.briefcase} className="mb8">
           <div className="sm ct2">
