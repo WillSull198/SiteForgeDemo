@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { flagBudgetAnomaly, suggestRFI } from "../services/aiDraftService";
-import { AI_PROVIDERS, AI_STORAGE_KEYS, DEFAULT_AI_MODELS, askSiteForgeAi, getStoredAiConfig, normaliseAiProvider, testAiConnection as runProviderConnectionTest, verifyOpenAiProxy } from "../services/aiService";
+import { AI_PROVIDERS, AI_STORAGE_KEYS, DEFAULT_AI_MODELS, askSiteForgeAi, getStoredAiConfig, normaliseAiProvider, normaliseOpenAiProxyUrl, testAiConnection as runProviderConnectionTest, verifyOpenAiProxy } from "../services/aiService";
 import DataTable from "../components/DataTable";
 import FileDropZone from "../components/FileDropZone";
 import PhotoUpload from "../components/PhotoUpload";
@@ -2837,6 +2837,7 @@ function AdminPage() {
   const saveIntegrations = () => {
     const provider = normaliseAiProvider(integrationsForm.aiProvider);
     const activeModel = provider === AI_PROVIDERS.OPENAI ? integrationsForm.openaiModel : integrationsForm.anthropicModel;
+    const proxyUrlToSave = normaliseOpenAiProxyUrl(integrationsForm.openaiProxyUrl);
     if (typeof window !== "undefined") {
       if (integrationsForm.anthropicApiKey.trim()) {
         window.localStorage.setItem(AI_STORAGE_KEYS.anthropic, integrationsForm.anthropicApiKey.trim());
@@ -2848,18 +2849,19 @@ function AdminPage() {
       } else {
         window.localStorage.removeItem(AI_STORAGE_KEYS.openai);
       }
-      if (integrationsForm.openaiProxyUrl.trim()) {
-        window.localStorage.setItem(AI_STORAGE_KEYS.openaiProxy, integrationsForm.openaiProxyUrl.trim());
+      if (proxyUrlToSave) {
+        window.localStorage.setItem(AI_STORAGE_KEYS.openaiProxy, proxyUrlToSave);
       } else {
         window.localStorage.removeItem(AI_STORAGE_KEYS.openaiProxy);
       }
     }
+    setIntegrationsForm((current) => ({ ...current, openaiProxyUrl: proxyUrlToSave }));
     actions.updateSettings("integrations", {
       aiProvider: provider,
       aiModel: activeModel,
       anthropicModel: integrationsForm.anthropicModel,
       openaiModel: integrationsForm.openaiModel,
-      openaiProxyConfigured: Boolean(integrationsForm.openaiProxyUrl.trim()),
+      openaiProxyConfigured: Boolean(proxyUrlToSave),
       anthropicConfigured: Boolean(integrationsForm.anthropicApiKey.trim()),
       openaiConfigured: Boolean(integrationsForm.openaiApiKey.trim()),
       buildxactApiKey: integrationsForm.buildxactApiKey,
@@ -2883,7 +2885,7 @@ function AdminPage() {
         provider,
         apiKey,
         model,
-        openaiProxyUrl: integrationsForm.openaiProxyUrl.trim(),
+        openaiProxyUrl: normaliseOpenAiProxyUrl(integrationsForm.openaiProxyUrl),
       });
       const testPatch = {
         aiLastTestedAt: new Date().toISOString(),
@@ -2907,8 +2909,13 @@ function AdminPage() {
   const runProxyVerification = async () => {
     setTestingProxy(true);
     try {
-      const result = await verifyOpenAiProxy(integrationsForm.openaiProxyUrl.trim());
-      setSettingsMessage(result.ok ? `✓ ${result.text}` : result.text);
+      const cleanedProxyUrl = normaliseOpenAiProxyUrl(integrationsForm.openaiProxyUrl);
+      if (cleanedProxyUrl && cleanedProxyUrl !== integrationsForm.openaiProxyUrl.trim()) {
+        setIntegrationsForm((current) => ({ ...current, openaiProxyUrl: cleanedProxyUrl }));
+      }
+      const result = await verifyOpenAiProxy(cleanedProxyUrl || integrationsForm.openaiProxyUrl.trim());
+      const testedUrl = result.proxyUrl || cleanedProxyUrl;
+      setSettingsMessage(result.ok ? `✓ ${result.text} Tested ${testedUrl}/health.` : result.text);
     } catch (error) {
       setSettingsMessage(`Proxy verification failed: ${error?.message || "Unknown error"}`);
     } finally {
@@ -3119,8 +3126,20 @@ function AdminPage() {
           </div>
           <div className="ff">
             <label>OpenAI proxy URL</label>
-            <input value={integrationsForm.openaiProxyUrl} onChange={(event) => setIntegrationsForm((current) => ({ ...current, openaiProxyUrl: event.target.value }))} placeholder="https://your-worker.workers.dev" />
-            <div className="xs ct3" style={{ marginTop: 4 }}>Required for OpenAI in the browser. See docs/setup-openai-proxy.md.</div>
+            <input
+              value={integrationsForm.openaiProxyUrl}
+              onChange={(event) => setIntegrationsForm((current) => ({ ...current, openaiProxyUrl: event.target.value }))}
+              onBlur={(event) => {
+                const raw = event.target.value.trim();
+                if (!raw) return;
+                const cleaned = normaliseOpenAiProxyUrl(raw);
+                if (cleaned && cleaned !== raw) {
+                  setIntegrationsForm((current) => ({ ...current, openaiProxyUrl: cleaned }));
+                }
+              }}
+              placeholder="https://your-worker.workers.dev"
+            />
+            <div className="xs ct3" style={{ marginTop: 4 }}>Paste just the worker root URL - no /v1/responses path. e.g. https://siteforge-openai-proxy.your-account.workers.dev</div>
             <div style={{ marginTop: 8 }}>
               <Button small onClick={runProxyVerification} disabled={testingProxy}>
                 {testingProxy ? "Verifying..." : "Verify proxy"}

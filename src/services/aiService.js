@@ -127,6 +127,16 @@ function openAiCorsMessage() {
   return "OpenAI direct browser calls are blocked by CORS and API keys must not be exposed in browser fetches. Configure an OpenAI proxy URL in Settings -> AI Provider, or use Claude which works direct from the browser.";
 }
 
+export function normaliseOpenAiProxyUrl(proxyUrl) {
+  const raw = String(proxyUrl || "").trim();
+  if (!raw) return "";
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return raw.replace(/\/+$/, "").split("/v1")[0];
+  }
+}
+
 function buildOpenAiPayload({ userMessage, projectContext, model }) {
   const resolvedModel = model || DEFAULT_AI_MODELS.openai;
   return {
@@ -145,7 +155,14 @@ async function askOpenAi({ userMessage, projectContext, apiKey, model, openaiPro
       source: "openai-error",
     };
   }
-  const endpointBase = openaiProxyUrl ? openaiProxyUrl.replace(/\/+$/, "") : "https://api.openai.com";
+  let endpointBase = "https://api.openai.com";
+  if (openaiProxyUrl) {
+    try {
+      endpointBase = new URL(openaiProxyUrl).origin;
+    } catch {
+      endpointBase = normaliseOpenAiProxyUrl(openaiProxyUrl);
+    }
+  }
   const headers = {
     "Content-Type": "application/json",
     ...(openaiProxyUrl ? {} : { Authorization: `Bearer ${apiKey}` }),
@@ -175,23 +192,67 @@ export async function verifyOpenAiProxy(proxyUrl) {
   if (!proxyUrl) {
     return { ok: false, source: "no-url", text: "Paste your worker URL first." };
   }
-  const cleanUrl = String(proxyUrl || "").trim().replace(/\/+$/, "");
+
+  let cleanUrl;
   try {
-    const response = await fetch(`${cleanUrl}/health`);
-    const body = await response.json().catch(() => ({}));
-    if (response.ok && body.ok) {
-      return { ok: true, source: "proxy", text: "Proxy reachable and OPENAI_API_KEY is set." };
+    cleanUrl = new URL(String(proxyUrl).trim()).origin;
+  } catch {
+    return {
+      ok: false,
+      source: "no-url",
+      text: `Invalid proxy URL: "${proxyUrl}". Paste just the worker root (e.g. https://your-worker.workers.dev).`,
+    };
+  }
+
+  try {
+    const response = await fetch(`${cleanUrl}/health`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+
+    let body = {};
+    let rawText = "";
+    try {
+      rawText = await response.text();
+      body = JSON.parse(rawText);
+    } catch {
+      // Non-JSON bodies are surfaced below so proxy misroutes are diagnosable.
     }
+
+    if (response.ok && body.ok === true) {
+      return { ok: true, source: "proxy", text: "Proxy reachable and OPENAI_API_KEY is set.", proxyUrl: cleanUrl };
+    }
+
+    const proxyError = typeof body.error === "string" ? body.error : body.error ? JSON.stringify(body.error).slice(0, 200) : null;
+    const detail =
+      proxyError ||
+      (body.ok === false && body.secretConfigured === false
+        ? "OPENAI_API_KEY not set in the Cloudflare Worker. Go to Workers -> Settings -> Variables and Secrets and add it."
+        : null) ||
+      (rawText ? `Unexpected response from ${cleanUrl}/health: ${rawText.slice(0, 200)}` : `Proxy returned HTTP ${response.status} from ${cleanUrl}/health.`);
+
     return {
       ok: false,
       source: "proxy",
-      text: body.error || `Proxy returned HTTP ${response.status}.`,
+      text: detail,
+      proxyUrl: cleanUrl,
     };
   } catch (error) {
+    const message = error?.message || "";
+    if (message.includes("Failed to fetch") || message.includes("NetworkError") || message.includes("net::")) {
+      return {
+        ok: false,
+        source: "proxy-network",
+        text: `Cannot reach the proxy. Check the URL is correct and the Worker is deployed. (${cleanUrl}/health)`,
+        proxyUrl: cleanUrl,
+      };
+    }
     return {
       ok: false,
       source: "proxy-network",
-      text: `Could not reach the proxy URL. ${error?.message || ""}`.trim(),
+      text: `Proxy check failed: ${message}`,
+      proxyUrl: cleanUrl,
     };
   }
 }
@@ -232,13 +293,34 @@ export async function testAiConnection({ provider, apiKey, model, openaiProxyUrl
     return { ok: false, source: "no-key", text: "No API key provided." };
   }
   try {
+    const cleanProxyUrl = openaiProxyUrl ? normaliseOpenAiProxyUrl(openaiProxyUrl) : "";
     if (resolvedProvider === AI_PROVIDERS.OPENAI && openaiProxyUrl) {
       const proxyCheck = await verifyOpenAiProxy(openaiProxyUrl);
-      if (!proxyCheck.ok) return proxyCheck;
+      if (!proxyCheck.ok) {
+        try {
+          const directResult = await askOpenAi({
+            userMessage: "Reply with the word pong only.",
+            projectContext: {},
+            apiKey,
+            model,
+            openaiProxyUrl: cleanProxyUrl,
+          });
+          if (directResult.source === "openai" && /pong/i.test(directResult.text || "")) {
+            return {
+              ok: true,
+              source: "openai",
+              text: `${directResult.text} (Note: proxy health check also reported: ${proxyCheck.text})`,
+            };
+          }
+        } catch {
+          // Fall through to the proxy diagnostic; it is more actionable for setup.
+        }
+        return proxyCheck;
+      }
     }
     const result =
       resolvedProvider === AI_PROVIDERS.OPENAI
-        ? await askOpenAi({ userMessage: "Reply with the word pong only.", projectContext: {}, apiKey, model, openaiProxyUrl })
+        ? await askOpenAi({ userMessage: "Reply with the word pong only.", projectContext: {}, apiKey, model, openaiProxyUrl: cleanProxyUrl })
         : await askClaude({ userMessage: "Reply with the word pong only.", projectContext: {}, apiKey, model });
     if ((result.source === "claude" || result.source === "openai") && /pong/i.test(result.text || "")) {
       return { ok: true, source: result.source, text: result.text };
