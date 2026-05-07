@@ -7615,10 +7615,10 @@ export function SiteForgeProvider({ children }) {
           });
         });
       },
-      saveTemplateVersion(templateId, patch) {
-        mutate((next, helpers) => {
-          const template = next.contractTemplates.find((entry) => entry.id === templateId);
-          if (!template) return;
+	      saveTemplateVersion(templateId, patch) {
+	        mutate((next, helpers) => {
+	          const template = next.contractTemplates.find((entry) => entry.id === templateId);
+	          if (!template) return;
           const nextVersion = `v${(Number(template.version?.replace(/[^\d]/g, "")) || 1) + 1}`;
           Object.assign(template, patch, {
             version: nextVersion,
@@ -7627,12 +7627,90 @@ export function SiteForgeProvider({ children }) {
           template.versionHistory = [
             { id: randomId("tplh"), version: nextVersion, at: nowStamp(), by: actorName(helpers.actor) },
             ...(template.versionHistory || []),
-          ];
-        });
-      },
-      createClause(payload) {
-        mutate((next) => {
-          next.clauseLibrary.unshift({
+	          ];
+	        });
+	      },
+	      async aiAutofillContractFields({ templateId, approvalId } = {}) {
+	        const snapshot = stateRef.current;
+	        const template = snapshot.contractTemplates.find((entry) => entry.id === templateId);
+	        const approval = approvalId ? snapshot.approvals.find((entry) => entry.id === approvalId) : null;
+	        if (!template) return { ok: false, error: "Template not found." };
+
+	        const templateBody = template.sourceContent || (template.clauses || []).join("\n");
+	        const tokens = [
+	          ...new Set(
+	            [...templateBody.matchAll(/\{\{([^}]+)\}\}/g)]
+	              .map((match) => match[1].trim())
+	              .filter(Boolean),
+	          ),
+	        ];
+	        if (!tokens.length) return { ok: false, error: "No merge tokens found in this template." };
+
+	        const integrationSettings = snapshot.device?.settings?.integrations || snapshot.settings?.integrations || {};
+	        const aiConfig = getStoredAiConfig(integrationSettings);
+	        if (!aiConfig.apiKey) return { ok: false, error: "No API key configured." };
+
+	        const client = approval ? snapshot.clients.find((entry) => entry.id === approval.clientId) : null;
+	        const site = approval ? snapshot.sites.find((entry) => entry.id === approval.siteId) : snapshot.sites[0];
+	        const projectContext = {
+	          orgMode: snapshot.org?.mode,
+	          site,
+	          client,
+	          approval,
+	          company: snapshot.company || snapshot.settings?.company,
+	          today: new Date().toLocaleDateString("en-AU"),
+	        };
+	        const result = await askSiteForgeAi({
+	          userMessage: `Fill these contract merge tokens for an Australian building project.
+Tokens: ${tokens.join(", ")}
+Context: ${JSON.stringify(projectContext)}
+Reply ONLY as JSON: { ${tokens.map((token) => `"${token}": "value"`).join(", ")} }
+AU date format DD/MM/YYYY. Amounts in AUD. Use formal contract language.`,
+	          projectContext,
+	          provider: aiConfig.provider,
+	          apiKey: aiConfig.apiKey,
+	          model: aiConfig.model,
+	          openaiProxyUrl: aiConfig.openaiProxyUrl,
+	          allowInDemo: false,
+	        });
+
+	        if (result.source !== "claude" && result.source !== "openai") {
+	          return { ok: false, error: result.text || "AI did not return field values." };
+	        }
+
+	        try {
+	          const match = result.text.match(/\{[\s\S]*\}/);
+	          const filled = JSON.parse(match ? match[0] : result.text);
+	          let applied = {};
+	          mutate((next, helpers) => {
+	            const nextTemplate = next.contractTemplates.find((entry) => entry.id === templateId);
+	            if (!nextTemplate) return;
+	            const existing = nextTemplate.aiFilledFields || {};
+	            applied = Object.fromEntries(
+	              Object.entries(filled)
+	                .filter(([token, value]) => tokens.includes(token) && value != null && String(value).trim() && !String(existing[token] || "").trim())
+	                .map(([token, value]) => [token, String(value)]),
+	            );
+	            nextTemplate.aiFilledFields = { ...existing, ...applied };
+	            nextTemplate.aiFilledAt = nowStamp();
+	            nextTemplate.aiFilledSource = result.source;
+	            helpers.addAudit({
+	              action: "contract-template.ai-autofill",
+	              entityType: "template",
+	              entityId: templateId,
+	              before: { filledFields: existing },
+	              after: { filledFields: nextTemplate.aiFilledFields, source: result.source },
+	              siteId: site?.id || next.session.siteId,
+	            });
+	          });
+	          return { ok: true, filled: applied, source: result.source };
+	        } catch (error) {
+	          return { ok: false, error: "AI responded but fields could not be parsed." };
+	        }
+	      },
+	      createClause(payload) {
+	        mutate((next) => {
+	          next.clauseLibrary.unshift({
             id: randomId("cl"),
             title: payload.title,
             text: payload.text,

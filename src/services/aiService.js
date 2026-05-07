@@ -65,7 +65,22 @@ function localFallback(userMessage, projectContext = {}) {
       ? `This week recorded ${entries.length} diary entr${entries.length === 1 ? "y" : "ies"}. Key focus: ${entries[0]?.summary || "site progress, evidence capture, and close-out actions"}.`
       : "No diary entries are available yet. Add site diary records first so SiteForge can build a useful weekly summary.";
   }
-  return "SiteForge AI recommendation: preserve the chain of evidence. Link the field event to an approval, select the right contract template, send it to the client promptly, and keep the audit trail clean.";
+  if (message.includes("task") || message.includes("today") || message.includes("next") || message.includes("priorit")) {
+    const tasks = (projectContext.openProblems || []).length;
+    return tasks
+      ? `You have ${tasks} active issue${tasks === 1 ? "" : "s"} flagged. Prioritise the oldest open problem first - raise a formal approval if there is cost or time impact.`
+      : "No immediate issues flagged. Check the dashboard for stalled approvals or overdue tasks.";
+  }
+  if (message.includes("cost") || message.includes("budget") || message.includes("money") || message.includes("claim")) {
+    const variations = (projectContext.pendingVariations || []).length;
+    return variations
+      ? `${variations} variation${variations === 1 ? "" : "s"} are pending. Issue through ClientFlow and get them signed before the contract period advances.`
+      : "No pending variations. If a scope change is coming, raise it in ClientFlow before the work starts.";
+  }
+  if (message.includes("help") || message.includes("what can") || message.includes("how")) {
+    return 'I can help with: drafting variations, EOT notices, rain-day claims, RFI responses, weekly summaries, and searching your plans and documents. Try: "Draft a variation for water ingress at the west footing."';
+  }
+  return "Ask me anything about your project - variations, RFIs, approvals, rain days, or what to tackle next.";
 }
 
 function buildSystemPrompt(projectContext) {
@@ -257,11 +272,14 @@ export async function verifyOpenAiProxy(proxyUrl) {
   }
 }
 
-export async function askSiteForgeAi({ userMessage, projectContext, apiKey, provider, model, openaiProxyUrl }) {
+export async function askSiteForgeAi({ userMessage, projectContext, apiKey, provider, model, openaiProxyUrl, allowInDemo = false }) {
   const resolvedProvider = normaliseAiProvider(provider);
-  if (projectContext?.orgMode === "demo" || projectContext?.mode === "demo") {
+  const isDemo = projectContext?.orgMode === "demo" || projectContext?.mode === "demo";
+  if (isDemo && !allowInDemo) {
     return {
-      text: `Demo mode: external AI requests are skipped. ${localFallback(userMessage, projectContext)}`,
+      text: apiKey
+        ? localFallback(userMessage, projectContext)
+        : "Add your API key in Settings -> AI Provider to enable AI in demo mode, or switch to your real account.",
       source: "skipped-demo",
     };
   }

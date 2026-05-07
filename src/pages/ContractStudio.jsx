@@ -34,6 +34,9 @@ export default function ContractStudio() {
   const [attachmentName, setAttachmentName] = useState("");
   const [reviewNote, setReviewNote] = useState("");
   const [templateDraft, setTemplateDraft] = useState("");
+  const [studioMessage, setStudioMessage] = useState("");
+  const [autofillLoading, setAutofillLoading] = useState(false);
+  const [selectedApprovalId, setSelectedApprovalId] = useState(state.ui.activeApprovalId || state.approvals[0]?.id || "");
   const [templateForm, setTemplateForm] = useState({
     name: "",
     type: "Variation",
@@ -51,6 +54,10 @@ export default function ContractStudio() {
   const selectedApproval = state.approvals.find((approval) => approval.id === selectedContract?.approvalId) || null;
   const selectedSite = state.sites.find((site) => site.id === selectedContract?.siteId) || null;
   const selectedClient = state.clients.find((client) => client.id === selectedApproval?.clientId) || null;
+  const aiFilledPreview = useMemo(() => {
+    const fields = selectedTemplate?.aiFilledFields || {};
+    return (templateDraft || "").replace(/\{\{([^}]+)\}\}/g, (match, token) => fields[token.trim()] || match);
+  }, [selectedTemplate, templateDraft]);
 
   const canAdmin = can(role, "contracts.edit_draft");
   const canBuilderReview = can(role, "contracts.sign_builder");
@@ -147,6 +154,7 @@ export default function ContractStudio() {
 
   return (
     <div className="oy fin">
+      {studioMessage ? <div className="notice-banner mb8">{studioMessage}</div> : null}
       <div className="fb mb8">
         <Tabs
           value={tab}
@@ -332,6 +340,50 @@ export default function ContractStudio() {
                     onChange={(event) => setTemplateDraft(event.target.value)}
                   />
                 </div>
+                <div className="mini-panel" style={{ marginTop: 12 }}>
+                  <div className="fb" style={{ gap: 8, alignItems: "flex-end" }}>
+                    <div className="ff" style={{ flex: 1, marginBottom: 0 }}>
+                      <label>Autofill context</label>
+                      <select value={selectedApprovalId} onChange={(event) => setSelectedApprovalId(event.target.value)}>
+                        <option value="">Use project defaults only</option>
+                        {state.approvals.map((approval) => (
+                          <option key={approval.id} value={approval.id}>
+                            {approval.title || approval.type} · {approval.id}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <Button
+                      small
+                      tone="bt-p"
+                      icon={Icons.zap}
+                      disabled={autofillLoading}
+                      onClick={async () => {
+                        if (!selectedTemplate) return;
+                        setAutofillLoading(true);
+                        const result = await actions.aiAutofillContractFields({ templateId: selectedTemplate.id, approvalId: selectedApprovalId || null });
+                        setAutofillLoading(false);
+                        if (result?.ok) {
+                          const count = Object.keys(result.filled || {}).length;
+                          setStudioMessage(
+                            count
+                              ? `AI filled ${count} field${count === 1 ? "" : "s"} - review and adjust before generating.`
+                              : "AI returned values, but all matching fields already had saved values.",
+                          );
+                        } else {
+                          setStudioMessage(result?.error || "AI autofill failed.");
+                        }
+                      }}
+                    >
+                      {autofillLoading ? "Autofilling..." : "AI Autofill fields"}
+                    </Button>
+                  </div>
+                  {selectedTemplate.aiFilledSource ? (
+                    <div className="xs ct3" style={{ marginTop: 8 }}>
+                      <Badge tone="passed">{selectedTemplate.aiFilledSource === "openai" ? "ChatGPT" : "Claude"}</Badge> Last filled {selectedTemplate.aiFilledAt || "recently"}.
+                    </div>
+                  ) : null}
+                </div>
                 <div className="fa" style={{ justifyContent: "flex-start" }}>
                   <Button
                     small
@@ -355,6 +407,12 @@ export default function ContractStudio() {
                     Archive
                   </Button>
                 </div>
+                {Object.keys(selectedTemplate.aiFilledFields || {}).length ? (
+                  <div className="mini-panel" style={{ marginTop: 12 }}>
+                    <div className="xs ct3">AI-filled preview</div>
+                    <div className="client-copy" style={{ marginTop: 8, whiteSpace: "pre-wrap" }}>{aiFilledPreview}</div>
+                  </div>
+                ) : null}
                 <div className="list-stack" style={{ marginTop: 10 }}>
                   {selectedTemplate.clauses.map((clause, index) => (
                     <div className="act" key={`${selectedTemplate.id}-${index}`}>

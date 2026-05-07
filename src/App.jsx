@@ -799,7 +799,7 @@ function Shell() {
         </div>
       </Modal>
 
-      {["Supervisor", "Project Manager", "Contract Admin", "Director"].includes(role) ? (
+      {["Supervisor", "Project Manager", "Contract Admin", "Director", "Worker", "Subcontractor"].includes(role) ? (
         <>
           <button className="ai-fab" type="button" onClick={() => actions.toggleAIAssistant()}>
             {renderIcon(Icons.zap, 18)}

@@ -1873,15 +1873,24 @@ function DocumentsPage() {
     const documentContext = documents
       .map((document) => {
         const file = document.fileId ? state.files.records.find((entry) => entry.id === document.fileId) : null;
+        if (!file) return null;
+        const pageMap = {};
+        (file.textPages || []).forEach((page, index) => {
+          const pageNum = page.pageNumber ?? index + 1;
+          if (page?.text?.trim()) pageMap[pageNum] = page.text.trim().slice(0, 600);
+        });
         return {
           documentId: document.id,
           drawingNumber: document.drawingNumber || document.title,
           title: document.title,
           revision: document.rev,
-          extractedText: (file?.extractedText || "").slice(0, 5000),
+          pageCount: file.textPages?.length || 1,
+          extractedText: (file.extractedText || "").slice(0, 8000),
+          pages: Object.keys(pageMap).length > 0 ? pageMap : undefined,
         };
       })
-      .filter((document) => document.extractedText);
+      .filter(Boolean)
+      .filter((document) => document.extractedText || document.pages);
     const aiConfig = getStoredAiConfig(state.device?.settings?.integrations || state.settings?.integrations || {});
     try {
       const result = await askSiteForgeAi({
@@ -1890,15 +1899,18 @@ function DocumentsPage() {
         model: aiConfig.model,
         openaiProxyUrl: aiConfig.openaiProxyUrl,
         projectContext: { siteId, documents: documentContext, orgMode: state.org?.mode },
+        allowInDemo: true,
         userMessage: `Plan search query: "${planQuery}".
 
-Search these SiteForge construction documents and respond only as JSON:
+Search the documents below and respond ONLY as JSON:
 {
-  "summary": "plain-English summary",
+  "summary": "plain-English answer",
   "results": [
-    { "documentId": "document id", "drawingNumber": "drawing number", "page": "page or revision", "excerpt": "short excerpt", "confidence": "high|medium|low" }
+    { "documentId": "id", "drawingNumber": "number", "page": <page number as integer from the pages map, or null>, "excerpt": "max 120 chars", "confidence": "high|medium|low" }
   ]
 }
+
+When "pages" is present on a document, use the page number keys to find the right page.
 
 Documents:
 ${JSON.stringify(documentContext)}`,
@@ -1916,7 +1928,7 @@ ${JSON.stringify(documentContext)}`,
               id: document?.id || `${entry.drawingNumber || "ai"}-${index}`,
               title: document?.title || entry.drawingNumber || "AI plan match",
               drawingNumber: entry.drawingNumber,
-              page: entry.page || "-",
+              page: entry.page != null && !Number.isNaN(Number(entry.page)) ? Number(entry.page) : null,
               excerpt: entry.excerpt || "",
               confidence: entry.confidence || "medium",
               fileId: file?.id,
