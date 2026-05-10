@@ -1139,6 +1139,7 @@ function RfisPage() {
   const siteId = state.session.siteId;
   const [open, setOpen] = useState(false);
   const [reply, setReply] = useState("");
+  const [rfiPolishLoading, setRfiPolishLoading] = useState(false);
   const [selectedId, setSelectedId] = useState(state.rfis.find((rfi) => rfi.siteId === siteId)?.id || null);
   const [form, setForm] = useState({ title: "", description: "", to: "Consultant", priority: "medium", trade: "General" });
   const rfis = state.rfis.filter((rfi) => rfi.siteId === siteId);
@@ -1196,11 +1197,26 @@ function RfisPage() {
                 </div>
               ))}
             </div>
-            <div className="mi" style={{ paddingLeft: 0, paddingRight: 0 }}>
-              <input value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Add response..." />
-              <Button
-                small
-                tone="bt-p"
+	            <div className="mi" style={{ paddingLeft: 0, paddingRight: 0 }}>
+	              <input value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Add response..." />
+	              <Button
+	                small
+	                icon={Icons.zap}
+	                disabled={rfiPolishLoading}
+	                onClick={async () => {
+	                  setRfiPolishLoading(true);
+	                  const result = await actions.respondRfiSmart(selected.id, reply);
+	                  setRfiPolishLoading(false);
+	                  if (result?.ok) {
+	                    setReply(result.body);
+	                  }
+	                }}
+	              >
+	                {rfiPolishLoading ? "Polishing..." : "AI Polish"}
+	              </Button>
+	              <Button
+	                small
+	                tone="bt-p"
                 onClick={() => {
                   actions.respondRfi(selected.id, reply);
                   setReply("");

@@ -5984,20 +5984,54 @@ export function SiteForgeProvider({ children }) {
           });
         });
       },
-      respondRfi(rfiId, message) {
-        mutate((next, helpers) => {
-          const rfi = next.rfis.find((item) => item.id === rfiId);
-          if (!rfi || !message.trim()) return;
+	      respondRfi(rfiId, message) {
+	        mutate((next, helpers) => {
+	          const rfi = next.rfis.find((item) => item.id === rfiId);
+	          if (!rfi || !message.trim()) return;
           rfi.responses.push({
             id: randomId("rfi-r"),
             by: actorName(helpers.actor),
             at: nowStamp(),
             body: message,
           });
-          rfi.status = "responded";
-        });
-      },
-      closeRfi(rfiId) {
+	          rfi.status = "responded";
+	        });
+	      },
+	      async respondRfiSmart(rfiId, draftMessage = "") {
+	        const snapshot = stateRef.current;
+	        const rfi = snapshot.rfis.find((item) => item.id === rfiId);
+	        if (!rfi) return { ok: false, error: "RFI not found." };
+	        const integrationSettings = snapshot.device?.settings?.integrations || snapshot.settings?.integrations || {};
+	        const aiConfig = getStoredAiConfig(integrationSettings);
+	        if (!aiConfig.apiKey) return { ok: false, error: "No AI API key configured." };
+	        if (snapshot.org?.mode === "demo") return { ok: false, error: "AI RFI polishing is disabled in demo mode for project data." };
+	        const site = snapshot.sites.find((item) => item.id === rfi.siteId);
+	        const projectContext = {
+	          orgMode: snapshot.org?.mode,
+	          site,
+	          rfi: { title: rfi.title, description: rfi.description, trade: rfi.trade, to: rfi.to, dueDate: rfi.dueDate },
+	          draftMessage,
+	        };
+	        const result = await askSiteForgeAi({
+	          userMessage: `Polish this RFI response for an Australian residential building project.
+
+RFI: ${JSON.stringify(projectContext.rfi)}
+Draft response: ${draftMessage || "No draft yet. Prepare a concise response that answers the RFI clearly and preserves contract position."}
+
+Return only the polished response text. Keep it practical, formal, and specific. Do not invent facts that are not in the RFI or draft.`,
+	          projectContext,
+	          provider: aiConfig.provider,
+	          apiKey: aiConfig.apiKey,
+	          model: aiConfig.model,
+	          openaiProxyUrl: aiConfig.openaiProxyUrl,
+	          allowInDemo: false,
+	        });
+	        if (result.source === "claude" || result.source === "openai") {
+	          return { ok: true, body: String(result.text || "").trim(), source: result.source };
+	        }
+	        return { ok: false, error: result.text || "AI did not return an RFI response.", source: result.source };
+	      },
+	      closeRfi(rfiId) {
         mutate((next) => {
           const rfi = next.rfis.find((item) => item.id === rfiId);
           if (rfi) {
