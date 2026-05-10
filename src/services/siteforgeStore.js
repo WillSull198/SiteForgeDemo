@@ -2415,24 +2415,28 @@ function finaliseClientSignedContract(next, helpers, contractPack, approval, sig
   if (approval) {
     helpers.applyBudgetImpact(approval, contractPack);
     helpers.applyScheduleImpact(approval);
-    if (!next.documents.some((document) => document.contractPackId === contractPack.docId)) {
-      next.documents.unshift({
-        id: randomId("doc"),
-        siteId: approval.siteId,
-        title: `${contractPack.docId.toUpperCase()} executed contract pack`,
-        drawingNumber: contractPack.docId.toUpperCase(),
-        rev: "Executed",
-        date: formatDate(),
-        category: "Contract Pack",
-        clientVisible: true,
-        tags: ["contract", "executed", approval.type],
-        linkedTaskIds: [],
-        revisionHistory: [{ rev: "Executed", date: formatDate(), by: signerName || client?.primaryContact || "Client" }],
-        archived: false,
-        fileId: null,
-        contractPackId: contractPack.docId,
-        impactAnalysis: {
-          summary: `Fully executed ${approval.type.toLowerCase()} contract archived from ClientFlow.`,
+	    if (!next.documents.some((document) => document.contractPackId === contractPack.docId)) {
+	      next.documents.unshift({
+	        id: randomId("doc"),
+	        siteId: approval.siteId,
+	        category: "Contract",
+	        title: `Signed ${approval.type} - ${approval.title}`,
+	        drawingNumber: approval.number,
+	        rev: contractPack.revision || "1",
+	        date: formatDate(),
+	        clientVisible: true,
+	        tags: ["contract", "executed", approval.type],
+	        linkedTaskIds: [],
+	        revisionHistory: [{ rev: "Executed", date: formatDate(), by: signerName || client?.primaryContact || "Client" }],
+	        archived: false,
+	        fileId: contractPack.fileId || null,
+	        contractPackId: contractPack.docId,
+	        linkedApprovalId: approval.id,
+	        signedAt: contractPack.signatures?.client?.signedAt,
+	        uploadedBy: helpers.actor.id,
+	        uploadedAt: nowStamp(),
+	        impactAnalysis: {
+	          summary: `Fully executed ${approval.type.toLowerCase()} contract archived from ClientFlow.`,
           affectedTasks: [],
           affectedRfis: [],
           affectedTrades: [],
@@ -3086,10 +3090,10 @@ export function SiteForgeProvider({ children }) {
 	            siteId: next.session.siteId,
 	          });
 	        }
-	        (next.presence.records || []).forEach((record) => {
-	          if (record.finish || hoursSince(record.start) < 16 || record.autoCloseNotifiedAt) return;
-	          record.autoCloseNotifiedAt = nowStamp();
-	          helpers.emit({
+		        (next.presence.records || []).forEach((record) => {
+		          if (record.finish || hoursSince(record.start) < 16 || record.autoCloseNotifiedAt) return;
+		          record.autoCloseNotifiedAt = nowStamp();
+		          helpers.emit({
 	            eventType: "presence.anomaly",
 	            title: `Presence record still open - ${record.person || record.worker || record.userId}`,
 	            body: "This attendance record has been open for more than 16 hours. Supervisor review is required.",
@@ -3097,11 +3101,45 @@ export function SiteForgeProvider({ children }) {
 	            entityType: "presence",
 	            entityId: record.id,
 	            recipients: getRecipientsForRoles(next, ["Supervisor", "Project Manager"]),
-	            route: { kind: "internal", siteId: record.siteId, page: "presence", entityId: record.id },
-	          });
+		            route: { kind: "internal", siteId: record.siteId, page: "presence", entityId: record.id },
+		          });
+		        });
+	        const stalledThresholdMs = 7 * 24 * 60 * 60 * 1000;
+	        const directorThresholdMs = 14 * 24 * 60 * 60 * 1000;
+	        const nowMs = Date.now();
+	        (next.approvals || []).forEach((approval) => {
+	          if (approval.status !== "awaiting-client" || !approval.sentAt) return;
+	          const sentMs = new Date(approval.sentAt).getTime();
+	          if (!Number.isFinite(sentMs)) return;
+	          const ageMs = nowMs - sentMs;
+	          if (ageMs > directorThresholdMs && !approval._escalatedToDirector) {
+	            approval._escalatedToDirector = nowStamp();
+	            helpers.emit({
+	              eventType: "approval.stalled-director",
+	              title: `Director escalation - ${approval.title}`,
+	              body: "Client approval has been awaiting response for more than 14 days.",
+	              siteId: approval.siteId,
+	              entityType: "approval",
+	              entityId: approval.id,
+	              recipients: getRecipientsForRoles(next, ["Director", "Project Manager"]),
+	              route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+	            });
+	          } else if (ageMs > stalledThresholdMs && !approval._escalatedToPm) {
+	            approval._escalatedToPm = nowStamp();
+	            helpers.emit({
+	              eventType: "approval.stalled-pm",
+	              title: `PM follow-up required - ${approval.title}`,
+	              body: "Client approval has been awaiting response for more than 7 days.",
+	              siteId: approval.siteId,
+	              entityType: "approval",
+	              entityId: approval.id,
+	              recipients: getRecipientsForRoles(next, ["Project Manager"]),
+	              route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
+	            });
+	          }
 	        });
-	      });
-	    }, 60000);
+		      });
+		    }, 60000);
     return () => window.clearInterval(timer);
   }, [mutate]);
 
@@ -3848,11 +3886,33 @@ export function SiteForgeProvider({ children }) {
             after: { status: task.status, progress: task.progress },
             siteId: task.siteId,
           });
-          if (status === "done") {
-            helpers.projectLog(task.siteId, `Task completed - ${task.title}`, `${actorName(helpers.actor)} marked the task complete.`);
-          }
-        });
-      },
+	          if (status === "done") {
+	            helpers.projectLog(task.siteId, `Task completed - ${task.title}`, `${actorName(helpers.actor)} marked the task complete.`);
+	            const linkedQa = (task.linkedRecords || [])
+	              .filter((record) => record.type === "qa")
+	              .map((record) => next.qa.find((entry) => entry.id === record.id))
+	              .filter(Boolean);
+	            linkedQa.forEach((entry) => {
+	              entry.reinspectionRequired = true;
+	              entry.reinspectionPromptedAt = nowStamp();
+	              entry.history = [
+	                ...(entry.history || []),
+	                { at: nowStamp(), action: "rework-complete", taskId: task.id, by: actorName(helpers.actor) },
+	              ];
+	              helpers.emit({
+	                eventType: "qa.reinspection-required",
+	                title: `Re-inspection required - ${entry.title}`,
+	                body: `Rework task "${task.title}" is complete. Re-inspect the defect before closing QA.`,
+	                siteId: entry.siteId,
+	                entityType: "qa",
+	                entityId: entry.id,
+	                recipients: getRecipientsForRoles(next, ["Supervisor", "Project Manager"]),
+	                route: { kind: "internal", siteId: entry.siteId, page: "qa", entityId: entry.id },
+	              });
+	            });
+	          }
+	        });
+	      },
       addProblem(payload) {
         mutate((next, helpers) => {
           const problem = {
@@ -3923,75 +3983,128 @@ export function SiteForgeProvider({ children }) {
           });
         });
       },
-      createApprovalFromSource({ sourceType, sourceId, approvalType, handUp = false }) {
-        let aiUpgrade = null;
-        mutate((next, helpers) => {
-          const source = findInCollection(next, sourceType, sourceId);
-          if (!source) return;
-          const siteId = source.siteId || next.session.siteId;
-          const site = next.sites.find((item) => item.id === siteId);
-          const client = next.clients.find((item) => item.id === site.clientId);
-          const aiDraft = draftApproval(source, approvalType);
-          const portalToken = uuid();
-          const approval = {
+	      createApprovalFromSource({ sourceType, sourceId, approvalType, handUp = false, manualOverride = null }) {
+	        let aiUpgrade = null;
+	        mutate((next, helpers) => {
+	          const manualSource =
+	            sourceType === "manual"
+	              ? {
+	                  id: sourceId || randomId("manual"),
+	                  siteId: manualOverride?.siteId || next.session.siteId,
+	                  clientId: manualOverride?.clientId,
+	                  title: manualOverride?.title || "Manual variation",
+	                  description: manualOverride?.description || manualOverride?.title || "",
+	                  reason: manualOverride?.reason || manualOverride?.description || "Manual variation raised from the register.",
+	                  priority: manualOverride?.priority || "medium",
+	                  trade: manualOverride?.trade || helpers.actor.trade || "General",
+	                  costImpact: Number(manualOverride?.costImpact ?? manualOverride?.value ?? 0),
+	                  timeImpact: Number(manualOverride?.timeImpact ?? manualOverride?.days ?? 0),
+	                  value: Number(manualOverride?.value ?? manualOverride?.costImpact ?? 0),
+	                  days: Number(manualOverride?.days ?? manualOverride?.timeImpact ?? 0),
+	                  templateId: manualOverride?.templateId || next.settings?.contractDefaults?.standardVariationTemplate || null,
+	                  photos: manualOverride?.photos || [],
+	                  linkedRecords: [],
+	                }
+	              : null;
+	          const source = manualSource || findInCollection(next, sourceType, sourceId);
+	          if (!source) return;
+	          const siteId = source.siteId || next.session.siteId;
+	          const site = next.sites.find((item) => item.id === siteId);
+	          if (!site) return;
+	          const client = next.clients.find((item) => item.id === (source.clientId || site.clientId));
+	          if (!client) return;
+	          const aiDraft = draftApproval(source, approvalType);
+	          const portalToken = uuid();
+	          const approval = {
             id: randomId("ap"),
             number: nextScopedNumber(next, "approvals", siteId, "CF"),
             siteId,
             clientId: client.id,
             type: approvalType,
-            title: buildApprovalTitle(source, approvalType),
-            summary: aiDraft.summary,
-            reason: aiDraft.reason,
-            recommendation: aiDraft.recommendation,
-            status: "draft",
-            priority: source.priority || "medium",
-            sourceType,
-            sourceId,
-            createdBy: helpers.actor.id,
-            ownerId: site.pmId || "u_pm_1",
+	            title: manualOverride?.title || buildApprovalTitle(source, approvalType),
+	            summary: aiDraft.summary,
+	            reason: aiDraft.reason,
+	            recommendation: aiDraft.recommendation,
+	            status: handUp || manualOverride?.submitForReview ? "awaiting-pm" : "draft",
+	            priority: source.priority || "medium",
+	            sourceType,
+	            sourceId: sourceType === "manual" ? null : sourceId,
+	            createdBy: helpers.actor.id,
+	            ownerId: site.pmId || "u_pm_1",
             sentAt: null,
             dueAt: addDays(formatDate(), 3),
             viewedAt: null,
             costImpact: aiDraft.costImpact,
             timeImpact: aiDraft.timeImpact,
             linkedRecords: [...(source.linkedRecords || []), buildLink(sourceType, source, siteId)],
-            attachments: buildSourceAttachments(source),
-            aiDraft,
-            timeline: [],
-            messageThread: [],
-            contractPackId: null,
-            portalToken,
-            portalUrl: buildPortalUrl(portalToken),
-          };
-          helpers.appendTimeline(approval, {
-            type: "created",
-            actor: actorName(helpers.actor),
-            role: helpers.actor.role,
-            text: `${helpers.actor.role} created approval from ${sourceType}.`,
-          });
-          next.approvals.unshift(approval);
-          if (source.linkedApprovals) {
-            source.linkedApprovals.push(approval.id);
-          }
-          if (sourceType === "procurement") {
-            source.linkedApprovalId = approval.id;
-          }
-          upsertLinkedRecord(source, buildLink("approval", approval, siteId));
-          const variation = helpers.ensureVariation(approval);
-          if (variation) {
-            upsertLinkedRecord(source, buildLink("variation", variation, siteId));
-          }
-          helpers.addAudit({
+	            attachments: buildSourceAttachments(source),
+	            aiDraft,
+	            timeline: [],
+	            messageThread: [],
+	            contractPackId: null,
+	            portalToken,
+	            portalUrl: buildPortalUrl(portalToken),
+	            templateId: source.templateId || null,
+	          };
+	          helpers.appendTimeline(approval, {
+	            type: approval.status === "awaiting-pm" ? "awaiting-pm" : "created",
+	            actor: actorName(helpers.actor),
+	            role: helpers.actor.role,
+	            text:
+	              approval.status === "awaiting-pm"
+	                ? `${helpers.actor.role} submitted approval from ${sourceType} for PM review.`
+	                : `${helpers.actor.role} created approval from ${sourceType}.`,
+	          });
+	          if (approval.status === "awaiting-pm") {
+	            approval.internalReview = {
+	              submittedAt: nowStamp(),
+	              submittedBy: helpers.actor.id,
+	              pm: null,
+	              ca: null,
+	            };
+	          }
+	          next.approvals.unshift(approval);
+	          if (sourceType !== "manual" && source.linkedApprovals) {
+	            source.linkedApprovals.push(approval.id);
+	          }
+	          if (sourceType === "procurement") {
+	            source.linkedApprovalId = approval.id;
+	          }
+	          if (sourceType !== "manual") {
+	            upsertLinkedRecord(source, buildLink("approval", approval, siteId));
+	          }
+	          const variation = helpers.ensureVariation(approval);
+	          if (variation) {
+	            variation.trade = source.trade || variation.trade;
+	            variation.templateId = source.templateId || variation.templateId;
+	            variation.photos = source.photos || variation.photos || [];
+	            if (sourceType !== "manual") {
+	              upsertLinkedRecord(source, buildLink("variation", variation, siteId));
+	            }
+	          }
+	          helpers.addAudit({
             action: "approval.create",
             entityType: "approval",
             entityId: approval.id,
             before: null,
-            after: { status: approval.status, type: approval.type },
-            siteId,
-          });
-          aiUpgrade = { approvalId: approval.id, sourceEntity: { ...source }, approvalType, siteId };
-        });
-        if (aiUpgrade) improveApprovalDraft(aiUpgrade);
+	            after: { status: approval.status, type: approval.type },
+	            siteId,
+	          });
+	          if (approval.status === "awaiting-pm") {
+	            helpers.emit({
+	              eventType: "approval.internal-review",
+	              title: `PM review required - ${approval.number || approval.id}`,
+	              body: approval.title,
+	              siteId,
+	              entityType: "approval",
+	              entityId: approval.id,
+	              recipients: getRecipientsForRoles(next, ["Project Manager", "Director"]),
+	              route: { kind: "internal", siteId, page: "clientflow", entityId: approval.id },
+	            });
+	          }
+	          aiUpgrade = { approvalId: approval.id, sourceEntity: { ...source }, approvalType, siteId };
+	        });
+	        if (aiUpgrade) improveApprovalDraft(aiUpgrade);
       },
       createApprovalFromBlank({ approvalType = "Variation", clientId, title, description, reason, costImpact = 0, timeImpactDays = 0, templateId = null }) {
         let targetRoute = null;
@@ -5347,10 +5460,16 @@ export function SiteForgeProvider({ children }) {
           const entry = next.qa.find((item) => item.id === qaId);
           if (!entry) return;
           const before = { status: entry.status, passCount: entry.passCount };
-          entry.status = status;
-          if (status === "passed") {
-            entry.passCount = entry.totalCount;
-          }
+	          entry.status = status;
+	          if (status === "passed") {
+	            entry.passCount = entry.totalCount;
+	            entry.reinspectionRequired = false;
+	            entry.defectClosedAt = nowStamp();
+	            entry.history = [
+	              ...(entry.history || []),
+	              { at: nowStamp(), action: before.status === "failed" ? "reinspection-passed" : "inspection-passed", by: actorName(helpers.actor) },
+	            ];
+	          }
           helpers.addAudit({
             action: "qa.status",
             entityType: "qa",
@@ -5359,9 +5478,55 @@ export function SiteForgeProvider({ children }) {
             after: { status: entry.status, passCount: entry.passCount },
             siteId: entry.siteId,
           });
-          if (status === "failed") {
-            helpers.emit({
-              eventType: "qa.failed",
+	          if (status === "failed") {
+	            const existingTask =
+	              (entry.reworkTaskId && next.tasks.find((task) => task.id === entry.reworkTaskId)) ||
+	              next.tasks.find((task) => (task.linkedRecords || []).some((record) => record.type === "qa" && record.id === entry.id) && task.type === "rework");
+	            if (!existingTask) {
+	              const site = next.sites.find((item) => item.id === entry.siteId);
+	              const task = {
+	                id: randomId("tsk"),
+	                siteId: entry.siteId,
+	                title: `Rework - ${entry.title}`,
+	                description: entry.notes || `Rectify failed ${entry.type || "QA"} inspection before re-inspection.`,
+	                type: "rework",
+	                trade: entry.trade || "General",
+	                companyId: helpers.actor.companyId,
+	                assigneeId: site?.superintendentId || helpers.actor.id,
+	                priority: "high",
+	                status: "todo",
+	                dueDate: addDays(entry.date || formatDate(), 2),
+	                progress: 0,
+	                crewRequired: 1,
+	                mobileMaterials: [],
+	                linkedRecords: [buildLink("qa", entry, entry.siteId)],
+	                clientVisible: false,
+	                requiresReinspection: true,
+	              };
+	              next.tasks.unshift(task);
+	              entry.reworkTaskId = task.id;
+	              upsertLinkedRecord(entry, buildLink("task", task, entry.siteId));
+	              helpers.addAudit({
+	                action: "task.create.rework",
+	                entityType: "task",
+	                entityId: task.id,
+	                before: null,
+	                after: { title: task.title, status: task.status, qaId: entry.id },
+	                siteId: task.siteId,
+	              });
+	              helpers.emit({
+	                eventType: "task.rework-created",
+	                title: `Rework task created - ${entry.title}`,
+	                body: task.description,
+	                siteId: entry.siteId,
+	                entityType: "task",
+	                entityId: task.id,
+	                recipients: getRecipientsForRoles(next, ["Supervisor", "Project Manager"]),
+	                route: { kind: "internal", siteId: entry.siteId, page: "tasks", entityId: task.id },
+	              });
+	            }
+	            helpers.emit({
+	              eventType: "qa.failed",
               title: `QA failed - ${entry.title}`,
               body: entry.notes || "Inspection failed and needs rework review.",
               siteId: entry.siteId,
@@ -5683,13 +5848,14 @@ export function SiteForgeProvider({ children }) {
         mutate((next, helpers) => {
           const qa = next.qa.find((item) => item.id === qaId);
           if (!qa) return;
-          const task = {
-            id: randomId("tsk"),
-            siteId: qa.siteId,
-            title: `Rework - ${qa.title}`,
-            description: qa.notes,
-            trade: qa.trade,
-            companyId: helpers.actor.companyId,
+	          const task = {
+	            id: randomId("tsk"),
+	            siteId: qa.siteId,
+	            title: `Rework - ${qa.title}`,
+	            description: qa.notes,
+	            type: "rework",
+	            trade: qa.trade,
+	            companyId: helpers.actor.companyId,
             assigneeId: next.sites.find((site) => site.id === qa.siteId)?.superintendentId || helpers.actor.id,
             priority: "high",
             status: "todo",
@@ -5697,11 +5863,13 @@ export function SiteForgeProvider({ children }) {
             progress: 0,
             crewRequired: 1,
             mobileMaterials: [],
-            linkedRecords: [buildLink("qa", qa, qa.siteId)],
-            clientVisible: false,
-          };
-          next.tasks.unshift(task);
-          upsertLinkedRecord(qa, buildLink("task", task, qa.siteId));
+	            linkedRecords: [buildLink("qa", qa, qa.siteId)],
+	            clientVisible: false,
+	            requiresReinspection: true,
+	          };
+	          next.tasks.unshift(task);
+	          qa.reworkTaskId = task.id;
+	          upsertLinkedRecord(qa, buildLink("task", task, qa.siteId));
           helpers.addAudit({
             action: "task.create",
             entityType: "task",
@@ -7099,23 +7267,114 @@ Be specific about numbers. Reference Australian construction realities such as H
           });
         }
       },
-      generateBoardReport() {
-        mutate((next) => {
-          const metrics = buildMetrics(next);
-          const insight = boardInsights({
-            sites: next.sites,
-            approvals: next.approvals.filter((approval) => ["awaiting-client", "question", "contract-awaiting-client"].includes(approval.status)),
-            presence: next.presence.records,
-          });
-          next.boardReports.unshift({
-            id: randomId("br"),
-            period: next.session.period,
-            createdAt: nowStamp(),
-            title: `${next.session.period} board report`,
-            summary: `${insight.summary} Margin at risk currently stands at ${formatCurrency(metrics.portfolio.totalMarginAtRisk)}.`,
-          });
-        });
-      },
+	      async generateBoardReport() {
+	        const snapshot = stateRef.current;
+	        const reportId = randomId("br");
+	        const metrics = buildMetrics(snapshot);
+	        const insight = boardInsights({
+	          sites: snapshot.sites,
+	          approvals: snapshot.approvals.filter((approval) => ["awaiting-client", "question", "contract-awaiting-client"].includes(approval.status)),
+	          presence: snapshot.presence.records,
+	        });
+	        const localSummary = `${insight.summary} Margin at risk currently stands at ${formatCurrency(metrics.portfolio.totalMarginAtRisk)}.`;
+	        const createdAt = nowStamp();
+	        mutate((next) => {
+	          next.boardReports.unshift({
+	            id: reportId,
+	            period: next.session.period,
+	            createdAt,
+	            title: `${next.session.period} board report`,
+	            summary: localSummary,
+	            source: "local-template",
+	            upgradeStartedAt: nowStamp(),
+	            suggestedActions: insight.suggestedActions || [],
+	            riskFlags: insight.topRisks || [],
+	          });
+	          next.boardReports = next.boardReports.slice(0, 80);
+	        });
+
+	        const integrationSettings = snapshot.device?.settings?.integrations || snapshot.settings?.integrations || {};
+	        const aiConfig = getStoredAiConfig(integrationSettings);
+	        if (!aiConfig.apiKey || snapshot.org?.mode === "demo") return;
+
+	        const projectContext = {
+	          orgMode: snapshot.org?.mode,
+	          period: snapshot.session.period,
+	          metrics: metrics.portfolio,
+	          activeSites: snapshot.sites
+	            .filter((site) => site.status === "active")
+	            .map((site) => ({ id: site.id, name: site.name, contractValue: site.contractValue, progress: site.progress, risk: site.risk })),
+	          stalledApprovals: snapshot.approvals
+	            .filter((approval) => ["awaiting-client", "question", "contract-awaiting-client"].includes(approval.status))
+	            .slice(0, 10)
+	            .map((approval) => ({ title: approval.title, status: approval.status, costImpact: approval.costImpact, timeImpact: approval.timeImpact, sentAt: approval.sentAt })),
+	          failedQa: snapshot.qa.filter((entry) => entry.status === "failed").slice(0, 8),
+	          procurementDelays: snapshot.procurement.filter((entry) => ["delayed", "escalated"].includes(entry.status)).slice(0, 8),
+	        };
+	        const result = await askSiteForgeAi({
+	          userMessage: `You are preparing a board report for an Australian residential building company director.
+
+Reply ONLY as JSON:
+{
+  "summary": "4-5 sentence board-ready executive summary covering commercial recovery, delivery risk, QA/safety, and cash/margin exposure",
+  "suggestedActions": ["specific director action 1", "specific director action 2", "specific director action 3"],
+  "riskFlags": ["specific risk 1", "specific risk 2"]
+}
+
+Context:
+${JSON.stringify(projectContext)}`,
+	          projectContext,
+	          provider: aiConfig.provider,
+	          apiKey: aiConfig.apiKey,
+	          model: aiConfig.model,
+	          openaiProxyUrl: aiConfig.openaiProxyUrl,
+	          allowInDemo: false,
+	        });
+
+	        if (result.source !== "claude" && result.source !== "openai") {
+	          mutate((next) => {
+	            const report = next.boardReports.find((item) => item.id === reportId);
+	            if (report) {
+	              report.source = result.source || "ai-failed";
+	              report.aiError = result.text || "AI board report upgrade failed.";
+	            }
+	          });
+	          return;
+	        }
+
+	        try {
+	          const match = result.text.match(/\{[\s\S]*\}/);
+	          const parsed = JSON.parse(match ? match[0] : result.text);
+	          mutate((next, helpers) => {
+	            const report = next.boardReports.find((item) => item.id === reportId);
+	            if (!report) return;
+	            report.summary = parsed.summary || report.summary;
+	            report.suggestedActions = Array.isArray(parsed.suggestedActions) ? parsed.suggestedActions.slice(0, 6) : report.suggestedActions || [];
+	            report.riskFlags = Array.isArray(parsed.riskFlags) ? parsed.riskFlags.slice(0, 6) : report.riskFlags || [];
+	            report.source = result.source;
+	            report.generatedAt = nowStamp();
+	            delete report.upgradeStartedAt;
+	            helpers.emit({
+	              eventType: "ai.board-report",
+	              title: `AI board report ready (${result.source === "openai" ? "ChatGPT" : "Claude"})`,
+	              body: report.summary.slice(0, 200),
+	              siteId: next.session.siteId,
+	              entityType: "boardReport",
+	              entityId: report.id,
+	              recipients: getRecipientsForRoles(next, ["Director", "Project Manager"]),
+	              route: { kind: "director", page: "boardroom", entityId: report.id },
+	            });
+	          });
+	        } catch (error) {
+	          mutate((next) => {
+	            const report = next.boardReports.find((item) => item.id === reportId);
+	            if (report) {
+	              report.source = "ai-parse-error";
+	              report.aiError = "AI responded but could not be parsed.";
+	            }
+	          });
+	        }
+	      },
       sendDirectorEscalation(siteId, title) {
         mutate((next, helpers) => {
           helpers.emit({

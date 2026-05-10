@@ -32,6 +32,14 @@ import {
 
 const INCLUDE_DEMO_DATA = import.meta.env.VITE_INCLUDE_DEMO_DATA !== "false";
 
+const aiSourceLabel = (source) => {
+  if (source === "openai") return "ChatGPT";
+  if (source === "claude") return "Claude";
+  if (source === "local-template") return "Local template";
+  if (source === "ai-parse-error") return "AI parse error";
+  return source || "summary";
+};
+
 function useSessionState(key, initialValue) {
   const [value, setValue] = useState(() => {
     try {
@@ -1245,10 +1253,40 @@ function VariationsPage() {
   const { state, actions } = useSiteForge();
   const siteId = state.session.siteId;
   const role = state.session.role;
+  const currentSite = state.sites.find((site) => site.id === siteId) || state.sites[0];
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ title: "", description: "", reason: "", value: "", days: "", trade: "General", priority: "medium", templateId: "", photos: [] });
+  const [form, setForm] = useState({
+    siteId: siteId || "",
+    clientId: currentSite?.clientId || "",
+    title: "",
+    description: "",
+    reason: "",
+    value: "",
+    days: "",
+    trade: "General",
+    priority: "medium",
+    templateId: "",
+    photos: [],
+  });
   const variations = state.variations.filter((variation) => variation.siteId === siteId);
   const variationTemplates = state.contractTemplates.filter((template) => template.status !== "archived" && ["Variation", "Scope Clarification", "Selection Upgrade"].includes(template.type));
+  const canCreateStandaloneVariation = ["Project Manager", "Contract Admin", "Director"].includes(role);
+  const selectableSites = canSeeAllSites(role) ? state.sites : state.sites.filter((site) => site.id === siteId);
+  const selectedFormSite = state.sites.find((site) => site.id === form.siteId) || currentSite;
+  const resetForm = () =>
+    setForm({
+      siteId: siteId || "",
+      clientId: currentSite?.clientId || "",
+      title: "",
+      description: "",
+      reason: "",
+      value: "",
+      days: "",
+      trade: "General",
+      priority: "medium",
+      templateId: "",
+      photos: [],
+    });
 
   return (
     <div className="oy fin">
@@ -1257,9 +1295,11 @@ function VariationsPage() {
           <Badge tone="medium">{variations.filter((variation) => variation.status === "submitted").length} submitted</Badge>
           <Badge tone="passed">{variations.filter((variation) => variation.status === "signed").length} signed</Badge>
         </div>
-        <Button tone="bt-p" icon={Icons.plus} onClick={() => setOpen(true)}>
-          New Variation
-        </Button>
+        {canCreateStandaloneVariation ? (
+          <Button tone="bt-p" icon={Icons.plus} onClick={() => setOpen(true)}>
+            New Variation
+          </Button>
+        ) : null}
       </div>
       <Card title="Variations" icon={Icons.shuffle}>
         <div className="table-wrap">
@@ -1303,6 +1343,34 @@ function VariationsPage() {
         </div>
       </Card>
       <Modal open={open} close={() => setOpen(false)} title="Create Variation Draft">
+        <div className="g2">
+          <div className="ff">
+            <label>Site</label>
+            <select
+              value={form.siteId}
+              onChange={(event) => {
+                const nextSite = state.sites.find((site) => site.id === event.target.value);
+                setForm((current) => ({ ...current, siteId: event.target.value, clientId: nextSite?.clientId || current.clientId }));
+              }}
+            >
+              {selectableSites.map((site) => (
+                <option key={site.id} value={site.id}>
+                  {site.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="ff">
+            <label>Client</label>
+            <select value={form.clientId || selectedFormSite?.clientId || ""} onChange={(event) => setForm((current) => ({ ...current, clientId: event.target.value }))}>
+              {state.clients.map((client) => (
+                <option key={client.id} value={client.id}>
+                  {client.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
         <div className="ff">
           <label>Title</label>
           <input value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} />
@@ -1361,16 +1429,30 @@ function VariationsPage() {
         </div>
         <div className="fa">
           <Button onClick={() => setOpen(false)}>Cancel</Button>
-          <Button
-            tone="bt-p"
-            onClick={() => {
-              actions.createVariationDraft(form);
-              setOpen(false);
-              setForm({ title: "", description: "", reason: "", value: "", days: "", trade: "General", priority: "medium", templateId: "", photos: [] });
-            }}
-          >
-            Save Draft
-          </Button>
+	          <Button
+	            tone="bt-p"
+	            onClick={() => {
+	              const targetSite = state.sites.find((site) => site.id === form.siteId) || currentSite;
+	              actions.createApprovalFromSource({
+	                sourceType: "manual",
+	                sourceId: null,
+	                approvalType: "Variation",
+	                handUp: mustHandUpForApproval(role),
+	                manualOverride: {
+	                  ...form,
+	                  siteId: targetSite?.id || siteId,
+	                  clientId: form.clientId || targetSite?.clientId,
+	                  costImpact: Number(form.value || 0),
+	                  timeImpact: Number(form.days || 0),
+	                  submitForReview: true,
+	                },
+	              });
+	              setOpen(false);
+	              resetForm();
+	            }}
+	          >
+	            Submit for PM Review
+	          </Button>
         </div>
       </Modal>
     </div>
@@ -2774,13 +2856,16 @@ function ReportsPage() {
             <div className="list-stack">
               {siteReports.length ? (
                 siteReports.map((report) => (
-                  <div className="linked-row" key={report.id}>
-                    <div>
-                      <div className="b sm">{report.title}</div>
-                      <div className="xs ct3">{report.createdAt} · {report.documentId ? "Document Control" : "Boardroom only"}</div>
-                    </div>
-                    <Badge tone={report.fileId ? "passed" : "medium"}>{report.fileId ? "PDF" : "summary"}</Badge>
-                  </div>
+	                  <div className="linked-row" key={report.id}>
+	                    <div>
+	                      <div className="b sm">{report.title}</div>
+	                      <div className="xs ct3">{report.createdAt} · {report.documentId ? "Document Control" : "Boardroom only"}</div>
+	                    </div>
+	                    <div className="fx" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+	                      <Badge tone={report.fileId ? "passed" : "medium"}>{report.fileId ? "PDF" : "summary"}</Badge>
+	                      <Badge tone={["openai", "claude"].includes(report.source) ? "passed" : report.upgradeStartedAt ? "medium" : "medium"}>{report.upgradeStartedAt ? "AI upgrading" : aiSourceLabel(report.source)}</Badge>
+	                    </div>
+	                  </div>
                 ))
               ) : (
                 <EmptyState icon={Icons.file} title="No report artifacts yet" description="Generate an operations report to store a durable PDF in Document Control." />

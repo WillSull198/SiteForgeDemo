@@ -3391,7 +3391,8 @@ button:disabled {
 
 @media (max-width: 420px) {
   html,
-  body {
+  body,
+  #root {
     max-width: 100%;
     overflow-x: hidden;
   }
@@ -3399,8 +3400,12 @@ button:disabled {
   .onboarding-shell,
   .client-shell,
   .subbie-shell,
-  .worker-shell {
+  .worker-shell,
+  .passport-shell {
     padding: 10px !important;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
   }
 
   .onboarding-card,
@@ -3424,13 +3429,43 @@ button:disabled {
   .fb,
   .fx {
     min-width: 0;
+    flex-wrap: wrap;
   }
 
   .bt,
   .bt-p,
   .bt-r,
-  .bt-i {
+  .bt-i,
+  .touch-button,
+  input,
+  select,
+  textarea {
     min-height: 44px;
+  }
+
+  .g2,
+  .g3,
+  .g32,
+  .worker-grid,
+  .form-grid.two {
+    grid-template-columns: 1fr !important;
+  }
+
+  .ai-drawer-shell,
+  .ai-drawer {
+    left: 8px !important;
+    right: 8px !important;
+    width: calc(100vw - 16px) !important;
+    max-width: calc(100vw - 16px) !important;
+  }
+
+  .worker-bottom-nav {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .worker-bottom-nav button {
+    min-width: 0;
+    font-size: 11px;
   }
 }
 
