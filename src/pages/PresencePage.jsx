@@ -128,6 +128,12 @@ export default function PresencePage() {
                   onClick: (record) => actions.resolvePresence(record.id, "hold", "Hold for payroll review."),
                   when: () => canResolve,
                 },
+                {
+                  label: "Close record",
+                  tone: "bt-s",
+                  onClick: (record) => actions.signOutPresence({ recordId: record.id, manualClose: true }),
+                  when: (record) => canResolve && !record.finish,
+                },
               ]}
               bulkActions={[
                 {

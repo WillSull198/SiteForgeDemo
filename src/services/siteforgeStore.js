@@ -2187,6 +2187,13 @@ function hoursSince(value, runtime = getRuntimeNow()) {
   return Math.max(0, (runtime.getTime() - parsed.getTime()) / 36e5);
 }
 
+function computeHours(startIso, finishIso) {
+  const start = parseDateTime(startIso);
+  const finish = parseDateTime(finishIso);
+  if (!start || !finish) return 0;
+  return Math.round(Math.max(0, finish.getTime() - start.getTime()) / 36e3) / 100;
+}
+
 function daysUntil(value, runtime = getRuntimeNow()) {
   const parsed = parseDateTime(value?.length > 10 ? value : `${value} 00:00`);
   if (!parsed) return Infinity;
@@ -3069,18 +3076,32 @@ export function SiteForgeProvider({ children }) {
           schedule.lastQueuedAt = queuedAt.slice(0, 10);
         });
         next.reportQueue = (next.reportQueue || []).slice(0, 80);
-        if (due.length) {
-          helpers.addAudit({
-            action: "report.scheduler-queue",
-            entityType: "reportQueue",
-            entityId: next.reportQueue[0]?.id || "reportQueue",
-            before: null,
-            after: { queued: due.length },
-            siteId: next.session.siteId,
-          });
-        }
-      });
-    }, 60000);
+	        if (due.length) {
+	          helpers.addAudit({
+	            action: "report.scheduler-queue",
+	            entityType: "reportQueue",
+	            entityId: next.reportQueue[0]?.id || "reportQueue",
+	            before: null,
+	            after: { queued: due.length },
+	            siteId: next.session.siteId,
+	          });
+	        }
+	        (next.presence.records || []).forEach((record) => {
+	          if (record.finish || hoursSince(record.start) < 16 || record.autoCloseNotifiedAt) return;
+	          record.autoCloseNotifiedAt = nowStamp();
+	          helpers.emit({
+	            eventType: "presence.anomaly",
+	            title: `Presence record still open - ${record.person || record.worker || record.userId}`,
+	            body: "This attendance record has been open for more than 16 hours. Supervisor review is required.",
+	            siteId: record.siteId,
+	            entityType: "presence",
+	            entityId: record.id,
+	            recipients: getRecipientsForRoles(next, ["Supervisor", "Project Manager"]),
+	            route: { kind: "internal", siteId: record.siteId, page: "presence", entityId: record.id },
+	          });
+	        });
+	      });
+	    }, 60000);
     return () => window.clearInterval(timer);
   }, [mutate]);
 
@@ -6133,9 +6154,41 @@ export function SiteForgeProvider({ children }) {
               route: { kind: "internal", siteId, page: "passport", entityId: passport.id },
             });
           }
-        });
-      },
-      acknowledgeToolboxTalk(talkId, userId, name) {
+	        });
+	      },
+	      signOutPresence({ siteId, userId, recordId = null, manualClose = false }) {
+	        mutate((next, helpers) => {
+	          const target = recordId
+	            ? next.presence.records.find((record) => record.id === recordId)
+	            : next.presence.records.find((record) => record.siteId === siteId && record.userId === userId && !record.finish);
+	          if (!target) return;
+	          const before = { finish: target.finish || null, status: target.status, payrollState: target.payrollState };
+	          target.finish = nowStamp();
+	          target.status = "verified-complete";
+	          target.hours = computeHours(target.start, target.finish);
+	          target.payrollState = manualClose ? "review" : "ready";
+	          target.autoCloseNotifiedAt = null;
+	          next.presence.events.unshift({
+	            id: randomId("pe"),
+	            siteId: target.siteId,
+	            userId: target.userId,
+	            at: target.finish,
+	            signal: "sign-out",
+	            state: "captured",
+	            note: manualClose ? "Closed manually by supervisor" : "Worker signed out",
+	          });
+	          next.presence.events = next.presence.events.slice(0, 260);
+	          helpers.addAudit({
+	            action: "presence.signed-out",
+	            entityType: "presence",
+	            entityId: target.id,
+	            before,
+	            after: { finish: target.finish, hours: target.hours, payrollState: target.payrollState },
+	            siteId: target.siteId,
+	          });
+	        });
+	      },
+	      acknowledgeToolboxTalk(talkId, userId, name) {
         mutate((next) => {
           const talk = next.toolboxTalks.find((item) => item.id === talkId);
           if (!talk) return;

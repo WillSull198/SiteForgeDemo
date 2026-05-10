@@ -28,12 +28,14 @@ export default function WorkerMobileView() {
   const toolbox = state.toolboxTalks.filter((talk) => talk.requiredFor.includes(user?.id));
   const unreadToolbox = toolbox.filter((talk) => !talk.acknowledgements.some((ack) => ack.userId === user?.id));
   const passport = user ? state.passports.records.find((record) => record.userId === user.id && record.siteId === siteId) : null;
-  const presence = user ? state.presence.records.find((record) => record.userId === user.id && record.siteId === siteId) : null;
+  const openPresence = user ? state.presence.records.find((record) => record.userId === user.id && record.siteId === siteId && !record.finish) : null;
+  const presence = openPresence || (user ? state.presence.records.find((record) => record.userId === user.id && record.siteId === siteId) : null);
+  const elapsedHours = openPresence?.start ? Math.round(((Date.now() - new Date(String(openPresence.start).replace(" ", "T")).getTime()) / 36e5) * 10) / 10 : 0;
   const myDay = {
     checkIn: state.passports.scanLog.find((entry) => entry.passportId === passport?.id)?.at || "Not checked in",
     completed: state.tasks.filter((task) => task.assigneeId === user?.id && task.siteId === siteId && task.status === "done").length,
     remaining: state.tasks.filter((task) => task.assigneeId === user?.id && task.siteId === siteId && task.status !== "done").length,
-    hours: presence ? Math.max(4, Math.round((presence.confidence / 100) * 8)) : 0,
+    hours: openPresence ? elapsedHours : presence?.hours || 0,
   };
 
   const openTask = (task) => {
@@ -190,10 +192,17 @@ export default function WorkerMobileView() {
             </div>
           ))}
 
-          <button className="worker-qr-button" type="button" onClick={() => actions.scanPassport(siteId, passport?.id)}>
-            {renderIcon(Icons.qr, 24)}
-            <span>Check In to Site</span>
-          </button>
+          {openPresence ? (
+            <button className="worker-qr-button" type="button" onClick={() => actions.signOutPresence({ siteId, userId: user.id, recordId: openPresence.id })}>
+              {renderIcon(Icons.check, 24)}
+              <span>Sign out</span>
+            </button>
+          ) : (
+            <button className="worker-qr-button" type="button" onClick={() => actions.scanPassport(siteId, passport?.id)}>
+              {renderIcon(Icons.qr, 24)}
+              <span>Check In to Site</span>
+            </button>
+          )}
 
           <div className="worker-section-title">Today's priority tasks</div>
           <div className="worker-stack">
