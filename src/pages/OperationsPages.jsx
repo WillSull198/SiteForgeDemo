@@ -30,6 +30,8 @@ import {
   Timeline,
 } from "../components/ui";
 
+const INCLUDE_DEMO_DATA = import.meta.env.VITE_INCLUDE_DEMO_DATA !== "false";
+
 function useSessionState(key, initialValue) {
   const [value, setValue] = useState(() => {
     try {
@@ -2979,11 +2981,11 @@ function AdminPage() {
   const activeMode = state.org?.mode === "demo" || state.org?.mode === "real" ? state.org.mode : "blank";
   const todayStamp = new Date().toISOString().slice(0, 10);
   const realSlotExists = storageSlotExists("real") || activeMode === "real";
-  const demoSlotExists = storageSlotExists("demo") || activeMode === "demo";
+  const demoSlotExists = INCLUDE_DEMO_DATA && (storageSlotExists("demo") || activeMode === "demo");
   const storageSummary = [
     ["Current mode", activeMode === "blank" ? "Not set up" : modeLabel(activeMode)],
     ["Real slot", realSlotExists ? "present" : "empty"],
-    ["Demo slot", demoSlotExists ? "present" : "empty"],
+    INCLUDE_DEMO_DATA ? ["Demo slot", demoSlotExists ? "present" : "empty"] : ["Build", "Production"],
   ];
 
   const exportModeState = (mode) => {
@@ -3261,7 +3263,7 @@ function AdminPage() {
           </div>
           <Button tone="bt-p" onClick={saveUserSettings}>Save User Settings</Button>
         </Card>
-        {state.org?.mode === "demo" ? (
+        {INCLUDE_DEMO_DATA && state.org?.mode === "demo" ? (
           <Card title="Demo Controls" icon={Icons.gear}>
             <div className="sm ct2">Reset the demo data back to the seeded construction scenario at any time.</div>
             <div className="sm ct2" style={{ marginTop: 8 }}>Current simulated time: {derived.currentNow}</div>
@@ -3306,27 +3308,29 @@ function AdminPage() {
                 <Button small tone="bt-r" onClick={() => clearModeData("real")}>Clear My Data</Button>
               </div>
             </div>
-            <div className="mini-card">
-              <div className="b sm">Demo data</div>
-              <div className="xs ct3">Worked demo storage. Your real data is unaffected.</div>
-              <div className="fa" style={{ marginTop: 10, justifyContent: "flex-start" }}>
-                <Button small onClick={() => exportModeState("demo")}>Export Demo</Button>
-                <label className="bt small">
-                  Import Demo
-                  <input
-                    type="file"
-                    accept="application/json,.json"
-                    style={{ display: "none" }}
-                    onChange={(event) => {
-                      handleImportFile(event.target.files?.[0], "demo");
-                      event.target.value = "";
-                    }}
-                  />
-                </label>
-                <Button small tone="bt-p" onClick={() => actions.switchToMode("demo")}>Switch to Demo</Button>
-                <Button small tone="bt-r" onClick={() => clearModeData("demo")}>Reset Demo Slot</Button>
+            {INCLUDE_DEMO_DATA ? (
+              <div className="mini-card">
+                <div className="b sm">Demo data</div>
+                <div className="xs ct3">Worked demo storage. Your real data is unaffected.</div>
+                <div className="fa" style={{ marginTop: 10, justifyContent: "flex-start" }}>
+                  <Button small onClick={() => exportModeState("demo")}>Export Demo</Button>
+                  <label className="bt small">
+                    Import Demo
+                    <input
+                      type="file"
+                      accept="application/json,.json"
+                      style={{ display: "none" }}
+                      onChange={(event) => {
+                        handleImportFile(event.target.files?.[0], "demo");
+                        event.target.value = "";
+                      }}
+                    />
+                  </label>
+                  <Button small tone="bt-p" onClick={() => actions.switchToMode("demo")}>Switch to Demo</Button>
+                  <Button small tone="bt-r" onClick={() => clearModeData("demo")}>Reset Demo Slot</Button>
+                </div>
               </div>
-            </div>
+            ) : null}
           </div>
           <div className="mini-card" style={{ marginTop: 10 }}>
             <div className="b sm">Mode switching summary</div>
@@ -3340,10 +3344,12 @@ function AdminPage() {
               <span>Real key</span>
               <span className="mono xs">{getStateStorageKey("real")}</span>
             </div>
-            <div className="linked-row">
-              <span>Demo key</span>
-              <span className="mono xs">{getStateStorageKey("demo")}</span>
-            </div>
+            {INCLUDE_DEMO_DATA ? (
+              <div className="linked-row">
+                <span>Demo key</span>
+                <span className="mono xs">{getStateStorageKey("demo")}</span>
+              </div>
+            ) : null}
             <div className="linked-row">
               <div>
                 <div className="b sm">Confirm destructive actions</div>

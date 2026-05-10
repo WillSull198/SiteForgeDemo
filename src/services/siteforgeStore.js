@@ -45,6 +45,8 @@ import {
 } from "./storageMode";
 
 const SiteForgeContext = createContext(null);
+const INCLUDE_DEMO_DATA = import.meta.env.VITE_INCLUDE_DEMO_DATA !== "false";
+const DEMO_TIME_TRAVEL = import.meta.env.VITE_DEMO_TIME_TRAVEL !== "false";
 
 const DEFAULT_ROLE_USERS = {
   Supervisor: "u_sup_1",
@@ -3038,15 +3040,16 @@ export function SiteForgeProvider({ children }) {
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      window.__siteforgeNow = state.demo?.simulatedNow || nowStamp();
+      window.__siteforgeNow = DEMO_TIME_TRAVEL && state.org?.mode === "demo" && state.demo?.simulatedNow ? state.demo.simulatedNow : nowStamp();
     }
-  }, [state.demo?.simulatedNow]);
+  }, [state.demo?.simulatedNow, state.org?.mode]);
 
   useEffect(() => {
+    if (!DEMO_TIME_TRAVEL || state.org?.mode !== "demo") return;
     mutate((next, helpers) => {
       runTimedAutomationSweep(next, helpers);
     });
-  }, [mutate, state.demo?.simulatedNow]);
+  }, [mutate, state.demo?.simulatedNow, state.org?.mode]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -3082,7 +3085,7 @@ export function SiteForgeProvider({ children }) {
   }, [mutate]);
 
 	  useEffect(() => {
-	    if (state.org?.mode !== "demo" || !state.demo?.mode) return undefined;
+		    if (!INCLUDE_DEMO_DATA || !DEMO_TIME_TRAVEL || state.org?.mode !== "demo" || !state.demo?.mode) return undefined;
 	    let timer = null;
 	    const fireDemoEvent = () => {
 	      mutate((next, helpers) => {
@@ -3120,6 +3123,7 @@ export function SiteForgeProvider({ children }) {
 		      improveApprovalDraft,
 		      async switchToMode(targetMode) {
 	        if (targetMode !== "demo" && targetMode !== "real") return;
+	        if (targetMode === "demo" && !INCLUDE_DEMO_DATA) return;
 	        const currentState = stateRef.current;
 	        const currentMode = currentState?.org?.mode || getActiveMode();
 	        if (currentMode === targetMode) return;
@@ -3389,6 +3393,7 @@ export function SiteForgeProvider({ children }) {
 	      },
       completeOnboarding(mode = "demo") {
         if (mode === "demo") {
+          if (!INCLUDE_DEMO_DATA) return;
           const demoState = createDemoStore();
           setState(demoState);
           window.location.hash = buildHash(demoState.session.route || DEFAULT_ROLE_PAGES.Supervisor);
@@ -3759,7 +3764,7 @@ export function SiteForgeProvider({ children }) {
       },
 	      setDemoMode(enabled) {
 	        mutate((next) => {
-	          if (next.org?.mode !== "demo") return;
+	          if (!INCLUDE_DEMO_DATA || next.org?.mode !== "demo") return;
 	          next.demo.mode = enabled;
           next.demo.userControlled = true;
           if (enabled && (!Array.isArray(next.demo.queuedEvents) || !next.demo.queuedEvents.length)) {
@@ -3770,9 +3775,10 @@ export function SiteForgeProvider({ children }) {
           }
         });
       },
-      advanceSimulatedTime(days = 1) {
-        mutate((next, helpers) => {
-          next.demo.simulatedNow = `${addDays(next.demo.simulatedNow.slice(0, 10), days)} ${next.demo.simulatedNow.slice(11) || "09:15"}`;
+	      advanceSimulatedTime(days = 1) {
+	        mutate((next, helpers) => {
+	          if (!INCLUDE_DEMO_DATA || !DEMO_TIME_TRAVEL || next.org?.mode !== "demo") return;
+	          next.demo.simulatedNow = `${addDays(next.demo.simulatedNow.slice(0, 10), days)} ${next.demo.simulatedNow.slice(11) || "09:15"}`;
           helpers.projectLog(next.session.siteId, "Simulated time advanced", `Demo clock moved forward by ${days} day${days === 1 ? "" : "s"}.`);
         });
       },

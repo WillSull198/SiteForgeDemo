@@ -9,7 +9,7 @@ import NotificationBell from "./components/NotificationBell";
 import Onboarding from "./components/Onboarding";
 import RoleSelector from "./components/RoleSelector";
 import { Icons, renderIcon } from "./components/icons";
-import { AccessDenied, Button, Modal } from "./components/ui";
+import { AccessDenied, Badge, Button, Modal } from "./components/ui";
 import { APP_CONFIG } from "./data/seedData";
 import { can, getNavForRole, mustHandUpForApproval, routeKindForRole } from "./services/permissions";
 import { SiteForgeProvider, useSiteForge } from "./services/siteforgeStore";
@@ -47,6 +47,7 @@ const PAGE_TITLES = {
   "commercial-risk": "Commercial Risk",
   "safety-record": "Safety Record",
 };
+const INCLUDE_DEMO_DATA = import.meta.env.VITE_INCLUDE_DEMO_DATA !== "false";
 
 const ClientFlowPage = lazy(() => import("./pages/ClientFlowPage"));
 const ClientPortalPage = lazy(() => import("./pages/ClientPortalPage"));
@@ -546,10 +547,10 @@ function Shell() {
         </aside>
 
         <main className="M">
-          {state.org?.mode === "demo" ? (
+          {INCLUDE_DEMO_DATA && state.org?.mode === "demo" ? (
             <div className="demo-banner">
-	              <span>Demo mode. Your real data is in a separate workspace and is unaffected.</span>
-	              <Button small onClick={() => actions.switchToMode("real")}>Switch to my real account</Button>
+		              <span>Demo mode. Your real data is in a separate workspace and is unaffected.</span>
+		              <Button small onClick={() => actions.switchToMode("real")}>Switch to my real account</Button>
             </div>
           ) : null}
           {updateReady ? (
@@ -588,7 +589,8 @@ function Shell() {
                 {renderIcon(Icons.search, 13)}
                 <span>Search or run a command...</span>
               </button>
-              {state.org?.mode === "demo" ? (
+              {!INCLUDE_DEMO_DATA ? <Badge tone="passed">Production</Badge> : null}
+              {INCLUDE_DEMO_DATA && state.org?.mode === "demo" ? (
                 <Button small tone={state.demo.mode ? "bt-p" : ""} icon={Icons.clock} onClick={() => actions.setDemoMode(!state.demo.mode)}>
                   {state.demo.mode ? "Demo Mode" : "Live Mode"}
                 </Button>
@@ -674,7 +676,7 @@ function Shell() {
         onAction={(action) => {
           if (action.type === "role") actions.setRole(action.value);
           if (action.type === "navigate") actions.navigate(action.route);
-          if (action.type === "demo") actions.setDemoMode(!state.demo.mode);
+          if (INCLUDE_DEMO_DATA && action.type === "demo") actions.setDemoMode(!state.demo.mode);
           if (action.type === "board-report") actions.generateBoardReport();
         }}
       />
@@ -778,18 +780,22 @@ function Shell() {
               <div className="xs ct3">Toggle AI assistant</div>
             </div>
           </div>
-          <div className="linked-row">
-            <div>
-              <div className="b sm">⌘.</div>
-              <div className="xs ct3">Toggle demo mode</div>
+          {INCLUDE_DEMO_DATA ? (
+            <div className="linked-row">
+              <div>
+                <div className="b sm">⌘.</div>
+                <div className="xs ct3">Toggle demo mode</div>
+              </div>
             </div>
-          </div>
-          <div className="linked-row">
-            <div>
-              <div className="b sm">⌘⇧D</div>
-              <div className="xs ct3">Toggle demo script mode</div>
+          ) : null}
+          {INCLUDE_DEMO_DATA ? (
+            <div className="linked-row">
+              <div>
+                <div className="b sm">⌘⇧D</div>
+                <div className="xs ct3">Toggle demo script mode</div>
+              </div>
             </div>
-          </div>
+          ) : null}
           <div className="linked-row">
             <div>
               <div className="b sm">Esc</div>
@@ -808,7 +814,7 @@ function Shell() {
         </>
       ) : null}
 
-      {state.demo.recentToasts.length ? (
+      {INCLUDE_DEMO_DATA && state.demo.recentToasts.length ? (
         <div className="toast-stack">
           {state.demo.recentToasts.map((toast) => (
             <button className={`toast-card ${toast.tone || "medium"}`.trim()} key={toast.id} onClick={() => actions.dismissToast(toast.id)} type="button">
@@ -847,7 +853,7 @@ function Shell() {
         </div>
       ) : null}
 
-      {state.demo.demoScriptMode ? (
+      {INCLUDE_DEMO_DATA && state.demo.demoScriptMode ? (
         <div className="demo-script-panel">
           <div className="xs ct3">Demo Script Mode</div>
           <div className="b sm" style={{ marginTop: 4 }}>

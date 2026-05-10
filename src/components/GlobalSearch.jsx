@@ -3,6 +3,7 @@ import { routeKindForRole } from "../services/permissions";
 import { Icons, renderIcon } from "./icons";
 
 const ROLE_ORDER = ["Supervisor", "Project Manager", "Contract Admin", "Director", "Subcontractor", "Client", "Worker"];
+const INCLUDE_DEMO_DATA = import.meta.env.VITE_INCLUDE_DEMO_DATA !== "false";
 
 function buildCommands(role, query = "") {
   const q = query.trim().toLowerCase();
@@ -12,14 +13,14 @@ function buildCommands(role, query = "") {
     { id: "cmd-create-task", title: "Create task", subtitle: "Open Tasks workspace", action: { type: "navigate", route: { kind: routeKind, page: directorRoute ? "boardroom" : "tasks", siteId: "s1", entityId: null } } },
     { id: "cmd-clientflow", title: "Go to ClientFlow", subtitle: "Navigate to approvals", action: { type: "navigate", route: { kind: routeKind, page: directorRoute ? "commercial-risk" : "clientflow", siteId: "s1", entityId: null } } },
     { id: "cmd-board", title: "Generate board report", subtitle: "Run the current board report action", action: { type: "board-report" } },
-    { id: "cmd-demo", title: "Toggle demo mode", subtitle: "Switch between demo and live modes", action: { type: "demo" } },
+    INCLUDE_DEMO_DATA ? { id: "cmd-demo", title: "Toggle demo mode", subtitle: "Switch between demo and live modes", action: { type: "demo" } } : null,
     ...ROLE_ORDER.map((entry) => ({
       id: `role-${entry}`,
       title: `Switch to ${entry}`,
       subtitle: "Swap role experience instantly",
       action: { type: "role", value: entry },
     })),
-  ];
+  ].filter(Boolean);
 
   if (!q) return commands.slice(0, 8);
   return commands.filter((command) => `${command.title} ${command.subtitle}`.toLowerCase().includes(q));

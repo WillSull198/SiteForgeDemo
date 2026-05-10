@@ -7,6 +7,7 @@ import { Badge, Button, Card } from "./ui";
 const ROLES = ["Director", "Project Manager", "Contract Admin", "Supervisor"];
 const CONTRACT_TYPES = ["HIA", "AS4000", "AS2124", "MBA", "Custom"];
 const STATES = ["QLD", "NSW", "VIC", "SA", "WA", "TAS", "NT", "ACT"];
+const INCLUDE_DEMO_DATA = import.meta.env.VITE_INCLUDE_DEMO_DATA !== "false";
 
 async function resizeLogo(file) {
   if (!file) return "";
@@ -98,7 +99,7 @@ export default function Onboarding({ state, actions }) {
     aiProvider: normaliseAiProvider(onboardingIntegrationSettings.aiProvider || AI_PROVIDERS.ANTHROPIC),
     anthropicApiKey: readAiKey(AI_STORAGE_KEYS.anthropic),
     openaiApiKey: readAiKey(AI_STORAGE_KEYS.openai),
-    openaiProxyUrl: readAiKey(AI_STORAGE_KEYS.openaiProxy),
+    openaiProxyUrl: readAiKey(AI_STORAGE_KEYS.openaiProxy) || import.meta.env.VITE_OPENAI_PROXY_DEFAULT || "",
     anthropicModel: onboardingIntegrationSettings.anthropicModel || onboardingIntegrationSettings.aiModel || DEFAULT_AI_MODELS.anthropic,
     openaiModel: onboardingIntegrationSettings.openaiModel || DEFAULT_AI_MODELS.openai,
     buildxactApiKey: onboardingIntegrationSettings.buildxactApiKey || "",
@@ -235,16 +236,18 @@ export default function Onboarding({ state, actions }) {
             <StepHeader
               eyebrow="SiteForge"
               title="Getting started"
-              body="Choose whether this browser should load the worked demo or start a clean real account with your own company and project data."
+              body={INCLUDE_DEMO_DATA ? "Choose whether this browser should load the worked demo or start a clean real account with your own company and project data." : "Set up your production workspace with your own company, project, client and team records."}
             />
-            <div className="g2">
-              <Card title="Try the demo">
-                <p className="sm ct2">Explore SiteForge with Riverside Residence, Hargraves Family, example variations, Passport, Presence and Buildxact workflows.</p>
-	                <Button tone="bt-p" onClick={() => actions.switchToMode("demo")}>Start Demo</Button>
-              </Card>
+            <div className={INCLUDE_DEMO_DATA ? "g2" : ""}>
+              {INCLUDE_DEMO_DATA ? (
+                <Card title="Try the demo">
+                  <p className="sm ct2">Explore SiteForge with Riverside Residence, Hargraves Family, example variations, Passport, Presence and Buildxact workflows.</p>
+                  <Button tone="bt-p" onClick={() => actions.switchToMode("demo")}>Start Demo</Button>
+                </Card>
+              ) : null}
               <Card title="Set up my company">
                 <p className="sm ct2">Start fresh. Demo data will not load, and every workflow will use your company, project, client and team records.</p>
-	                <Button tone="bt-p" onClick={() => actions.switchToMode("real")}>Set Up Company</Button>
+		                <Button tone="bt-p" onClick={() => actions.switchToMode("real")}>Set Up Company</Button>
               </Card>
             </div>
           </>

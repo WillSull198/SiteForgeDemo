@@ -54,3 +54,23 @@ Then open `http://localhost:4173`.
 ### Cloudflare Worker proxy
 
 The OpenAI proxy is a separate service on Cloudflare Workers. It is configured inside SiteForge after the app loads. Railway deployment changes do not affect the proxy. See `docs/setup-openai-proxy.md`.
+
+## Demo and production Railway services
+
+SiteForge can deploy the same `main` branch as either a demo build or a production build. The environment variable controls whether the large seeded demo scenario is included in the bundle.
+
+### Demo service
+
+- Domain example: `demo.siteforge.com.au`
+- Railway variable: `VITE_INCLUDE_DEMO_DATA=true`
+- Optional: `VITE_DEMO_TIME_TRAVEL=true`
+- Use this for sales walkthroughs, training, and safe experimentation.
+
+### Production service
+
+- Domain example: `app.siteforge.com.au`
+- Railway variable: `VITE_INCLUDE_DEMO_DATA=false`
+- Recommended: `VITE_DEMO_TIME_TRAVEL=false`
+- Result: demo seed content is loaded from the production seed module instead of the worked demo module, the Start Demo entry point is hidden, and the header shows `Production`.
+
+Both services can deploy from `main`. Keep their Railway storage/domains separate so real customers never share the demo workspace or demo browser storage.

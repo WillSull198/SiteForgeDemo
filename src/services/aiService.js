@@ -29,7 +29,7 @@ export function getStoredAiConfig(settings = {}) {
   const provider = normaliseAiProvider(integrations.aiProvider || AI_PROVIDERS.ANTHROPIC);
   const anthropicKey = typeof window !== "undefined" ? window.localStorage.getItem(AI_STORAGE_KEYS.anthropic) || "" : "";
   const openaiKey = typeof window !== "undefined" ? window.localStorage.getItem(AI_STORAGE_KEYS.openai) || "" : "";
-  const openaiProxyUrl = typeof window !== "undefined" ? window.localStorage.getItem(AI_STORAGE_KEYS.openaiProxy) || "" : "";
+  const openaiProxyUrl = typeof window !== "undefined" ? window.localStorage.getItem(AI_STORAGE_KEYS.openaiProxy) || import.meta.env.VITE_OPENAI_PROXY_DEFAULT || "" : "";
   return {
     provider,
     apiKey: provider === AI_PROVIDERS.OPENAI ? openaiKey : anthropicKey,
