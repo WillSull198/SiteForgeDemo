@@ -50,6 +50,7 @@ Then open `http://localhost:4173`.
    - `serve` should log that it is accepting connections on `0.0.0.0:<PORT>`.
 7. If Railway still cannot reach the service, clear the Target Port field in Public Networking and redeploy.
 8. Open `/railway-debug.html` on the Railway domain. If it loads, static serving works and any blank app is a bundle/runtime/cache issue.
+9. Optional static health check: open `/healthz.txt`. It should return plain `ok`. Do not use extensionless `/healthz` with `serve -s`; SPA fallback may rewrite extensionless routes to `index.html`.
 
 ### Cloudflare Worker proxy
 
