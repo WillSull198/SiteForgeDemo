@@ -5267,6 +5267,10 @@ export function SiteForgeProvider({ children }) {
             linkedRecords: [],
           };
           linkRecords(rfi, variation, "rfi", "variation", rfi.siteId);
+          const beforeRfi = { status: rfi.status, convertedVariationId: rfi.convertedVariationId || null };
+          rfi.status = "converted-to-variation";
+          rfi.convertedVariationId = variation.id;
+          rfi.convertedAt = nowStamp();
           next.variations.unshift(variation);
           helpers.addAudit({
             action: "variation.create",
@@ -5275,6 +5279,14 @@ export function SiteForgeProvider({ children }) {
             before: null,
             after: { status: variation.status, value: variation.value },
             siteId: variation.siteId,
+          });
+          helpers.addAudit({
+            action: "rfi.convert-to-variation",
+            entityType: "rfi",
+            entityId: rfi.id,
+            before: beforeRfi,
+            after: { status: rfi.status, convertedVariationId: variation.id },
+            siteId: rfi.siteId,
           });
           targetRoute = { kind: "internal", siteId: variation.siteId, page: "vos", entityId: variation.id };
         });
@@ -6019,6 +6031,7 @@ export function SiteForgeProvider({ children }) {
       },
       createRfi(payload) {
         mutate((next, helpers) => {
+          const linkedRecords = Array.isArray(payload.linkedRecords) ? payload.linkedRecords : [];
           const rfi = {
             id: randomId("rfi"),
             siteId: payload.siteId || next.session.siteId,
@@ -6034,9 +6047,17 @@ export function SiteForgeProvider({ children }) {
             timeImpact: Number(payload.timeImpact || 0),
             scopeCompanyId: helpers.actor.companyId,
             description: payload.description || payload.title,
-            linkedRecords: payload.linkedRecords || [],
+            linkedRecords: [],
             responses: [],
           };
+          linkedRecords.forEach((link) => {
+            const linked = findInCollection(next, link.type, link.id);
+            if (linked) {
+              linkRecords(linked, rfi, link.type, "rfi", rfi.siteId);
+            } else {
+              upsertLinkedRecord(rfi, link);
+            }
+          });
           next.rfis.unshift(rfi);
           helpers.addAudit({
             action: "rfi.create",
@@ -6121,19 +6142,42 @@ export function SiteForgeProvider({ children }) {
           });
         });
       },
-	      respondRfi(rfiId, message) {
-	        mutate((next, helpers) => {
-	          const rfi = next.rfis.find((item) => item.id === rfiId);
-	          if (!rfi || !message.trim()) return;
-          rfi.responses.push({
+      respondRfi(rfiId, message) {
+        mutate((next, helpers) => {
+          const rfi = next.rfis.find((item) => item.id === rfiId);
+          if (!rfi || !message.trim()) return;
+          const before = { status: rfi.status, responseCount: rfi.responses?.length || 0 };
+          const response = {
             id: randomId("rfi-r"),
             by: actorName(helpers.actor),
             at: nowStamp(),
-            body: message,
+            body: message.trim(),
+          };
+          rfi.responses = Array.isArray(rfi.responses) ? rfi.responses : [];
+          rfi.responses.push(response);
+          rfi.status = "responded";
+          rfi.respondedAt = response.at;
+          rfi.updatedAt = response.at;
+          helpers.addAudit({
+            action: "rfi.respond",
+            entityType: "rfi",
+            entityId: rfi.id,
+            before,
+            after: { status: rfi.status, responseId: response.id },
+            siteId: rfi.siteId,
           });
-	          rfi.status = "responded";
-	        });
-	      },
+          helpers.emit({
+            eventType: "rfi.responded",
+            title: `RFI response recorded - ${rfi.number}`,
+            body: rfi.title,
+            siteId: rfi.siteId,
+            entityType: "rfi",
+            entityId: rfi.id,
+            recipients: getRecipientsForRoles(next, ["Supervisor", "Project Manager", "Contract Admin"]),
+            route: { kind: "internal", siteId: rfi.siteId, page: "rfis", entityId: rfi.id },
+          });
+        });
+      },
 	      async respondRfiSmart(rfiId, draftMessage = "") {
 	        const snapshot = stateRef.current;
 	        const rfi = snapshot.rfis.find((item) => item.id === rfiId);
@@ -6168,12 +6212,36 @@ Return only the polished response text. Keep it practical, formal, and specific.
 	        }
 	        return { ok: false, error: result.text || "AI did not return an RFI response.", source: result.source };
 	      },
-	      closeRfi(rfiId) {
-        mutate((next) => {
+      closeRfi(rfiId) {
+        mutate((next, helpers) => {
           const rfi = next.rfis.find((item) => item.id === rfiId);
-          if (rfi) {
-            rfi.status = "closed";
+          if (!rfi || rfi.status === "closed") return;
+          if (!Array.isArray(rfi.responses) || !rfi.responses.length) {
+            helpers.emit({
+              eventType: "rfi.close-blocked",
+              title: `RFI response required - ${rfi.number}`,
+              body: "Record a response before closing the RFI.",
+              siteId: rfi.siteId,
+              entityType: "rfi",
+              entityId: rfi.id,
+              priority: "medium",
+              recipients: [helpers.actor.id],
+              route: { kind: "internal", siteId: rfi.siteId, page: "rfis", entityId: rfi.id },
+            });
+            return;
           }
+          const before = { status: rfi.status };
+          rfi.status = "closed";
+          rfi.closedAt = nowStamp();
+          rfi.closedBy = helpers.actor.id;
+          helpers.addAudit({
+            action: "rfi.close",
+            entityType: "rfi",
+            entityId: rfi.id,
+            before,
+            after: { status: rfi.status, closedAt: rfi.closedAt },
+            siteId: rfi.siteId,
+          });
         });
       },
       updatePassportAcknowledgement(passportId, acknowledgementId, typedName) {

@@ -1337,7 +1337,7 @@ function RfisPage() {
                   </div>
                   <div className="xs ct3">{rfi.to}</div>
                 </div>
-                <Badge tone={rfi.status === "overdue" ? "critical" : rfi.status === "responded" ? "passed" : "medium"}>{rfi.status}</Badge>
+                <Badge tone={rfiStatusTone(rfi.status)}>{rfi.status}</Badge>
               </button>
             ))}
           </div>
@@ -1347,10 +1347,10 @@ function RfisPage() {
             <DetailHeader
               title={`${selected.number} ${selected.title}`}
               subtitle={`${selected.trade} · Due ${selected.dueDate}`}
-              badges={[{ label: selected.status, tone: selected.status === "overdue" ? "critical" : "medium" }]}
+              badges={[{ label: selected.status, tone: rfiStatusTone(selected.status) }]}
               actions={[
-                { label: "Convert to Variation", tone: "bt-p", icon: Icons.shuffle, dataTestId: "rfi-convert-variation", onClick: () => actions.createVariationFromRfi(selected.id) },
-                { label: "Close", tone: "", icon: Icons.check, onClick: () => actions.closeRfi(selected.id) },
+                ...(selected.status === "converted-to-variation" ? [] : [{ label: "Convert to Variation", tone: "bt-p", icon: Icons.shuffle, dataTestId: "rfi-convert-variation", onClick: () => actions.createVariationFromRfi(selected.id) }]),
+                ...(selected.responses?.length ? [{ label: "Close", tone: "", icon: Icons.check, onClick: () => actions.closeRfi(selected.id) }] : []),
               ]}
             />
             <div className="sm ct2" style={{ lineHeight: 1.7 }}>
@@ -1439,6 +1439,12 @@ function variationStatusTone(status) {
   if (status === "signed" || status === "approved") return "passed";
   if (status === "void" || status === "declined") return "critical";
   if (status === "client-pending" || status === "review") return "high";
+  return "medium";
+}
+
+function rfiStatusTone(status) {
+  if (status === "overdue") return "critical";
+  if (["responded", "closed", "converted-to-variation"].includes(status)) return "passed";
   return "medium";
 }
 
