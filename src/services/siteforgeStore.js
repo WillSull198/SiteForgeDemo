@@ -928,6 +928,7 @@ function normaliseState(state) {
         { id: "sched-compliance", reportType: "monthly-compliance", frequency: "monthly", day: "1", time: "07:00", recipients: ["Director"], enabled: true, lastQueuedAt: null },
       ];
   next.reportQueue = Array.isArray(next.reportQueue) ? next.reportQueue.slice(0, 80) : [];
+  next.variationRegister = deriveVariationRegister(next);
   next.onboarding = {
     mode: "demo",
     complete: Boolean(next.onboarding?.complete ?? true),
@@ -1838,6 +1839,36 @@ function ensureVariationForApproval(state, approval) {
   return variation;
 }
 
+function deriveVariationRegister(state) {
+  const approvalsById = new Map((state.approvals || []).map((approval) => [approval.id, approval]));
+  const packsById = new Map((state.contractPacks || []).map((pack) => [pack.docId || pack.id, pack]));
+
+  return (state.variations || []).map((variation) => {
+    const approval = approvalsById.get(variation.clientApprovalId);
+    const contractPack = packsById.get(variation.contractPackId || approval?.contractPackId);
+    const signedAt = contractPack?.signatures?.client?.signedAt || variation.signedAt || null;
+    const value = Number(variation.value ?? approval?.costImpact ?? 0);
+    const days = Number(variation.days ?? approval?.timeImpact ?? 0);
+    return {
+      id: `vr-${variation.id}`,
+      siteId: variation.siteId,
+      variationId: variation.id,
+      approvalId: approval?.id || variation.clientApprovalId || null,
+      contractPackId: contractPack?.docId || variation.contractPackId || null,
+      number: variation.number,
+      title: variation.title,
+      trade: variation.trade || "General",
+      status: variation.status || approval?.status || "submitted",
+      value,
+      days,
+      sourceType: variation.sourceType || approval?.sourceType || "manual",
+      sourceId: variation.sourceId || approval?.sourceId || null,
+      approvedAt: variation.approvedAt || signedAt,
+      signedAt,
+    };
+  });
+}
+
 function hasApprovalLink(source) {
   return Boolean(
     source?.linkedApprovals?.length ||
@@ -2162,22 +2193,8 @@ function applyBudgetImpact(state, approval, contractPack) {
   if (variation) {
     variation.status = "signed";
     variation.contractPackId = contractPack.docId;
-  }
-
-  const existingRegister = state.variationRegister.find((entry) => entry.variationId === variation?.id);
-  if (variation && !existingRegister) {
-    state.variationRegister.unshift({
-      id: randomId("vr"),
-      siteId: approval.siteId,
-      variationId: variation.id,
-      status: "signed",
-      value,
-      approvedAt: nowStamp(),
-    });
-  } else if (existingRegister) {
-    existingRegister.status = "signed";
-    existingRegister.value = value;
-    existingRegister.approvedAt = nowStamp();
+    variation.signedAt = contractPack.signatures?.client?.signedAt || nowStamp();
+    variation.approvedAt = variation.signedAt;
   }
 
   queueBuildxactSync(
@@ -5299,7 +5316,7 @@ export function SiteForgeProvider({ children }) {
           });
         });
 	      },
-	      sendVariationToClient(variationId, templateId = null) {
+      sendVariationToClient(variationId, templateId = null) {
 	        let targetRoute = null;
 	        let aiUpgrade = null;
 	        mutate((next, helpers) => {
@@ -5375,6 +5392,37 @@ export function SiteForgeProvider({ children }) {
         setTimeout(() => {
           if (targetRoute) navigate(targetRoute);
         }, 0);
+      },
+      voidVariation(variationId, reason = "Voided from the variation register.") {
+        mutate((next, helpers) => {
+          const variation = next.variations.find((item) => item.id === variationId);
+          if (!variation || ["signed", "void"].includes(variation.status)) return;
+          const before = cloneState(variation);
+          variation.status = "void";
+          variation.voidReason = reason;
+          variation.voidedAt = nowStamp();
+          variation.voidedBy = helpers.actor.id;
+          const approval = variation.clientApprovalId ? next.approvals.find((item) => item.id === variation.clientApprovalId) : null;
+          if (approval && !["signed", "declined", "void"].includes(approval.status)) {
+            approval.status = "void";
+            approval.voidReason = reason;
+            approval.voidedAt = variation.voidedAt;
+            helpers.appendTimeline(approval, {
+              type: "void",
+              actor: actorName(helpers.actor),
+              role: helpers.actor.role,
+              text: `Variation voided: ${reason}`,
+            });
+          }
+          helpers.addAudit({
+            action: "variation.void",
+            entityType: "variation",
+            entityId: variation.id,
+            before,
+            after: { status: variation.status, voidReason: reason },
+            siteId: variation.siteId,
+          });
+        });
       },
       addProcurementRequest(payload) {
         mutate((next, helpers) => {

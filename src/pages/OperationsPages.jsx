@@ -1435,6 +1435,13 @@ function RfisPage() {
   );
 }
 
+function variationStatusTone(status) {
+  if (status === "signed" || status === "approved") return "passed";
+  if (status === "void" || status === "declined") return "critical";
+  if (status === "client-pending" || status === "review") return "high";
+  return "medium";
+}
+
 function VariationsPage() {
   const { state, actions } = useSiteForge();
   const siteId = state.session.siteId;
@@ -1513,14 +1520,21 @@ function VariationsPage() {
                   <td className="mono xs">${variation.value.toLocaleString()}</td>
                   <td className="mono xs">{variation.days}d</td>
                   <td>
-                    <Badge tone={variation.status === "signed" ? "passed" : variation.status === "submitted" ? "medium" : "high"}>{variation.status}</Badge>
+                    <Badge tone={variationStatusTone(variation.status)}>{variation.status}</Badge>
                   </td>
                   <td>
-                    {variation.status === "submitted" && can(role, "clientflow.send") ? (
-                      <Button small tone="bt-p" data-testid="variation-create" onClick={() => actions.sendVariationToClient(variation.id, variation.templateId)}>
-                        Submit Review
-                      </Button>
-                    ) : null}
+                    <div className="fx" style={{ gap: 6, justifyContent: "flex-end" }}>
+                      {variation.status === "submitted" && can(role, "clientflow.send") ? (
+                        <Button small tone="bt-p" data-testid="variation-create" onClick={() => actions.sendVariationToClient(variation.id, variation.templateId)}>
+                          Submit Review
+                        </Button>
+                      ) : null}
+                      {!["signed", "void"].includes(variation.status) && can(role, "clientflow.send") ? (
+                        <Button small tone="bt-r" onClick={() => actions.voidVariation(variation.id, "Voided from the variation register.")}>
+                          Void
+                        </Button>
+                      ) : null}
+                    </div>
                   </td>
                 </tr>
               ))}
