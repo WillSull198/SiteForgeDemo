@@ -41,6 +41,20 @@ const aiSourceLabel = (source) => {
   return source || "summary";
 };
 
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+function extractionStatusMeta(status) {
+  const map = {
+    complete: { label: "Text searchable", tone: "passed", help: "PDF text layer extracted and available for plan search." },
+    "no-text-layer": { label: "Scanned PDF", tone: "medium", help: "No embedded text layer was found. Add a manual searchable description." },
+    encrypted: { label: "Encrypted", tone: "critical", help: "Password-protected files cannot be searched until unlocked and re-uploaded." },
+    failed: { label: "Extraction failed", tone: "critical", help: "Text extraction failed. Add a manual searchable description." },
+    "pdfjs-unavailable": { label: "Extractor unavailable", tone: "medium", help: "PDF.js was unavailable in this browser session." },
+    "not-run": { label: "Not extracted", tone: "medium", help: "This file type has no extraction result." },
+  };
+  return map[status] || map["not-run"];
+}
+
 function useSessionState(key, initialValue) {
   const [value, setValue] = useState(() => {
     try {
@@ -1982,6 +1996,7 @@ function DocumentsPage() {
   const [planSearchSummary, setPlanSearchSummary] = useState("");
   const [planSearchSource, setPlanSearchSource] = useState("");
   const [annotation, setAnnotation] = useState({ locationRef: "", note: "" });
+  const [manualSearchDescription, setManualSearchDescription] = useState("");
   const [transmittalDraft, setTransmittalDraft] = useState({ purpose: "For Information", recipients: "" });
   const [permitDraft, setPermitDraft] = useState({ title: "", authority: "", expiryDate: "" });
   const documents = state.documents.filter((document) => document.siteId === siteId && !document.archived);
@@ -1991,12 +2006,63 @@ function DocumentsPage() {
   const expiringDocuments = documents.filter((document) => document.expiryDate || document.retentionUntil).slice(0, 8);
   const selected = documents.find((document) => document.id === selectedId) || documents[0] || null;
   const selectedFile = selected?.fileId ? state.files.records.find((file) => file.id === selected.fileId) : null;
+  const selectedExtractionMeta = extractionStatusMeta(selectedFile?.extractionStatus || (selected?.manualSearchDescription ? "complete" : "not-run"));
+  useEffect(() => {
+    setManualSearchDescription(selected?.manualSearchDescription || "");
+  }, [selected?.id, selected?.manualSearchDescription]);
+  const fileForDocument = (document) => (document?.fileId ? state.files.records.find((entry) => entry.id === document.fileId) : null);
+  const queryTokens = (query) => query.toLowerCase().split(/\s+/).filter(Boolean);
+  const scorePlanDocument = (document, file, query) => {
+    const tokens = queryTokens(query);
+    const pageText = (file?.textPages || []).map((page) => page.text || "").join(" ");
+    const haystack = `${document.title} ${document.drawingNumber || ""} ${document.rev || ""} ${document.tags?.join(" ") || ""} ${document.manualSearchDescription || ""} ${document.impactAnalysis?.summary || ""} ${file?.extractedText || ""} ${pageText}`.toLowerCase();
+    return tokens.reduce((sum, token) => sum + (haystack.includes(token) ? 1 : 0), 0);
+  };
+  const buildPlanCandidates = (query) =>
+    documents
+      .map((document) => {
+        const file = fileForDocument(document);
+        if (!file) return null;
+        const pages = file.textPages || [];
+        const hasSearchableText = pages.some((page) => page?.text?.trim()) || file.extractedText || document.manualSearchDescription;
+        if (!hasSearchableText) return null;
+        return { document, file, score: scorePlanDocument(document, file, query) };
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.score - left.score);
+  const buildDeepPlanContext = (candidates) => {
+    const fullTextCandidates = candidates.slice(0, 5);
+    const totalPages = fullTextCandidates.reduce((sum, candidate) => sum + Math.max(1, candidate.file.textPages?.length || 0), 0);
+    const perPageBudget = clamp(Math.floor(60000 / Math.max(1, totalPages)), 1500, 6000);
+    return candidates.map(({ document, file }, index) => {
+      const pages = {};
+      if (index < 5) {
+        (file.textPages || []).forEach((page, pageIndex) => {
+          const pageNum = page.pageNumber ?? pageIndex + 1;
+          if (page?.text?.trim()) pages[pageNum] = page.text.trim().slice(0, perPageBudget);
+        });
+      }
+      const hasPages = Object.keys(pages).length > 0;
+      return {
+        documentId: document.id,
+        drawingNumber: document.drawingNumber || document.title,
+        title: document.title,
+        revision: document.rev,
+        manualSearchDescription: document.manualSearchDescription || "",
+        pageCount: file.textPages?.length || 1,
+        pages: hasPages ? pages : undefined,
+        firstPageText: index >= 5 ? (file.textPages?.[0]?.text || file.extractedText || "").slice(0, 500) : undefined,
+        extractedText: hasPages ? undefined : (file.extractedText || document.manualSearchDescription || "").slice(0, index < 5 ? 20000 : 500),
+      };
+    });
+  };
   const keywordPlanSearch = (query) => {
     const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
     const searchable = documents
       .map((document) => {
-        const file = document.fileId ? state.files.records.find((entry) => entry.id === document.fileId) : null;
-        const haystack = `${document.title} ${document.drawingNumber || ""} ${document.rev || ""} ${document.tags?.join(" ") || ""} ${document.impactAnalysis?.summary || ""} ${file?.extractedText || ""}`;
+        const file = fileForDocument(document);
+        const pageText = (file?.textPages || []).map((page) => page.text || "").join(" ");
+        const haystack = `${document.title} ${document.drawingNumber || ""} ${document.rev || ""} ${document.tags?.join(" ") || ""} ${document.manualSearchDescription || ""} ${document.impactAnalysis?.summary || ""} ${file?.extractedText || ""} ${pageText}`;
         const lower = haystack.toLowerCase();
         const score = tokens.reduce((sum, token) => sum + (lower.includes(token) ? 1 : 0), 0);
         const firstToken = tokens.find((token) => lower.includes(token));
@@ -2032,29 +2098,43 @@ function DocumentsPage() {
     setPlanSearchLoading(true);
     setPlanSearchSummary("");
     setPlanSearchSource("");
-    const documentContext = documents
-      .map((document) => {
-        const file = document.fileId ? state.files.records.find((entry) => entry.id === document.fileId) : null;
-        if (!file) return null;
-        const pageMap = {};
-        (file.textPages || []).forEach((page, index) => {
-          const pageNum = page.pageNumber ?? index + 1;
-          if (page?.text?.trim()) pageMap[pageNum] = page.text.trim().slice(0, 600);
-        });
-        return {
+    const aiConfig = getStoredAiConfig(state.device?.settings?.integrations || state.settings?.integrations || {});
+    const candidates = buildPlanCandidates(planQuery);
+    try {
+      let deepCandidates = candidates.length > 8 ? candidates.slice(0, 8) : candidates;
+      if (candidates.length > 8 && aiConfig.apiKey) {
+        const lightContext = candidates.map(({ document, file }) => ({
           documentId: document.id,
           drawingNumber: document.drawingNumber || document.title,
           title: document.title,
           revision: document.rev,
-          pageCount: file.textPages?.length || 1,
-          extractedText: (file.extractedText || "").slice(0, 8000),
-          pages: Object.keys(pageMap).length > 0 ? pageMap : undefined,
-        };
-      })
-      .filter(Boolean)
-      .filter((document) => document.extractedText || document.pages);
-    const aiConfig = getStoredAiConfig(state.device?.settings?.integrations || state.settings?.integrations || {});
-    try {
+          firstPageText: (file.textPages?.[0]?.text || file.extractedText || document.manualSearchDescription || "").slice(0, 400),
+        }));
+        const shortlist = await askSiteForgeAi({
+          provider: aiConfig.provider,
+          apiKey: aiConfig.apiKey,
+          model: aiConfig.model,
+          openaiProxyUrl: aiConfig.openaiProxyUrl,
+          projectContext: { siteId, documents: lightContext, orgMode: state.org?.mode },
+          allowInDemo: true,
+          userMessage: `Plan search routing query: "${planQuery}".
+
+Pick the 3-5 documentIds most likely to contain the answer. Reply ONLY as JSON:
+{ "documentIds": ["id-1", "id-2"] }
+
+Documents:
+${JSON.stringify(lightContext)}`,
+        });
+        if (shortlist.source === "claude" || shortlist.source === "openai") {
+          const match = shortlist.text.match(/\{[\s\S]*\}/);
+          const parsed = JSON.parse(match ? match[0] : shortlist.text);
+          const selectedIds = new Set((parsed.documentIds || []).map(String));
+          const shortlisted = candidates.filter(({ document }) => selectedIds.has(String(document.id))).slice(0, 5);
+          if (shortlisted.length) deepCandidates = shortlisted;
+        }
+      }
+      const documentContext = buildDeepPlanContext(deepCandidates);
+      if (!documentContext.length) throw new Error("No searchable document text available.");
       const result = await askSiteForgeAi({
         provider: aiConfig.provider,
         apiKey: aiConfig.apiKey,
@@ -2066,15 +2146,16 @@ function DocumentsPage() {
 
 Search the documents below and respond ONLY as JSON:
 {
-  "summary": "plain-English answer",
-  "results": [
-    { "documentId": "id", "drawingNumber": "number", "page": <page number as integer from the pages map, or null>, "excerpt": "max 120 chars", "confidence": "high|medium|low" }
-  ]
-}
+	  "summary": "plain-English answer",
+	  "results": [
+	    { "documentId": "id", "drawingNumber": "number", "page": <page number as integer from the pages map, or null>, "excerpt": "verbatim substring from that page, max 160 chars", "confidence": "high|medium|low" }
+	  ]
+	}
 
-When "pages" is present on a document, use the page number keys to find the right page.
+	When "pages" is present on a document, use the page number keys to find the right page.
+The excerpt MUST be a verbatim substring of the page text, not a paraphrase, so the user can locate it in the document.
 
-Documents:
+	Documents:
 ${JSON.stringify(documentContext)}`,
       });
       if (result.source === "claude" || result.source === "openai") {
@@ -2122,6 +2203,16 @@ ${JSON.stringify(documentContext)}`,
     },
     { key: "rev", label: "Rev", filterable: true },
     { key: "category", label: "Category", filterable: true, options: [...new Set(documents.map((document) => document.category))] },
+    {
+      key: "extractionStatus",
+      label: "Search",
+      accessor: (row) => fileForDocument(row)?.extractionStatus || "not-run",
+      render: (value, row) => {
+        const file = fileForDocument(row);
+        const meta = extractionStatusMeta(file?.extractionStatus || (row.manualSearchDescription ? "complete" : "not-run"));
+        return <Badge tone={meta.tone}>{meta.label}</Badge>;
+      },
+    },
     { key: "date", label: "Date", type: "date", filterable: true },
     {
       key: "impactAnalysis",
@@ -2269,10 +2360,32 @@ ${JSON.stringify(documentContext)}`,
                     Integrity {selected.integrity.status} · {selected.integrity.hash} · {selected.integrity.verifiedAt}
                   </div>
                 ) : null}
-                {previewHtml ? <div className="document-preview" dangerouslySetInnerHTML={{ __html: previewHtml }} /> : <div className="xs ct3">Open a PDF or uploaded image to preview it here.</div>}
-              </div>
-              <div className="mini-panel" style={{ marginTop: 12 }}>
-                <div className="xs ct3 mb4">AI plan search</div>
+	                {previewHtml ? <div className="document-preview" dangerouslySetInnerHTML={{ __html: previewHtml }} /> : <div className="xs ct3">Open a PDF or uploaded image to preview it here.</div>}
+	              </div>
+	              <div className="mini-panel" style={{ marginTop: 12 }}>
+	                <div className="fb mb8">
+	                  <div>
+	                    <div className="xs ct3">Text extraction</div>
+	                    <div className="sm ct2">{selectedExtractionMeta.help}</div>
+	                  </div>
+	                  <Badge tone={selectedExtractionMeta.tone}>{selectedExtractionMeta.label}</Badge>
+	                </div>
+	                {selectedFile?.extractionStatus === "no-text-layer" || selectedFile?.extractionStatus === "failed" || selectedFile?.extractionStatus === "encrypted" || selected?.manualSearchDescription ? (
+	                  <div className="ff">
+	                    <label>Manual searchable description</label>
+	                    <textarea
+	                      value={manualSearchDescription}
+	                      onChange={(event) => setManualSearchDescription(event.target.value)}
+	                      placeholder="Describe the drawing contents, key rooms, grids, fixture schedules or certificate details so plan search can still find this document."
+	                    />
+	                    <Button small tone="bt-p" onClick={() => actions.updateDocumentSearchDescription(selected.id, manualSearchDescription)} disabled={!selected}>
+	                      Save Search Description
+	                    </Button>
+	                  </div>
+	                ) : null}
+	              </div>
+	              <div className="mini-panel" style={{ marginTop: 12 }}>
+	                <div className="xs ct3 mb4">AI plan search</div>
                 <div className="fx" style={{ gap: 6 }}>
                   <input className="inline-input" value={planQuery} onChange={(event) => setPlanQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && searchPlan()} />
                   <Button small tone="bt-p" onClick={searchPlan}>

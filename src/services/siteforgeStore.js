@@ -8399,6 +8399,23 @@ AU date format DD/MM/YYYY. Amounts in AUD. Use formal contract language.`,
           });
         });
       },
+      updateDocumentSearchDescription(documentId, description) {
+        mutate((next, helpers) => {
+          const document = next.documents.find((entry) => entry.id === documentId);
+          if (!document) return;
+          const before = { manualSearchDescription: document.manualSearchDescription || "" };
+          document.manualSearchDescription = String(description || "").trim();
+          document.updatedAt = nowStamp();
+          helpers.addAudit({
+            action: "document.search-description.update",
+            entityType: "document",
+            entityId: document.id,
+            before,
+            after: { manualSearchDescription: document.manualSearchDescription },
+            siteId: document.siteId,
+          });
+        });
+      },
       acknowledgeDocumentRevision(documentId, userId = state.session.userId, name = "") {
         mutate((next, helpers) => {
           const document = next.documents.find((entry) => entry.id === documentId);
