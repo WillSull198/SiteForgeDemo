@@ -14,6 +14,7 @@ import { exportCsv, exportElementToPdf } from "../services/pdfService";
 import { previewPdf } from "../services/documentIntelligence";
 import { deletePersistedAppState, persistAppState } from "../services/dbService";
 import { getAll as getAllRecords, put as putRecord } from "../services/db";
+import { COMPLIANCE_DOC_TYPES, complianceLabel, complianceStatusFor, complianceTone, requiredDocsForTrade } from "../services/compliance";
 import { useSiteForge } from "../services/siteforgeStore";
 import { can, canSeeAllSites, mustHandUpForApproval } from "../services/permissions";
 import { clearStateSlot, getStateStorageKey, readStateSlot, storageSlotExists, writeStateSlot } from "../services/storageMode";
@@ -968,6 +969,21 @@ function WorkforcePage() {
   const [passportId, setPassportId] = useState(state.passports.records.find((record) => record.siteId === siteId)?.id || "");
   const records = state.presence.records.filter((record) => record.siteId === siteId);
   const sitePassports = state.passports.records.filter((record) => record.siteId === siteId);
+  const subcontractorCompanies = state.companies.filter((company) => company.kind === "Subcontractor");
+  const complianceRows = subcontractorCompanies.map((company) => {
+    const passport = sitePassports.find((entry) => entry.companyId === company.id) || state.passports.records.find((entry) => entry.companyId === company.id);
+    const required = requiredDocsForTrade(passport?.trade || "");
+    const docs = state.complianceDocuments.filter((doc) => doc.companyId === company.id);
+    const outstanding = required
+      .map((requirement) => {
+        const latest = docs.find((doc) => doc.docType === requirement.docType && (requirement.scope !== "job-stage" || doc.siteId === siteId || doc.linkedJobIds?.includes(siteId)));
+        const status = complianceStatusFor(latest);
+        return { requirement, doc: latest, status };
+      })
+      .filter((item) => item.status !== "valid");
+    return { company, passport, docs, outstanding };
+  });
+  const pendingCompliance = state.complianceDocuments.filter((doc) => doc.status === "pending-review" && (!doc.siteId || doc.siteId === siteId || doc.linkedJobIds?.includes(siteId)));
 
   return (
     <div className="oy fin">
@@ -1024,6 +1040,49 @@ function WorkforcePage() {
           </div>
         </Card>
       </div>
+      <Card title="Subcontractor Compliance" icon={Icons.shield} className="mb8">
+        <div className="g2">
+          <div className="mini-panel">
+            <div className="b sm mb8">Pending my review</div>
+            <div className="list-stack">
+              {pendingCompliance.length ? pendingCompliance.map((doc) => {
+                const company = state.companies.find((entry) => entry.id === doc.companyId);
+                return (
+                  <div className="linked-row" key={doc.id}>
+                    <div>
+                      <div className="b sm">{doc.docType}</div>
+                      <div className="xs ct3">{company?.name || doc.companyId} · {doc.expiryDate || "no expiry"}</div>
+                    </div>
+                    <div className="fx" style={{ gap: 4 }}>
+                      <Button small tone="bt-g" onClick={() => actions.reviewComplianceDocument(doc.id, { accepted: true })}>Accept</Button>
+                      <Button small tone="bt-r" onClick={() => actions.reviewComplianceDocument(doc.id, { accepted: false, rejectionReason: "Document unreadable or does not match the required item." })}>Reject</Button>
+                    </div>
+                  </div>
+                );
+              }) : <div className="xs ct3">No compliance documents waiting for review.</div>}
+            </div>
+          </div>
+          <div className="mini-panel">
+            <div className="b sm mb8">Missing & expiring by company</div>
+            <div className="list-stack">
+              {complianceRows.map(({ company, outstanding }) => (
+                <div className="linked-row" key={company.id}>
+                  <div>
+                    <div className="b sm">{company.name}</div>
+                    <div className="xs ct3">
+                      {outstanding.length ? outstanding.map((item) => `${item.requirement.docType}: ${complianceLabel(item.status, item.doc)}`).join(" · ") : "All required documents valid"}
+                    </div>
+                  </div>
+                  <div className="fx" style={{ gap: 4 }}>
+                    <Badge tone={outstanding.length ? "critical" : "passed"}>{outstanding.length ? `${outstanding.length} outstanding` : "complete"}</Badge>
+                    <Button small onClick={() => actions.chaseComplianceDocuments(company.id)}>Chase</Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </Card>
       <Modal open={scanOpen} close={() => setScanOpen(false)} title="Check In Crew">
         <div className="ff">
           <label>Passport</label>

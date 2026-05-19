@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useSiteForge } from "../services/siteforgeStore";
 import { exportElementToPdf } from "../services/pdfService";
+import { COMPLIANCE_DOC_TYPES, complianceLabel, complianceStatusFor, complianceTone, requiredDocsForTrade } from "../services/compliance";
 import { Icons } from "../components/icons";
 import { Badge, Button, Card, Modal } from "../components/ui";
 
@@ -9,6 +10,7 @@ const TABS = [
   { value: "rfis", label: "My RFIs" },
   { value: "invoices", label: "My Invoices" },
   { value: "induction", label: "Induction Status" },
+  { value: "compliance", label: "Compliance Docs" },
   { value: "passport", label: "Site Passport" },
   { value: "messages", label: "Messages" },
 ];
@@ -23,6 +25,8 @@ export default function SubcontractorPortal() {
   const [variationOpen, setVariationOpen] = useState(false);
   const [invoiceOpen, setInvoiceOpen] = useState(false);
   const [message, setMessage] = useState("");
+  const [otherDocType, setOtherDocType] = useState("Other");
+  const [jobStage, setJobStage] = useState("");
   const [rfiForm, setRfiForm] = useState({ title: "", description: "", to: "Project Manager", priority: "medium" });
   const [variationForm, setVariationForm] = useState({ title: "", value: "", days: "", description: "" });
   const [invoiceForm, setInvoiceForm] = useState({ number: "", value: "", notes: "" });
@@ -32,6 +36,18 @@ export default function SubcontractorPortal() {
   const invoices = useMemo(() => state.invoices.filter((invoice) => invoice.companyId === companyId), [companyId, state.invoices]);
   const passport = user ? state.passports.records.find((record) => record.userId === user.id && record.siteId === siteId) : null;
   const threads = user ? state.messages.filter((thread) => thread.participants?.includes(user.id)) : [];
+  const complianceDocs = useMemo(() => state.complianceDocuments.filter((doc) => doc.companyId === companyId), [companyId, state.complianceDocuments]);
+  const requiredCompliance = useMemo(() => requiredDocsForTrade(user?.trade || passport?.trade || ""), [passport?.trade, user?.trade]);
+  const uploadComplianceFile = async (file, requirement, extras = {}) => {
+    if (!file) return;
+    await actions.uploadComplianceDocument(file, {
+      siteId,
+      companyId,
+      docType: requirement.docType,
+      linkedJobIds: [siteId],
+      jobStage: extras.jobStage || (requirement.scope === "job-stage" ? jobStage : ""),
+    });
+  };
 
   const currentPage = route.page || "jobs";
 
@@ -269,6 +285,67 @@ export default function SubcontractorPortal() {
             ) : (
               <div className="ct3 sm empty">No induction record loaded.</div>
             )}
+          </Card>
+        ) : null}
+
+        {currentPage === "compliance" ? (
+          <Card title="My Compliance Documents" icon={Icons.shield}>
+            <div className="notice-banner mb8">
+              Upload insurance, licences, SWMS and Form 4 certificates here. File blobs stay in IndexedDB; the builder reviews each record before it becomes valid.
+            </div>
+            <div className="list-stack">
+              {requiredCompliance.map((requirement) => {
+                const latest = complianceDocs.find((doc) => doc.docType === requirement.docType && (requirement.scope !== "job-stage" || doc.siteId === siteId || doc.linkedJobIds?.includes(siteId)));
+                const status = complianceStatusFor(latest);
+                return (
+                  <div className="linked-row" key={`${requirement.docType}-${requirement.scope}`}>
+                    <div>
+                      <div className="b sm">{requirement.docType}</div>
+                      <div className="xs ct3">{requirement.scope === "job-stage" ? "Required per job/stage" : "Company-wide"} · {complianceLabel(status, latest)}</div>
+                      {latest?.jobStage ? <div className="xs ct3">Stage: {latest.jobStage}</div> : null}
+                    </div>
+                    <div className="fx" style={{ gap: 4, flexWrap: "wrap" }}>
+                      <Badge tone={complianceTone(status)}>{status}</Badge>
+                      {requirement.scope === "job-stage" ? (
+                        <input className="inline-input" style={{ width: 160 }} value={jobStage} onChange={(event) => setJobStage(event.target.value)} placeholder="Job/stage" />
+                      ) : null}
+                      <label className="bt small">
+                        Upload
+                        <input
+                          type="file"
+                          accept=".pdf,.png,.jpg,.jpeg,.docx,.txt,.md,application/pdf,image/*"
+                          style={{ display: "none" }}
+                          onChange={(event) => {
+                            uploadComplianceFile(event.target.files?.[0], requirement);
+                            event.target.value = "";
+                          }}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mini-panel" style={{ marginTop: 12 }}>
+              <div className="b sm mb8">Upload other document</div>
+              <div className="fx" style={{ gap: 6, flexWrap: "wrap" }}>
+                <select className="role-select" value={otherDocType} onChange={(event) => setOtherDocType(event.target.value)}>
+                  {COMPLIANCE_DOC_TYPES.map((type) => <option key={type}>{type}</option>)}
+                </select>
+                <label className="bt small">
+                  Upload Other
+                  <input
+                    type="file"
+                    accept=".pdf,.png,.jpg,.jpeg,.docx,.txt,.md,application/pdf,image/*"
+                    style={{ display: "none" }}
+                    onChange={(event) => {
+                      uploadComplianceFile(event.target.files?.[0], { docType: otherDocType, scope: "company" });
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
+              </div>
+            </div>
           </Card>
         ) : null}
 

@@ -25,6 +25,7 @@ import { generateOperationsReportPdfBlob, generateSignedContractPdfBlob, generat
 import { diffPlans, parseTemplate, removeFileEverywhere, uploadFile, uploadSeededTextFile, buildTemplatePreviewContent, getBlob, putBlob } from "./documentIntelligence";
 import { dispatchNotificationEvent } from "./notificationEngine";
 import { askSiteForgeAi, getStoredAiConfig } from "./aiService";
+import { complianceStatusFor, requiredDocsForTrade } from "./compliance";
 import { can, canSeeAllSites, routeKindForRole } from "./permissions";
 import {
   buildBuildxactPullSnapshot,
@@ -123,6 +124,7 @@ const COLLECTION_MAP = {
   clause: "clauseLibrary",
   boardReport: "boardReports",
   file: "files.records",
+  complianceDocument: "complianceDocuments",
   message: "messages",
   site: "sites",
   client: "clients",
@@ -149,6 +151,7 @@ const MODE_ENTITY_PATHS = [
   "safety",
   "toolboxTalks",
   "swms",
+  "complianceDocuments",
   "passports.records",
   "passports.scanLog",
   "passports.siteAccess",
@@ -422,6 +425,7 @@ function createBlankSlate() {
     safety: [],
     toolboxTalks: [],
     swms: [],
+    complianceDocuments: [],
     passports: { records: [], scanLog: [], siteAccess: [], expiringTickets: [], visitorPasses: [] },
     presence: { anomalies: [], shifts: [], complianceState: {}, records: [], events: [], exports: [], siteCompliance: [] },
     documents: [],
@@ -743,6 +747,7 @@ function scopeOrgRecords(next) {
     "variationRegister",
     "contractPacks",
     "contractTemplates",
+    "complianceDocuments",
     "notifications.items",
     "auditTrail",
   ].forEach((path) => {
@@ -899,6 +904,7 @@ function normaliseState(state) {
   };
   next.transmittals = Array.isArray(next.transmittals) ? next.transmittals.slice(0, 160) : [];
   next.permits = Array.isArray(next.permits) ? next.permits.slice(0, 160) : [];
+  next.complianceDocuments = Array.isArray(next.complianceDocuments) ? next.complianceDocuments.slice(0, 400) : [];
   next.recoveryOpportunities = Array.isArray(next.recoveryOpportunities) ? next.recoveryOpportunities.slice(0, 180) : [];
   next.recoveryTemplates = {
     "diary-rain-day": "Rain Day",
@@ -2667,6 +2673,8 @@ function runTimedAutomationSweep(next, helpers) {
     }
   });
 
+  sweepComplianceDocuments(next, helpers);
+
   const today = runtimeStamp.slice(0, 10);
   if (next.recoveryLastSweepDate !== today) {
     const existingKeys = new Set((next.recoveryOpportunities || []).filter((item) => item.status !== "dismissed").map((item) => item.key));
@@ -2686,6 +2694,38 @@ function runTimedAutomationSweep(next, helpers) {
     }
     next.recoveryLastSweepDate = today;
   }
+}
+
+function sweepComplianceDocuments(next, helpers) {
+  (next.complianceDocuments || []).forEach((doc) => {
+    const previousStatus = doc.status;
+    const nextStatus = complianceStatusFor(doc);
+    doc.status = nextStatus;
+    if (previousStatus === nextStatus || !["expiring-soon", "expired"].includes(nextStatus)) return;
+    const company = next.companies.find((entry) => entry.id === doc.companyId);
+    const siteId = doc.siteId || doc.linkedJobIds?.[0] || next.session.siteId;
+    helpers.emit({
+      eventType: `compliance.${nextStatus}`,
+      title: `${doc.docType} ${nextStatus === "expired" ? "expired" : "expiring soon"} - ${company?.name || doc.companyId}`,
+      body: `${doc.docType}${doc.expiryDate ? ` expires ${doc.expiryDate}` : ""}.`,
+      siteId,
+      entityType: "complianceDocument",
+      entityId: doc.id,
+      recipients: [
+        ...getRecipientsForRoles(next, ["Project Manager", "Contract Admin"]),
+        ...next.users.filter((user) => user.companyId === doc.companyId).map((user) => ({ user })),
+      ],
+      route: { kind: "internal", siteId, page: "compliance", entityId: doc.id },
+    });
+    helpers.addAudit({
+      action: "compliance.status-transition",
+      entityType: "complianceDocument",
+      entityId: doc.id,
+      before: { status: previousStatus },
+      after: { status: nextStatus },
+      siteId,
+    });
+  });
 }
 
 function createHelpers(prev, next) {
@@ -3180,10 +3220,11 @@ export function SiteForgeProvider({ children }) {
 	              recipients: getRecipientsForRoles(next, ["Project Manager"]),
 	              route: { kind: "internal", siteId: approval.siteId, page: "clientflow", entityId: approval.id },
 	            });
-	          }
-	        });
-		      });
-		    }, 60000);
+		          }
+		        });
+		        sweepComplianceDocuments(next, helpers);
+			      });
+			    }, 60000);
     return () => window.clearInterval(timer);
   }, [mutate]);
 
@@ -6340,16 +6381,26 @@ Return only the polished response text. Keep it practical, formal, and specific.
           });
         });
       },
-      scanPassport(siteId, passportId, options = {}) {
-        mutate((next, helpers) => {
-          const passport = next.passports.records.find((item) => item.id === passportId);
-          if (!passport) return;
-          const expiredTicket = (next.passports.expiringTickets || []).find((ticket) => ticket.passportId === passport.id && daysUntil(ticket.expiresOn) < 0);
-          const reasons = [
-            ...(passport.blockedReasons || []),
-            passport.inductionStatus !== "complete" ? "Induction incomplete" : null,
-            expiredTicket ? `${expiredTicket.label} expired` : null,
-          ].filter(Boolean);
+	      scanPassport(siteId, passportId, options = {}) {
+	        mutate((next, helpers) => {
+	          const passport = next.passports.records.find((item) => item.id === passportId);
+	          if (!passport) return;
+	          const expiredTicket = (next.passports.expiringTickets || []).find((ticket) => ticket.passportId === passport.id && daysUntil(ticket.expiresOn) < 0);
+	          const mandatoryComplianceIssues = requiredDocsForTrade(passport.trade)
+	            .filter((requirement) => requirement.mandatory && requirement.scope !== "job-stage")
+	            .map((requirement) => {
+	              const docs = (next.complianceDocuments || []).filter((doc) => doc.companyId === passport.companyId && doc.docType === requirement.docType);
+	              const latest = docs.sort((left, right) => String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")))[0];
+	              const status = complianceStatusFor(latest);
+	              return ["expired", "rejected"].includes(status) ? `${requirement.docType} ${status}` : null;
+	            })
+	            .filter(Boolean);
+	          const reasons = [
+	            ...(passport.blockedReasons || []),
+	            passport.inductionStatus !== "complete" ? "Induction incomplete" : null,
+	            expiredTicket ? `${expiredTicket.label} expired` : null,
+	            ...mandatoryComplianceIssues,
+	          ].filter(Boolean);
           const result = reasons.length ? "blocked" : "granted";
           const reason = reasons[0] || "All documents current";
           next.passports.scanLog.unshift({
@@ -8627,9 +8678,9 @@ AU date format DD/MM/YYYY. Amounts in AUD. Use formal contract language.`,
           });
         });
       },
-      runDocumentRetentionSweep() {
-        mutate((next, helpers) => {
-          next.documents.forEach((document) => {
+	      runDocumentRetentionSweep() {
+	        mutate((next, helpers) => {
+	          next.documents.forEach((document) => {
             if (document.archived || !document.retentionUntil) return;
             if (daysUntil(document.retentionUntil) < 0) {
               document.archived = true;
@@ -8644,10 +8695,136 @@ AU date format DD/MM/YYYY. Amounts in AUD. Use formal contract language.`,
                 siteId: document.siteId,
               });
             }
-          });
-        });
-      },
-      async uploadPassportFiles(passportId, fileList) {
+	          });
+	        });
+	      },
+	      async uploadComplianceDocument(file, payload = {}) {
+	        if (!file) return null;
+	        const snapshot = stateRef.current;
+	        const actor = snapshot.users.find((user) => user.id === snapshot.session.userId) || snapshot.users[0];
+	        const siteId = payload.siteId || snapshot.session.siteId;
+	        const metadata = await uploadFile({
+	          file,
+	          uploadedBy: actor?.id || snapshot.session.userId,
+	          siteId,
+	          entityType: "complianceDocument",
+	          entityId: payload.companyId || actor?.companyId || "",
+	          classificationHint: payload.docType?.includes("Insurance") ? "Insurance Certificate" : payload.docType?.includes("Licence") ? "Licence / Ticket" : "",
+	        });
+	        let createdDoc = null;
+	        mutate((next, helpers) => {
+	          next.files.records.unshift(metadata);
+	          const companyId = payload.companyId || helpers.actor.companyId;
+	          const doc = {
+	            id: randomId("compdoc"),
+	            siteId,
+	            companyId,
+	            uploadedByUserId: helpers.actor.id,
+	            docType: payload.docType || metadata.classification || "Other",
+	            customLabel: payload.customLabel || "",
+	            fileId: metadata.id,
+	            issuedDate: payload.issuedDate || metadata.parsedFields?.issuedDate || "",
+	            expiryDate: payload.expiryDate || metadata.parsedFields?.expiry || null,
+	            status: "pending-review",
+	            reviewedByUserId: null,
+	            reviewedAt: null,
+	            rejectionReason: "",
+	            linkedJobIds: payload.linkedJobIds?.length ? payload.linkedJobIds : [siteId].filter(Boolean),
+	            jobStage: payload.jobStage || "",
+	            notes: payload.notes || "",
+	            parsedFields: metadata.parsedFields || {},
+	            createdAt: nowStamp(),
+	            updatedAt: nowStamp(),
+	          };
+	          next.complianceDocuments.unshift(doc);
+	          createdDoc = doc;
+	          helpers.addAudit({
+	            action: "compliance.document-upload",
+	            entityType: "complianceDocument",
+	            entityId: doc.id,
+	            before: null,
+	            after: { docType: doc.docType, companyId: doc.companyId, fileId: doc.fileId },
+	            siteId,
+	          });
+	          helpers.emit({
+	            eventType: "compliance.pending-review",
+	            title: `${doc.docType} uploaded for review`,
+	            body: `${next.companies.find((company) => company.id === companyId)?.name || companyId} uploaded ${doc.docType}.`,
+	            siteId,
+	            entityType: "complianceDocument",
+	            entityId: doc.id,
+	            recipients: getRecipientsForRoles(next, ["Project Manager", "Contract Admin"]),
+	            route: { kind: "internal", siteId, page: "compliance", entityId: doc.id },
+	          });
+	        });
+	        return createdDoc;
+	      },
+	      reviewComplianceDocument(documentId, { accepted = true, rejectionReason = "" } = {}) {
+	        mutate((next, helpers) => {
+	          const doc = next.complianceDocuments.find((entry) => entry.id === documentId);
+	          if (!doc) return;
+	          const before = { status: doc.status, reviewedAt: doc.reviewedAt, rejectionReason: doc.rejectionReason };
+	          doc.reviewedByUserId = helpers.actor.id;
+	          doc.reviewedAt = nowStamp();
+	          doc.rejectionReason = accepted ? "" : rejectionReason || "Builder review rejected this document.";
+	          doc.status = accepted ? complianceStatusFor({ ...doc, status: "valid", reviewedAt: nowStamp() }) : "rejected";
+	          doc.updatedAt = nowStamp();
+	          helpers.addAudit({
+	            action: accepted ? "compliance.document-accept" : "compliance.document-reject",
+	            entityType: "complianceDocument",
+	            entityId: doc.id,
+	            before,
+	            after: { status: doc.status, rejectionReason: doc.rejectionReason },
+	            siteId: doc.siteId,
+	          });
+	          helpers.emit({
+	            eventType: accepted ? "compliance.accepted" : "compliance.rejected",
+	            title: `${doc.docType} ${accepted ? "accepted" : "rejected"}`,
+	            body: accepted ? "Compliance document accepted by builder." : doc.rejectionReason,
+	            siteId: doc.siteId,
+	            entityType: "complianceDocument",
+	            entityId: doc.id,
+	            recipients: next.users.filter((user) => user.companyId === doc.companyId).map((user) => ({ user })),
+	            route: { kind: "subcontractor", userId: next.users.find((user) => user.companyId === doc.companyId)?.id, page: "compliance", entityId: doc.id },
+	          });
+	        });
+	      },
+	      chaseComplianceDocuments(companyId) {
+	        mutate((next, helpers) => {
+	          const company = next.companies.find((entry) => entry.id === companyId);
+	          const passport = next.passports.records.find((entry) => entry.companyId === companyId);
+	          const required = requiredDocsForTrade(passport?.trade || "");
+	          const missing = required
+	            .map((requirement) => {
+	              const docs = next.complianceDocuments.filter((doc) => doc.companyId === companyId && doc.docType === requirement.docType);
+	              const latest = docs[0];
+	              const status = complianceStatusFor(latest);
+	              return status === "valid" || status === "expiring-soon" ? null : `${requirement.docType} (${status})`;
+	            })
+	            .filter(Boolean);
+	          const recipients = next.users.filter((user) => user.companyId === companyId);
+	          const body = missing.length
+	            ? `Please upload or renew the following compliance documents before further site access: ${missing.join(", ")}.`
+	            : "Your compliance file is currently complete. No action required.";
+	          next.messages.unshift({
+	            id: randomId("msg"),
+	            topic: `Compliance chase - ${company?.name || companyId}`,
+	            participants: [helpers.actor.id, ...recipients.map((user) => user.id)],
+	            messages: [{ id: randomId("msgi"), by: helpers.actor.id, at: nowStamp(), body }],
+	            createdAt: nowStamp(),
+	            updatedAt: nowStamp(),
+	          });
+	          helpers.addAudit({
+	            action: "compliance.chase",
+	            entityType: "company",
+	            entityId: companyId,
+	            before: null,
+	            after: { missing },
+	            siteId: next.session.siteId,
+	          });
+	        });
+	      },
+	      async uploadPassportFiles(passportId, fileList) {
         const incoming = Array.from(fileList || []);
         for (const file of incoming) {
           const metadata = await uploadFile({
