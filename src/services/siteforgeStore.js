@@ -818,6 +818,9 @@ function stripInlinePhotoPayloads(state) {
       if (Array.isArray(record?.attachments)) {
         record.attachments = record.attachments.map((attachment) => (attachment && typeof attachment === "object" ? stripInlineBlobPayload({ ...attachment }) : attachment));
       }
+      if (Array.isArray(record?.voiceNotes)) {
+        record.voiceNotes = record.voiceNotes.map((note) => (note && typeof note === "object" ? stripInlineBlobPayload({ ...note }) : note));
+      }
     });
   });
   if (Array.isArray(state.files?.records)) {
@@ -5582,18 +5585,22 @@ export function SiteForgeProvider({ children }) {
       addDiaryEntry(payload) {
         mutate((next, helpers) => {
           const structured = payload.rawText ? structureFieldNote(payload.rawText) : null;
+          const voiceTranscript = (payload.voiceNotes || []).map((note) => note.transcript).filter(Boolean).join(" ");
           const entry = {
             id: randomId("dia"),
             siteId: payload.siteId || next.session.siteId,
             date: payload.date || formatDate(),
             weather: payload.weather || "Fine",
             crew: Number(payload.crew || 0),
-            summary: payload.summary || structured?.summary || "",
+            summary: payload.summary || structured?.summary || voiceTranscript || "",
             safety: payload.safety || structured?.safety || "",
             delays: payload.delays || structured?.delays || "Nil",
             photos: payload.photos || [],
+            voiceNotes: payload.voiceNotes || [],
             rainEvent: Boolean(payload.rainEvent),
             linkedRecords: payload.linkedRecords || [],
+            createdAt: nowStamp(),
+            updatedAt: nowStamp(),
           };
           next.diary.unshift(entry);
           helpers.addAudit({

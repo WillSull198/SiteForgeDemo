@@ -3,7 +3,7 @@
    store layer, with only PhotoUpload actively using it today. */
 
 const DB_NAME = "siteforge-v2";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export const STORES = {
   projects: { keyPath: "id" },
@@ -12,6 +12,7 @@ export const STORES = {
   templates: { keyPath: "id" },
   documents: { keyPath: "id" },
   photos: { keyPath: "id" },
+  audio: { keyPath: "id" },
   plans: { keyPath: "id" },
   diary: { keyPath: "id" },
   problems: { keyPath: "id" },

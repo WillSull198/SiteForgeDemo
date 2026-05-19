@@ -8,6 +8,7 @@ import { AI_PROVIDERS, AI_STORAGE_KEYS, DEFAULT_AI_MODELS, askSiteForgeAi, getSt
 import DataTable from "../components/DataTable";
 import FileDropZone from "../components/FileDropZone";
 import PhotoUpload from "../components/PhotoUpload";
+import VoiceRecorder, { AudioNotePlayer } from "../components/VoiceRecorder";
 import PDFViewer from "../components/PDFViewer";
 import { exportCsv, exportElementToPdf } from "../services/pdfService";
 import { previewPdf } from "../services/documentIntelligence";
@@ -135,8 +136,22 @@ function downloadJson(filename, payload) {
   URL.revokeObjectURL(url);
 }
 
-function collectPhotoIds(payload) {
-  const ids = new Set();
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function dataUrlToBlob(dataUrl) {
+  const response = await fetch(dataUrl);
+  return response.blob();
+}
+
+function collectBlobReferenceIds(payload) {
+  const ids = { photos: new Set(), audio: new Set() };
   const stack = [payload];
   const seen = new WeakSet();
   while (stack.length) {
@@ -146,7 +161,12 @@ function collectPhotoIds(payload) {
     seen.add(value);
     if (Array.isArray(value.photos)) {
       value.photos.forEach((photo) => {
-        if (photo && typeof photo === "object" && photo.id) ids.add(photo.id);
+        if (photo && typeof photo === "object" && photo.id) ids.photos.add(photo.id);
+      });
+    }
+    if (Array.isArray(value.voiceNotes)) {
+      value.voiceNotes.forEach((note) => {
+        if (note && typeof note === "object" && note.id) ids.audio.add(note.id);
       });
     }
     Object.entries(value).forEach(([key, child]) => {
@@ -158,29 +178,57 @@ function collectPhotoIds(payload) {
 }
 
 async function buildBackupBundle(payload) {
-  const photoIds = collectPhotoIds(payload);
+  const blobIds = collectBlobReferenceIds(payload);
   const base = {
     exportVersion: 2,
     exportedAt: new Date().toISOString(),
     state: payload,
-    blobs: { photos: {} },
+    blobs: { photos: {}, audio: {} },
   };
-  if (!photoIds.size) return base;
-  const photos = await getAllRecords("photos").catch(() => []);
+  if (!blobIds.photos.size && !blobIds.audio.size) return base;
+  const [photos, audio] = await Promise.all([
+    getAllRecords("photos").catch(() => []),
+    getAllRecords("audio").catch(() => []),
+  ]);
   const photoBundle = {};
+  const audioBundle = {};
   photos.forEach((record) => {
-    if (record?.id && photoIds.has(record.id)) photoBundle[record.id] = record;
+    if (record?.id && blobIds.photos.has(record.id)) photoBundle[record.id] = record;
   });
+  await Promise.all(
+    audio
+      .filter((record) => record?.id && blobIds.audio.has(record.id))
+      .map(async (record) => {
+        audioBundle[record.id] = {
+          ...record,
+          blob: undefined,
+          dataUrl: record.blob ? await blobToDataUrl(record.blob) : record.dataUrl,
+        };
+      }),
+  );
   return {
     ...base,
     state: payload,
-    blobs: { photos: photoBundle },
+    blobs: { photos: photoBundle, audio: audioBundle },
   };
 }
 
 async function restoreBackupBlobs(blobs) {
   const photos = Object.values(blobs?.photos || {});
-  await Promise.all(photos.filter((photo) => photo?.id).map((photo) => putRecord("photos", photo)));
+  const audio = Object.values(blobs?.audio || {});
+  const audioRecords = await Promise.all(
+    audio
+      .filter((note) => note?.id)
+      .map(async (note) => ({
+        ...note,
+        blob: note.blob || (note.dataUrl ? await dataUrlToBlob(note.dataUrl) : null),
+        dataUrl: undefined,
+      })),
+  );
+  await Promise.all([
+    ...photos.filter((photo) => photo?.id).map((photo) => putRecord("photos", photo)),
+    ...audioRecords.filter((note) => note?.id && note.blob).map((note) => putRecord("audio", note)),
+  ]);
 }
 
 function PortfolioPage() {
@@ -1681,7 +1729,7 @@ function DiaryPage() {
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [variationEntry, setVariationEntry] = useState(null);
   const [rawNote, setRawNote] = useState("");
-  const [form, setForm] = useState({ date: "", weather: "", crew: "", summary: "", safety: "", delays: "", rainEvent: false, photos: [] });
+  const [form, setForm] = useState({ date: "", weather: "", crew: "", summary: "", safety: "", delays: "", rainEvent: false, photos: [], voiceNotes: [] });
   const [variationForm, setVariationForm] = useState({ title: "", description: "", value: "", days: "", reason: "", trade: "General", priority: "medium", templateId: "", photos: [] });
   const entries = state.diary.filter((entry) => entry.siteId === siteId);
   const variationTemplates = state.contractTemplates.filter((template) => template.status !== "archived" && ["Variation", "Selection Upgrade", "Scope Clarification"].includes(template.type));
@@ -1705,6 +1753,13 @@ function DiaryPage() {
             {entry.summary}
           </div>
           {entry.photos?.length ? <PhotoUpload existingPhotos={entry.photos} parentType="diary" parentId={entry.id} /> : null}
+          {entry.voiceNotes?.length ? (
+            <div style={{ marginTop: 10 }}>
+              {entry.voiceNotes.map((note) => (
+                <AudioNotePlayer key={note.id} note={note} />
+              ))}
+            </div>
+          ) : null}
           <div className="fx" style={{ gap: 6, flexWrap: "wrap", marginTop: 10 }}>
             <Badge tone="medium">{entry.weather}</Badge>
             <Badge tone="passed">{entry.crew} crew</Badge>
@@ -1767,25 +1822,36 @@ function DiaryPage() {
           <input type="checkbox" checked={form.rainEvent} onChange={(event) => setForm((current) => ({ ...current, rainEvent: event.target.checked }))} />
           Mark as rain event
         </label>
-        <div className="ff">
-          <label>Photos</label>
-          <PhotoUpload
+	        <div className="ff">
+	          <label>Photos</label>
+	          <PhotoUpload
             existingPhotos={form.photos}
             parentType="diary"
             onPhotosAdded={(photos) => setForm((current) => ({ ...current, photos: [...current.photos, ...photos] }))}
             onRemove={(photoId) => setForm((current) => ({ ...current, photos: current.photos.filter((photo) => photo.id !== photoId) }))}
-          />
-        </div>
-        <div className="fa">
+	          />
+	        </div>
+	        <div className="ff">
+	          <label>Voice note</label>
+	          <VoiceRecorder onVoiceNoteAdded={(note) => setForm((current) => ({ ...current, voiceNotes: [...(current.voiceNotes || []), note] }))} />
+	          {form.voiceNotes?.length ? (
+	            <div className="list-stack" style={{ marginTop: 8 }}>
+	              {form.voiceNotes.map((note) => (
+	                <AudioNotePlayer key={note.id} note={note} />
+	              ))}
+	            </div>
+	          ) : null}
+	        </div>
+	        <div className="fa">
           <Button onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             tone="bt-p"
             data-testid="diary-create-variation"
-            onClick={() => {
-              actions.addDiaryEntry(form);
-              setOpen(false);
-              setForm({ date: "", weather: "", crew: "", summary: "", safety: "", delays: "", rainEvent: false, photos: [] });
-            }}
+	            onClick={() => {
+	              actions.addDiaryEntry(form);
+	              setOpen(false);
+	              setForm({ date: "", weather: "", crew: "", summary: "", safety: "", delays: "", rainEvent: false, photos: [], voiceNotes: [] });
+	            }}
           >
             Save Entry
           </Button>
