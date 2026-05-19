@@ -67,8 +67,14 @@ function run(storeName, mode, operation) {
         const transaction = db.transaction(storeName, mode);
         const store = transaction.objectStore(storeName);
         const request = operation(store);
-        request.onsuccess = () => resolve(request.result);
+        let result;
+        request.onsuccess = () => {
+          result = request.result;
+        };
         request.onerror = () => reject(request.error || transaction.error);
+        transaction.oncomplete = () => resolve(result);
+        transaction.onerror = () => reject(transaction.error || request.error);
+        transaction.onabort = () => reject(transaction.error || new Error(`IndexedDB transaction aborted for ${storeName}.`));
       }),
   );
 }

@@ -67,9 +67,15 @@ function withStore(storeName, mode, handler) {
         const transaction = db.transaction(storeName, mode);
         const store = transaction.objectStore(storeName);
         const request = handler(store);
+        let result;
 
-        request.onsuccess = () => resolve(request.result);
+        request.onsuccess = () => {
+          result = request.result;
+        };
         request.onerror = () => reject(request.error || transaction.error);
+        transaction.oncomplete = () => resolve(result);
+        transaction.onerror = () => reject(transaction.error || request.error);
+        transaction.onabort = () => reject(transaction.error || new Error(`IndexedDB transaction aborted for ${storeName}.`));
       }),
   );
 }
@@ -98,12 +104,37 @@ export function loadPersistedAppState(key) {
   return idbGet("appState", key).then((record) => record?.value || null);
 }
 
+function warnIfOversizedState(value) {
+  if (!import.meta.env.DEV || !value || typeof value !== "object") return;
+  try {
+    const size = JSON.stringify(value).length;
+    if (size <= 2_000_000) return;
+    const largest = Object.entries(value)
+      .map(([key, item]) => {
+        try {
+          return [key, JSON.stringify(item).length];
+        } catch {
+          return [key, 0];
+        }
+      })
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 6)
+      .map(([key, bytes]) => `${key}: ${bytes.toLocaleString()} bytes`)
+      .join(", ");
+    console.warn(`[SiteForge] App state is ${size.toLocaleString()} bytes before persistence. Largest keys: ${largest}`);
+  } catch {
+    // Dev-only diagnostics must never block persistence.
+  }
+}
+
 export function persistAppState(key, value) {
+  warnIfOversizedState(value);
+  const updatedAt = new Date().toISOString();
   return idbPut("appState", {
     key,
     value,
-    updatedAt: new Date().toISOString(),
-  });
+    updatedAt,
+  }).then(() => ({ key, updatedAt }));
 }
 
 export function deletePersistedAppState(key) {

@@ -5,6 +5,8 @@
 import { useEffect, useRef, useState } from "react";
 import { loadPersistedAppState, persistAppState } from "../services/dbService";
 
+const LOCAL_STORAGE_SAFE_LIMIT = 4_000_000;
+
 function mergeWithDefaults(savedValue, defaultValue) {
   if (Array.isArray(defaultValue)) {
     return Array.isArray(savedValue) ? savedValue : defaultValue;
@@ -30,6 +32,7 @@ export function usePersistentState(key, initialValue) {
   const keyRef = useRef(key);
   const valueRef = useRef(null);
   const hydratedRef = useRef(false);
+  const degradedRef = useRef(false);
   if (resolvedInitialValueRef.current === null) {
     resolvedInitialValueRef.current = typeof initialValue === "function" ? initialValue() : initialValue;
   }
@@ -39,10 +42,13 @@ export function usePersistentState(key, initialValue) {
     typeof window.indexedDB !== "undefined";
 
   const [hydrated, setHydrated] = useState(false);
+  const [lastPersistedAt, setLastPersistedAt] = useState(null);
+  const [persistenceDegraded, setPersistenceDegraded] = useState(false);
   const [value, setValue] = useState(() => {
     const resolvedInitialValue = resolvedInitialValueRef.current;
 
     try {
+      if (typeof window === "undefined" || !key) return resolvedInitialValue;
       const raw = window.localStorage.getItem(key);
       if (raw) {
         const parsed = JSON.parse(raw);
@@ -68,18 +74,57 @@ export function usePersistentState(key, initialValue) {
   valueRef.current = value;
   hydratedRef.current = hydrated;
 
+  const markPersistenceDegraded = (message) => {
+    console.warn(message);
+    setPersistenceDegraded(true);
+    if (degradedRef.current) return;
+    degradedRef.current = true;
+    setValue((current) => {
+      if (!current || typeof current !== "object" || Array.isArray(current) || current.persistenceDegraded) return current;
+      return {
+        ...current,
+        persistenceDegraded: true,
+        persistenceWarning: message,
+      };
+    });
+  };
+
+  const persistToLocalStorageFallback = (targetKey, targetValue) => {
+    try {
+      const serialized = JSON.stringify(targetValue);
+      if (serialized.length > LOCAL_STORAGE_SAFE_LIMIT) {
+        markPersistenceDegraded(
+          `[SiteForge] Persistence degraded: state is ${serialized.length.toLocaleString()} bytes, above the localStorage safety limit. IndexedDB is unavailable, so this browser cannot safely save the current project.`,
+        );
+        return Promise.resolve({ degraded: true });
+      }
+      window.localStorage.setItem(targetKey, serialized);
+      const savedAt = new Date().toISOString();
+      setLastPersistedAt(savedAt);
+      setPersistenceDegraded(false);
+      return Promise.resolve({ updatedAt: savedAt });
+    } catch (error) {
+      markPersistenceDegraded(`[SiteForge] Persistence degraded: localStorage save failed for ${targetKey}. ${error?.message || ""}`.trim());
+      return Promise.resolve({ degraded: true });
+    }
+  };
+
   const persistNow = (targetKey = keyRef.current, targetValue = valueRef.current) => {
     if (!targetKey || targetValue === undefined || targetValue === null) return Promise.resolve();
     if (typeof window === "undefined") return Promise.resolve();
-    try {
-      window.localStorage.setItem(targetKey, JSON.stringify(targetValue));
-    } catch (error) {
-      console.warn(`Failed to mirror state for ${targetKey}`, error);
-    }
-    if (!canUseIndexedDb) return Promise.resolve();
-    return persistAppState(targetKey, targetValue).catch((error) => {
-      console.warn(`Failed to persist state for ${targetKey}`, error);
-    });
+    if (!canUseIndexedDb) return persistToLocalStorageFallback(targetKey, targetValue);
+    return persistAppState(targetKey, targetValue)
+      .then((result) => {
+        if (result?.updatedAt) {
+          setLastPersistedAt(result.updatedAt);
+        }
+        setPersistenceDegraded(false);
+        return result;
+      })
+      .catch((error) => {
+        markPersistenceDegraded(`[SiteForge] Persistence degraded: IndexedDB save failed for ${targetKey}. ${error?.message || ""}`.trim());
+        return { degraded: true };
+      });
   };
 
   useEffect(() => {
@@ -97,6 +142,13 @@ export function usePersistentState(key, initialValue) {
     }
     keyRef.current = key;
 
+    if (!key || !canUseIndexedDb) {
+      setHydrated(true);
+      return () => {
+        cancelled = true;
+      };
+    }
+
     loadPersistedAppState(key)
       .then((saved) => {
         if (cancelled || !saved) return;
@@ -110,7 +162,7 @@ export function usePersistentState(key, initialValue) {
         ) {
           return;
         }
-	        setValue(mergeWithDefaults(saved, resolvedInitialValue));
+        setValue(mergeWithDefaults(saved, resolvedInitialValue));
       })
       .catch(() => {
         // Safari private mode and locked-down browsers can reject IndexedDB.
@@ -125,7 +177,7 @@ export function usePersistentState(key, initialValue) {
     return () => {
       cancelled = true;
     };
-  }, [key]);
+  }, [canUseIndexedDb, key]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -134,30 +186,7 @@ export function usePersistentState(key, initialValue) {
     }
 
     persistTimerRef.current = window.setTimeout(() => {
-      if (canUseIndexedDb) {
-        persistAppState(key, value)
-          .then(() => {
-            try {
-              window.localStorage.setItem(key, JSON.stringify(value));
-            } catch (error) {
-              console.warn(`Failed to mirror state for ${key}`, error);
-            }
-          })
-          .catch(() => {
-            try {
-              window.localStorage.setItem(key, JSON.stringify(value));
-            } catch (error) {
-              console.warn(`Failed to persist state for ${key}`, error);
-            }
-          });
-        return;
-      }
-
-      try {
-        window.localStorage.setItem(key, JSON.stringify(value));
-      } catch (error) {
-        console.warn(`Failed to persist state for ${key}`, error);
-      }
+      persistNow(key, value);
     }, 350);
 
     return () => {
@@ -167,5 +196,14 @@ export function usePersistentState(key, initialValue) {
     };
   }, [canUseIndexedDb, hydrated, key, value]);
 
-  return [value, setValue, { hydrated, flushPendingWrites: () => persistNow(keyRef.current, valueRef.current) }];
+  return [
+    value,
+    setValue,
+    {
+      hydrated,
+      flushPendingWrites: () => persistNow(keyRef.current, valueRef.current),
+      lastPersistedAt,
+      persistenceDegraded,
+    },
+  ];
 }

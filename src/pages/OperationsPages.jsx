@@ -12,6 +12,7 @@ import PDFViewer from "../components/PDFViewer";
 import { exportCsv, exportElementToPdf } from "../services/pdfService";
 import { previewPdf } from "../services/documentIntelligence";
 import { deletePersistedAppState, persistAppState } from "../services/dbService";
+import { getAll as getAllRecords, put as putRecord } from "../services/db";
 import { useSiteForge } from "../services/siteforgeStore";
 import { can, canSeeAllSites, mustHandUpForApproval } from "../services/permissions";
 import { clearStateSlot, getStateStorageKey, readStateSlot, storageSlotExists, writeStateSlot } from "../services/storageMode";
@@ -118,6 +119,54 @@ function downloadJson(filename, payload) {
   anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function collectPhotoIds(payload) {
+  const ids = new Set();
+  const stack = [payload];
+  const seen = new WeakSet();
+  while (stack.length) {
+    const value = stack.pop();
+    if (!value || typeof value !== "object") continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    if (Array.isArray(value.photos)) {
+      value.photos.forEach((photo) => {
+        if (photo && typeof photo === "object" && photo.id) ids.add(photo.id);
+      });
+    }
+    Object.entries(value).forEach(([key, child]) => {
+      if (["data", "dataUrl", "thumbnailDataUrl", "base64", "blobData"].includes(key)) return;
+      if (child && typeof child === "object") stack.push(child);
+    });
+  }
+  return ids;
+}
+
+async function buildBackupBundle(payload) {
+  const photoIds = collectPhotoIds(payload);
+  const base = {
+    exportVersion: 2,
+    exportedAt: new Date().toISOString(),
+    state: payload,
+    blobs: { photos: {} },
+  };
+  if (!photoIds.size) return base;
+  const photos = await getAllRecords("photos").catch(() => []);
+  const photoBundle = {};
+  photos.forEach((record) => {
+    if (record?.id && photoIds.has(record.id)) photoBundle[record.id] = record;
+  });
+  return {
+    ...base,
+    state: payload,
+    blobs: { photos: photoBundle },
+  };
+}
+
+async function restoreBackupBlobs(blobs) {
+  const photos = Object.values(blobs?.photos || {});
+  await Promise.all(photos.filter((photo) => photo?.id).map((photo) => putRecord("photos", photo)));
 }
 
 function PortfolioPage() {
@@ -2895,7 +2944,7 @@ function ReportsPage() {
 }
 
 function AdminPage() {
-  const { actions, derived, state } = useSiteForge();
+  const { actions, derived, persistence, state } = useSiteForge();
   const currentUser = derived.currentUser;
   const integrationSettings = state.device?.settings?.integrations || state.settings?.integrations || {};
   const storedAiConfig = getStoredAiConfig(integrationSettings);
@@ -3089,28 +3138,30 @@ function AdminPage() {
     INCLUDE_DEMO_DATA ? ["Demo slot", demoSlotExists ? "present" : "empty"] : ["Build", "Production"],
   ];
 
-  const exportModeState = (mode) => {
+  const exportModeState = async (mode) => {
     const payload = activeMode === mode ? state : readStateSlot(mode);
     if (!payload) {
       setSettingsMessage(`${modeLabel(mode)} has no saved state yet.`);
       return;
     }
-    downloadJson(`siteforge-${mode}-export-${todayStamp}.json`, payload);
+    const backup = await buildBackupBundle(payload);
+    downloadJson(`siteforge-${mode}-export-${todayStamp}.json`, backup);
   };
 
   const handleImportFile = async (file, mode = activeMode === "demo" ? "demo" : "real") => {
     if (!file) return;
     try {
       const parsed = JSON.parse(await file.text());
-      if (!validateImportShape(parsed)) {
+      const payload = parsed.state || parsed;
+      if (!validateImportShape(payload)) {
         setSettingsMessage("Import file does not match SiteForge schema.");
         return;
       }
-      if (parsed.org?.mode && parsed.org.mode !== mode) {
-        setSettingsMessage(`This file is a ${parsed.org.mode} export. Import it under ${modeLabel(parsed.org.mode)} instead.`);
+      if (payload.org?.mode && payload.org.mode !== mode) {
+        setSettingsMessage(`This file is a ${payload.org.mode} export. Import it under ${modeLabel(payload.org.mode)} instead.`);
         return;
       }
-      setImportCandidate({ mode, payload: { ...parsed, org: { ...(parsed.org || {}), mode } } });
+      setImportCandidate({ mode, payload: { ...payload, org: { ...(payload.org || {}), mode } }, blobs: parsed.blobs || null });
       setSettingsMessage(`${modeLabel(mode)} import validated. Confirm replacement to restore it.`);
     } catch (error) {
       setSettingsMessage(`Import failed: ${error?.message || "Invalid JSON file."}`);
@@ -3145,6 +3196,11 @@ function AdminPage() {
   return (
     <div className="oy fin">
       {settingsMessage ? <div className="notice-banner mb8">{settingsMessage}</div> : null}
+      {persistence?.persistenceDegraded || state.persistenceDegraded ? (
+        <div className="notice-banner mb8">
+          This browser cannot reliably store the current project volume. Use Chrome or enable IndexedDB storage before adding more photos, audio, or PDFs. Your latest work may not be saved.
+        </div>
+      ) : null}
       <div className="notice-banner mb8">
         Settings are split for backend readiness: organisation settings sync across the company, device settings stay local to this browser, and user settings follow the signed-in person.
       </div>
@@ -3442,6 +3498,12 @@ function AdminPage() {
               </div>
             ))}
             <div className="linked-row">
+              <span>Last saved</span>
+              <Badge tone={persistence?.lastPersistedAt ? "passed" : "medium"}>
+                {persistence?.lastPersistedAt ? new Date(persistence.lastPersistedAt).toLocaleTimeString("en-AU") : "pending"}
+              </Badge>
+            </div>
+            <div className="linked-row">
               <span>Real key</span>
               <span className="mono xs">{getStateStorageKey("real")}</span>
             </div>
@@ -3490,21 +3552,24 @@ function AdminPage() {
       </div>
       <Modal open={Boolean(importCandidate)} close={() => setImportCandidate(null)} title="Import SiteForge Data">
         <div className="sm ct2">
-	          Replace {modeLabel(importCandidate?.mode)} with the imported data? The other workspace will not be touched.
+          Replace {modeLabel(importCandidate?.mode)} with the imported data? The other workspace will not be touched.
         </div>
         <div className="fa">
           <Button onClick={() => setImportCandidate(null)}>Cancel</Button>
           <Button
             tone="bt-r"
-            onClick={() => {
-	              if (importCandidate?.mode === activeMode) {
-	                actions.importState(importCandidate.payload);
-	              } else if (importCandidate?.mode) {
-	                writeStateSlot(importCandidate.mode, importCandidate.payload);
-	                persistAppState(getStateStorageKey(importCandidate.mode), importCandidate.payload).catch(() => {});
-	              }
-	              setImportCandidate(null);
-	              setSettingsMessage("Imported SiteForge data restored to the selected workspace.");
+            onClick={async () => {
+              if (importCandidate?.blobs) {
+                await restoreBackupBlobs(importCandidate.blobs);
+              }
+              if (importCandidate?.mode === activeMode) {
+                actions.importState(importCandidate.payload);
+              } else if (importCandidate?.mode) {
+                writeStateSlot(importCandidate.mode, importCandidate.payload);
+                persistAppState(getStateStorageKey(importCandidate.mode), importCandidate.payload).catch(() => {});
+              }
+              setImportCandidate(null);
+              setSettingsMessage("Imported SiteForge data and referenced photo blobs restored to the selected workspace.");
             }}
           >
             Replace Current State

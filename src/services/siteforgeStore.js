@@ -793,6 +793,39 @@ function lintModeIntegrity(state) {
   return state;
 }
 
+function stripInlineBlobPayload(record) {
+  if (!record || typeof record !== "object") return record;
+  ["data", "dataUrl", "base64", "blobData"].forEach((field) => {
+    if (typeof record[field] === "string" && record[field].startsWith("data:")) {
+      delete record[field];
+    }
+  });
+  if (typeof record.thumbnailDataUrl === "string" && record.thumbnailDataUrl.startsWith("data:")) {
+    delete record.thumbnailDataUrl;
+  }
+  return record;
+}
+
+function stripInlinePhotoPayloads(state) {
+  const collections = ["approvals", "diary", "documents", "problems", "qa", "safety", "tasks", "variations"];
+  collections.forEach((collection) => {
+    const records = state[collection];
+    if (!Array.isArray(records)) return;
+    records.forEach((record) => {
+      if (Array.isArray(record?.photos)) {
+        record.photos = record.photos.map((photo) => (photo && typeof photo === "object" ? stripInlineBlobPayload({ ...photo }) : photo));
+      }
+      if (Array.isArray(record?.attachments)) {
+        record.attachments = record.attachments.map((attachment) => (attachment && typeof attachment === "object" ? stripInlineBlobPayload({ ...attachment }) : attachment));
+      }
+    });
+  });
+  if (Array.isArray(state.files?.records)) {
+    state.files.records.forEach(stripInlineBlobPayload);
+  }
+  return state;
+}
+
 function normaliseState(state) {
   const next = state;
   const role = next.session.role || "Supervisor";
@@ -828,6 +861,7 @@ function normaliseState(state) {
   };
   scopeOrgRecords(next);
   lintModeIntegrity(next);
+  stripInlinePhotoPayloads(next);
 
   next.demo = {
     ...(next.demo || {}),
@@ -2737,11 +2771,18 @@ function createHelpers(prev, next) {
 export function SiteForgeProvider({ children }) {
   const [state, setState, persistence] = usePersistentState(getInitialStateStorageKey(), createInitialStore);
   const dataLayerBootstrapped = useRef(false);
+  const hydrationNormalised = useRef(false);
   const stateRef = useRef(state);
 
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  useEffect(() => {
+    if (!persistence?.hydrated || hydrationNormalised.current) return;
+    hydrationNormalised.current = true;
+    setState((previous) => normaliseState(cloneState(previous)));
+  }, [persistence?.hydrated, setState]);
 
   useEffect(() => {
     if (dataLayerBootstrapped.current) return;
@@ -8787,7 +8828,7 @@ AU date format DD/MM/YYYY. Amounts in AUD. Use formal contract language.`,
     };
   }, [state]);
 
-  const value = useMemo(() => ({ state, actions, derived }), [state, actions, derived]);
+  const value = useMemo(() => ({ state, actions, derived, persistence }), [state, actions, derived, persistence]);
 
   return createElement(SiteForgeContext.Provider, { value }, children);
 }

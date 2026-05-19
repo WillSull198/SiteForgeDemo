@@ -2,9 +2,104 @@
    compression, IndexedDB photo persistence, thumbnail previews, remove controls,
    and a lightbox. This replaces one-off broken image placeholders across modules. */
 
-import { useRef, useState } from "react";
-import { put } from "../services/db";
+import { useEffect, useRef, useState } from "react";
+import { get, put } from "../services/db";
 import { Icons, renderIcon } from "./icons";
+
+const photoDataCache = new Map();
+
+function toPhotoReference(record) {
+  return {
+    id: record.id,
+    filename: record.filename,
+    size: record.size,
+    mimeType: record.mimeType,
+    parentType: record.parentType,
+    parentId: record.parentId,
+    geo: record.geo,
+    takenAt: record.takenAt,
+    caption: record.caption,
+    createdAt: record.createdAt,
+  };
+}
+
+export function usePhotoData(photo) {
+  const id = photo && typeof photo === "object" ? photo.id : null;
+  const inlineData = photo && typeof photo === "object" ? photo.data || photo.thumbnailDataUrl || "" : "";
+  const [dataUrl, setDataUrl] = useState(() => inlineData || (id ? photoDataCache.get(id) || "" : ""));
+
+  useEffect(() => {
+    let cancelled = false;
+    if (inlineData) {
+      setDataUrl(inlineData);
+      if (id) photoDataCache.set(id, inlineData);
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (!id) {
+      setDataUrl("");
+      return () => {
+        cancelled = true;
+      };
+    }
+    const cached = photoDataCache.get(id);
+    if (cached) {
+      setDataUrl(cached);
+      return () => {
+        cancelled = true;
+      };
+    }
+    get("photos", id)
+      .then((record) => {
+        if (cancelled || !record?.data) return;
+        photoDataCache.set(id, record.data);
+        setDataUrl(record.data);
+      })
+      .catch(() => {
+        if (!cancelled) setDataUrl("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id, inlineData]);
+
+  return dataUrl;
+}
+
+function PhotoThumb({ photo, index, onRemove, onOpen }) {
+  const labelOnly = typeof photo === "string";
+  const dataUrl = usePhotoData(labelOnly ? null : photo);
+  const alt = labelOnly ? photo : photo.caption || photo.filename || "Uploaded site photo";
+  return (
+    <button className="photo-thumb" type="button" onClick={() => !labelOnly && onOpen?.(photo)}>
+      {labelOnly ? (
+        <span className="photo-label">{photo}</span>
+      ) : dataUrl ? (
+        <img src={dataUrl} alt={alt} />
+      ) : (
+        <span className="photo-label">{photo.filename || `Photo ${index + 1}`}</span>
+      )}
+      {!labelOnly && photo.geo ? <span className="photo-geo">GPS</span> : null}
+      {onRemove && !labelOnly ? (
+        <span
+          className="photo-remove"
+          onClick={(event) => {
+            event.stopPropagation();
+            onRemove(photo.id);
+          }}
+        >
+          {renderIcon(Icons.x, 11)}
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+function LightboxImage({ photo }) {
+  const dataUrl = usePhotoData(photo);
+  return dataUrl ? <img src={dataUrl} alt={photo.caption || photo.filename || "Site photo"} /> : <div className="photo-label">Loading photo...</div>;
+}
 
 function uuid() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
@@ -224,7 +319,7 @@ export default function PhotoUpload({ onPhotosAdded, existingPhotos = [], onRemo
         });
         records.push(record);
       }
-      onPhotosAdded?.(records);
+      onPhotosAdded?.(records.map(toPhotoReference));
     } catch (err) {
       setError(err?.message || "Photo upload failed. Please try a smaller image.");
     } finally {
@@ -250,28 +345,8 @@ export default function PhotoUpload({ onPhotosAdded, existingPhotos = [], onRemo
       <div className="photo-grid">
         {existingPhotos.map((photo, index) => {
           const labelOnly = typeof photo === "string";
-          const key = labelOnly ? `${photo}-${index}` : photo.id || photo.data || index;
-          return (
-            <button className="photo-thumb" key={key} type="button" onClick={() => !labelOnly && setLightbox(photo)}>
-          {labelOnly ? (
-                <span className="photo-label">{photo}</span>
-              ) : (
-                <img src={photo.data || photo.thumbnailDataUrl} alt={photo.caption || photo.filename || "Uploaded site photo"} />
-              )}
-              {!labelOnly && photo.geo ? <span className="photo-geo">GPS</span> : null}
-              {onRemove && !labelOnly ? (
-                <span
-                  className="photo-remove"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onRemove(photo.id);
-                  }}
-                >
-                  {renderIcon(Icons.x, 11)}
-                </span>
-              ) : null}
-            </button>
-          );
+          const key = labelOnly ? `${photo}-${index}` : photo.id || photo.filename || index;
+          return <PhotoThumb key={key} photo={photo} index={index} onRemove={onRemove} onOpen={setLightbox} />;
         })}
         <label className="photo-add-btn">
           <input ref={inputRef} type="file" accept="image/*" capture="environment" multiple onChange={(event) => handleFiles(event.target.files)} />
@@ -285,7 +360,7 @@ export default function PhotoUpload({ onPhotosAdded, existingPhotos = [], onRemo
           <button className="photo-lightbox-close" type="button" onClick={() => setLightbox(null)}>
             {renderIcon(Icons.x, 16)}
           </button>
-          <img src={lightbox.data || lightbox.thumbnailDataUrl} alt={lightbox.caption || lightbox.filename || "Site photo"} />
+          <LightboxImage photo={lightbox} />
         </div>
       ) : null}
     </div>
