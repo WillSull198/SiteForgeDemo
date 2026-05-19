@@ -5444,7 +5444,7 @@ export function SiteForgeProvider({ children }) {
             item: payload.item,
             quantity: payload.quantity,
             requestedBy: payload.requestedBy || next.session.userId,
-            status: "pending",
+            status: "requested",
             date: formatDate(),
             eta: payload.eta || "",
             supplier: payload.supplier || "",
@@ -7958,6 +7958,10 @@ ${JSON.stringify(projectContext)}`,
           if (!item) return;
           const before = cloneState(item);
           Object.assign(item, details, { status: nextStatus, updatedAt: nowStamp() });
+          if (nextStatus === "cancelled") {
+            item.cancelledAt = nowStamp();
+            item.cancelReason = details.notes || details.reason || "Cancelled from procurement register.";
+          }
           if (nextStatus === "supplier-confirmed" && item.eta) {
             item.confirmedAt = nowStamp();
           }
@@ -7976,6 +7980,19 @@ ${JSON.stringify(projectContext)}`,
             siteId: item.siteId,
           });
           if (["delayed", "escalated"].includes(nextStatus)) {
+            item.scheduleRisk = true;
+            item.commercialRisk = Number(item.cost || 0);
+            item.delayNotifiedAt = item.delayNotifiedAt || nowStamp();
+            (item.linkedTaskIds || []).forEach((taskId) => {
+              const task = next.tasks.find((entry) => entry.id === taskId);
+              if (task) {
+                task.procurementRisk = true;
+                task.riskReason = `${item.item} is ${nextStatus}.`;
+                task.updatedAt = nowStamp();
+                upsertLinkedRecord(task, buildLink("procurement", item, item.siteId));
+                upsertLinkedRecord(item, buildLink("task", task, item.siteId));
+              }
+            });
             helpers.emit({
               eventType: "procurement.delayed",
               title: `Procurement delayed - ${item.item}`,

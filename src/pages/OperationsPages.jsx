@@ -1128,9 +1128,12 @@ function ProcurementPage() {
     "dispatched",
     "in-transit",
     "delivered",
+    "delayed",
+    "escalated",
     "verified",
     "invoice-received",
     "paid",
+    "cancelled",
   ];
   const columns = [
     {
@@ -1151,7 +1154,7 @@ function ProcurementPage() {
       label: "Status",
       filterable: true,
       options: statusOrder,
-      render: (value) => <Badge tone={["delayed", "escalated"].includes(value) ? "critical" : ["delivered", "verified", "paid"].includes(value) ? "passed" : "medium"}>{value}</Badge>,
+      render: (value) => <Badge tone={["delayed", "escalated", "cancelled"].includes(value) ? "critical" : ["delivered", "verified", "paid"].includes(value) ? "passed" : "medium"}>{value}</Badge>,
     },
     { key: "cost", label: "Cost", type: "number", filterable: true, render: (value) => <span className="mono xs">${Number(value || 0).toLocaleString()}</span> },
   ];
@@ -1183,8 +1186,9 @@ function ProcurementPage() {
         rowActions={[
           { label: "Edit", onClick: (row) => setForm({ item: row.item, quantity: row.quantity, supplier: row.supplier, cost: row.cost, eta: row.eta || "" }) || setTransitionItem(row) },
           { label: "Next", onClick: (row) => setTransitionItem(row) },
-          { label: "Delay", tone: "bt-r", when: (row) => !["paid", "verified"].includes(row.status), onClick: (row) => actions.transitionProcurement(row.id, "delayed") },
+          { label: "Delay", tone: "bt-r", when: (row) => !["paid", "verified", "cancelled"].includes(row.status), onClick: (row) => actions.transitionProcurement(row.id, "delayed") },
           { label: "Draft EOT", tone: "bt-p", dataTestId: "procurement-raise-eot", when: (row) => ["delayed", "escalated"].includes(row.status), onClick: (row) => actions.createEotFromProcurement(row.id) },
+          { label: "Cancel", tone: "bt-r", when: (row) => !["delivered", "verified", "paid", "cancelled"].includes(row.status), onClick: (row) => actions.transitionProcurement(row.id, "cancelled", { notes: "Cancelled from procurement register." }) },
           { label: "Duplicate", onClick: (row) => actions.duplicateEntity("procurement", row.id) },
         ]}
       />
