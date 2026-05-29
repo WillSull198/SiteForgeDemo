@@ -962,6 +962,142 @@ function ProblemsPage() {
   );
 }
 
+function ComplianceDashboardPage() {
+  const { state, actions } = useSiteForge();
+  const siteId = state.session.siteId;
+  const today = new Date();
+  const subcontractorCompanies = state.companies.filter((company) => company.kind === "Subcontractor");
+  const daysUntil = (date) => {
+    if (!date) return null;
+    return Math.ceil((new Date(date).getTime() - today.getTime()) / 86400000);
+  };
+  const companyRows = subcontractorCompanies.map((company) => {
+    const passport = state.passports.records.find((entry) => entry.companyId === company.id);
+    const required = requiredDocsForTrade(passport?.trade || "");
+    const docs = state.complianceDocuments.filter((doc) => doc.companyId === company.id);
+    const requirements = required.map((requirement) => {
+      const latest = docs.find((doc) => doc.docType === requirement.docType && (requirement.scope !== "job-stage" || doc.siteId === siteId || doc.linkedJobIds?.includes(siteId)));
+      const status = complianceStatusFor(latest);
+      return { requirement, doc: latest, status };
+    });
+    return { company, passport, docs, requirements, outstanding: requirements.filter((item) => item.status !== "valid") };
+  });
+  const urgency = state.complianceDocuments
+    .filter((doc) => ["expired", "expiring-soon"].includes(complianceStatusFor(doc)))
+    .map((doc) => ({ doc, company: state.companies.find((entry) => entry.id === doc.companyId), days: daysUntil(doc.expiryDate) }))
+    .sort((left, right) => (left.days ?? 9999) - (right.days ?? 9999));
+  const pending = state.complianceDocuments.filter((doc) => doc.status === "pending-review").sort((left, right) => String(left.createdAt || "").localeCompare(String(right.createdAt || "")));
+  const rejected = state.complianceDocuments.filter((doc) => doc.status === "rejected");
+  const form4Docs = state.complianceDocuments.filter((doc) => /form 4|structural/i.test(`${doc.docType} ${doc.customLabel || ""} ${doc.jobStage || ""}`));
+  const complianceAudit = state.auditTrail.filter((entry) => String(entry.action || "").startsWith("compliance.")).slice(0, 50);
+
+  return (
+    <div className="oy fin">
+      {urgency.length ? (
+        <div className="banner critical mb8">
+          <strong>{urgency.length} compliance document{urgency.length === 1 ? "" : "s"} need attention.</strong>{" "}
+          {urgency.slice(0, 3).map(({ doc, company, days }) => `${company?.name || doc.companyId}: ${doc.docType} ${days != null && days < 0 ? "expired" : `expires in ${days}d`}`).join(" · ")}
+        </div>
+      ) : null}
+
+      <div className="g2">
+        <Card title="Pending Review Queue" icon={Icons.shield}>
+          <div className="list-stack">
+            {pending.length ? pending.map((doc) => {
+              const company = state.companies.find((entry) => entry.id === doc.companyId);
+              return (
+                <div className="linked-row" key={doc.id}>
+                  <div>
+                    <div className="b sm">{doc.docType}</div>
+                    <div className="xs ct3">{company?.name || doc.companyId} · issued {doc.issuedDate || "unknown"} · expires {doc.expiryDate || "no expiry"}</div>
+                    {doc.jobStage ? <div className="xs ct3">Stage: {doc.jobStage}</div> : null}
+                  </div>
+                  <div className="fx" style={{ gap: 4 }}>
+                    <Button small tone="bt-g" onClick={() => actions.reviewComplianceDocument(doc.id, { accepted: true })}>Accept</Button>
+                    <Button small tone="bt-r" onClick={() => actions.reviewComplianceDocument(doc.id, { accepted: false, rejectionReason: "Document rejected from compliance dashboard." })}>Reject</Button>
+                  </div>
+                </div>
+              );
+            }) : <div className="xs ct3">No documents waiting for builder review.</div>}
+          </div>
+        </Card>
+
+        <Card title="Rejected Documents" icon={Icons.alert}>
+          <div className="list-stack">
+            {rejected.length ? rejected.map((doc) => {
+              const company = state.companies.find((entry) => entry.id === doc.companyId);
+              return (
+                <div className="linked-row" key={doc.id}>
+                  <div>
+                    <div className="b sm">{doc.docType}</div>
+                    <div className="xs ct3">{company?.name || doc.companyId} · {doc.rejectionReason || "No reason recorded"}</div>
+                  </div>
+                  <Badge tone="critical">rejected</Badge>
+                </div>
+              );
+            }) : <div className="xs ct3">No rejected documents.</div>}
+          </div>
+        </Card>
+      </div>
+
+      <Card title="By Company" icon={Icons.users} className="mb8">
+        <div className="list-stack">
+          {companyRows.map(({ company, passport, requirements, outstanding }) => (
+            <div className="act" key={company.id}>
+              <div style={{ flex: 1 }}>
+                <div className="b sm">{company.name}</div>
+                <div className="xs ct3">{passport?.trade || "Trade not assigned"} · {outstanding.length ? `${outstanding.length} outstanding` : "all mandatory documents valid"}</div>
+                <div className="fx" style={{ gap: 5, flexWrap: "wrap", marginTop: 8 }}>
+                  {requirements.map(({ requirement, doc, status }) => (
+                    <Badge key={`${company.id}-${requirement.docType}`} tone={complianceTone(status)}>
+                      {requirement.docType}: {complianceLabel(status, doc)}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+              <Button small onClick={() => actions.chaseComplianceDocuments(company.id)}>Chase</Button>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <div className="g2">
+        <Card title="Form 4 / Structural Certificate Register" icon={Icons.clipboard}>
+          <div className="list-stack">
+            {form4Docs.length ? form4Docs.map((doc) => {
+              const company = state.companies.find((entry) => entry.id === doc.companyId);
+              return (
+                <div className="linked-row" key={doc.id}>
+                  <div>
+                    <div className="b sm">{doc.jobStage || doc.docType}</div>
+                    <div className="xs ct3">{company?.name || doc.companyId} · {doc.linkedJobIds?.join(", ") || doc.siteId}</div>
+                  </div>
+                  <Badge tone={complianceTone(complianceStatusFor(doc))}>{complianceStatusFor(doc)}</Badge>
+                </div>
+              );
+            }) : <div className="xs ct3">No Form 4 or structural certificates uploaded yet.</div>}
+          </div>
+        </Card>
+
+        <Card title="Recent Compliance Audit" icon={Icons.clipboard}>
+          <div className="list-stack">
+            {complianceAudit.map((entry) => (
+              <div className="linked-row" key={entry.id}>
+                <div>
+                  <div className="b sm">{entry.action}</div>
+                  <div className="xs ct3">{entry.timestamp} · {entry.actor}</div>
+                </div>
+                <Badge tone="medium">{entry.entityType}</Badge>
+              </div>
+            ))}
+            {!complianceAudit.length ? <div className="xs ct3">No compliance audit entries yet.</div> : null}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 function WorkforcePage() {
   const { state, actions } = useSiteForge();
   const siteId = state.session.siteId;
@@ -1041,6 +1177,11 @@ function WorkforcePage() {
         </Card>
       </div>
       <Card title="Subcontractor Compliance" icon={Icons.shield} className="mb8">
+        <div className="fa mb8">
+          <Button small tone="bt-p" onClick={() => actions.navigate({ kind: "internal", siteId, page: "compliance", entityId: null })}>
+            Open Compliance Dashboard
+          </Button>
+        </div>
         <div className="g2">
           <div className="mini-panel">
             <div className="b sm mb8">Pending my review</div>
@@ -4197,6 +4338,8 @@ export default function OperationsPages({ page }) {
       return <ProblemsPage />;
     case "wf":
       return <WorkforcePage />;
+    case "compliance":
+      return <ComplianceDashboardPage />;
     case "mats":
       return <ProcurementPage />;
     case "rfis":

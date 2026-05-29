@@ -34,6 +34,7 @@ const PAGE_TITLES = {
   calc: "Calculators",
   clientflow: "ClientFlow",
   passport: "Site Passport",
+  compliance: "Compliance",
   sched: "Schedule",
   budget: "Budget",
   vos: "Variations",

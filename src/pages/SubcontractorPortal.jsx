@@ -27,11 +27,13 @@ export default function SubcontractorPortal() {
   const [message, setMessage] = useState("");
   const [otherDocType, setOtherDocType] = useState("Other");
   const [jobStage, setJobStage] = useState("");
+  const [selectedComplianceSites, setSelectedComplianceSites] = useState([]);
   const [rfiForm, setRfiForm] = useState({ title: "", description: "", to: "Project Manager", priority: "medium" });
   const [variationForm, setVariationForm] = useState({ title: "", value: "", days: "", description: "" });
   const [invoiceForm, setInvoiceForm] = useState({ number: "", value: "", notes: "" });
 
   const jobs = useMemo(() => state.tasks.filter((task) => task.companyId === companyId && task.siteId === siteId), [companyId, siteId, state.tasks]);
+  const availableSites = useMemo(() => state.sites.filter((site) => (user?.siteIds || []).includes(site.id)), [state.sites, user?.siteIds]);
   const rfis = useMemo(() => state.rfis.filter((rfi) => rfi.scopeCompanyId === companyId), [companyId, state.rfis]);
   const invoices = useMemo(() => state.invoices.filter((invoice) => invoice.companyId === companyId), [companyId, state.invoices]);
   const passport = user ? state.passports.records.find((record) => record.userId === user.id && record.siteId === siteId) : null;
@@ -40,11 +42,12 @@ export default function SubcontractorPortal() {
   const requiredCompliance = useMemo(() => requiredDocsForTrade(user?.trade || passport?.trade || ""), [passport?.trade, user?.trade]);
   const uploadComplianceFile = async (file, requirement, extras = {}) => {
     if (!file) return;
+    const linkedJobIds = requirement.scope === "company" ? (selectedComplianceSites.length ? selectedComplianceSites : user?.siteIds || [siteId]) : [siteId];
     await actions.uploadComplianceDocument(file, {
       siteId,
       companyId,
       docType: requirement.docType,
-      linkedJobIds: [siteId],
+      linkedJobIds,
       jobStage: extras.jobStage || (requirement.scope === "job-stage" ? jobStage : ""),
     });
   };
@@ -293,6 +296,28 @@ export default function SubcontractorPortal() {
             <div className="notice-banner mb8">
               Upload insurance, licences, SWMS and Form 4 certificates here. File blobs stay in IndexedDB; the builder reviews each record before it becomes valid.
             </div>
+            {availableSites.length > 1 ? (
+              <div className="mini-panel mb8">
+                <div className="b sm mb4">Company-wide document applies to</div>
+                <div className="fx" style={{ gap: 6, flexWrap: "wrap" }}>
+                  {availableSites.map((site) => (
+                    <label className="chk" key={site.id}>
+                      <input
+                        type="checkbox"
+                        checked={(selectedComplianceSites.length ? selectedComplianceSites : [siteId]).includes(site.id)}
+                        onChange={(event) => {
+                          setSelectedComplianceSites((current) => {
+                            const base = current.length ? current : [siteId];
+                            return event.target.checked ? [...new Set([...base, site.id])] : base.filter((id) => id !== site.id);
+                          });
+                        }}
+                      />
+                      {site.name}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             <div className="list-stack">
               {requiredCompliance.map((requirement) => {
                 const latest = complianceDocs.find((doc) => doc.docType === requirement.docType && (requirement.scope !== "job-stage" || doc.siteId === siteId || doc.linkedJobIds?.includes(siteId)));

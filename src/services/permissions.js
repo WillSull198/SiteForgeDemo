@@ -148,6 +148,7 @@ export function getNavForRole(role) {
       items: [
         { key: "passport", page: "passport", label: "Site Passport", icon: "qr", permission: "passport.admin" },
         { key: "presence", page: "presence", label: "Presence", icon: "eye", permission: "presence.view" },
+        { key: "compliance", page: "compliance", label: "Compliance", icon: "shield", permission: "passport.admin" },
         { key: "integrations", page: "integrations", label: "Integrations", icon: "gear", permission: "integrations.view" },
       ],
     },

@@ -3973,8 +3973,8 @@ export function SiteForgeProvider({ children }) {
           helpers.projectLog(next.session.siteId, "Simulated time advanced", `Demo clock moved forward by ${days} day${days === 1 ? "" : "s"}.`);
         });
       },
-      addTask(payload) {
-        mutate((next, helpers) => {
+	      addTask(payload) {
+	        mutate((next, helpers) => {
           const task = {
             id: randomId("tsk"),
             siteId: payload.siteId || next.session.siteId,
@@ -3990,9 +3990,30 @@ export function SiteForgeProvider({ children }) {
             crewRequired: payload.crewRequired || 1,
             mobileMaterials: payload.mobileMaterials || [],
             linkedRecords: payload.linkedRecords || [],
-            clientVisible: Boolean(payload.clientVisible),
-          };
-          next.tasks.unshift(task);
+	            clientVisible: Boolean(payload.clientVisible),
+	          };
+          if (task.companyId) {
+            const passport = next.passports.records.find((entry) => entry.companyId === task.companyId);
+            const complianceIssues = requiredDocsForTrade(passport?.trade || task.trade)
+              .map((requirement) => {
+                const latest = next.complianceDocuments.find((doc) => doc.companyId === task.companyId && doc.docType === requirement.docType);
+                const status = complianceStatusFor(latest);
+                return status === "valid" || status === "expiring-soon" ? null : `${requirement.docType}: ${status}`;
+              })
+              .filter(Boolean);
+            if (complianceIssues.length) {
+              task.complianceWarning = complianceIssues;
+              helpers.addAudit({
+                action: "compliance.override-assign",
+                entityType: "task",
+                entityId: task.id,
+                before: null,
+                after: { companyId: task.companyId, complianceIssues, override: Boolean(payload.complianceOverride) },
+                siteId: task.siteId,
+              });
+            }
+          }
+	          next.tasks.unshift(task);
           helpers.addAudit({
             action: "task.create",
             entityType: "task",
@@ -9177,41 +9198,78 @@ AU date format DD/MM/YYYY. Amounts in AUD. Use formal contract language.`,
 	          });
 	        });
 	      },
-	      chaseComplianceDocuments(companyId) {
-	        mutate((next, helpers) => {
-	          const company = next.companies.find((entry) => entry.id === companyId);
-	          const passport = next.passports.records.find((entry) => entry.companyId === companyId);
-	          const required = requiredDocsForTrade(passport?.trade || "");
-	          const missing = required
-	            .map((requirement) => {
-	              const docs = next.complianceDocuments.filter((doc) => doc.companyId === companyId && doc.docType === requirement.docType);
-	              const latest = docs[0];
-	              const status = complianceStatusFor(latest);
-	              return status === "valid" || status === "expiring-soon" ? null : `${requirement.docType} (${status})`;
-	            })
-	            .filter(Boolean);
-	          const recipients = next.users.filter((user) => user.companyId === companyId);
-	          const body = missing.length
-	            ? `Please upload or renew the following compliance documents before further site access: ${missing.join(", ")}.`
-	            : "Your compliance file is currently complete. No action required.";
-	          next.messages.unshift({
-	            id: randomId("msg"),
-	            topic: `Compliance chase - ${company?.name || companyId}`,
-	            participants: [helpers.actor.id, ...recipients.map((user) => user.id)],
-	            messages: [{ id: randomId("msgi"), by: helpers.actor.id, at: nowStamp(), body }],
-	            createdAt: nowStamp(),
-	            updatedAt: nowStamp(),
-	          });
-	          helpers.addAudit({
-	            action: "compliance.chase",
-	            entityType: "company",
-	            entityId: companyId,
-	            before: null,
-	            after: { missing },
-	            siteId: next.session.siteId,
-	          });
-	        });
-	      },
+      async chaseComplianceDocuments(companyId) {
+        const snapshot = stateRef.current;
+        const company = snapshot.companies.find((entry) => entry.id === companyId);
+        const passport = snapshot.passports.records.find((entry) => entry.companyId === companyId);
+        const required = requiredDocsForTrade(passport?.trade || "");
+        const outstanding = required
+          .map((requirement) => {
+            const docs = snapshot.complianceDocuments.filter((doc) => doc.companyId === companyId && doc.docType === requirement.docType);
+            const latest = docs[0];
+            const status = complianceStatusFor(latest);
+            return status === "valid" || status === "expiring-soon" ? null : { docType: requirement.docType, status, expiryDate: latest?.expiryDate || null, rejectionReason: latest?.rejectionReason || "" };
+          })
+          .filter(Boolean);
+        const localBody = outstanding.length
+          ? `Please upload or renew the following compliance documents before further site access: ${outstanding.map((item) => `${item.docType} (${item.status})`).join(", ")}.`
+          : "Your compliance file is currently complete. No action required.";
+        let threadId = null;
+        mutate((next, helpers) => {
+          const recipients = next.users.filter((user) => user.companyId === companyId);
+          const thread = {
+            id: randomId("msg"),
+            topic: `Compliance chase - ${company?.name || companyId}`,
+            participants: [helpers.actor.id, ...recipients.map((user) => user.id)],
+            messages: [{ id: randomId("msgi"), by: helpers.actor.id, at: nowStamp(), body: localBody, source: "local-template" }],
+            createdAt: nowStamp(),
+            updatedAt: nowStamp(),
+            complianceChase: { companyId, outstanding },
+          };
+          threadId = thread.id;
+          next.messages.unshift(thread);
+          helpers.addAudit({
+            action: "compliance.chase",
+            entityType: "company",
+            entityId: companyId,
+            before: null,
+            after: { outstanding },
+            siteId: next.session.siteId,
+          });
+        });
+
+        const integrationSettings = snapshot.device?.settings?.integrations || snapshot.settings?.integrations || {};
+        const aiConfig = getStoredAiConfig(integrationSettings);
+        if (!threadId || !aiConfig.apiKey || snapshot.org?.mode === "demo" || !outstanding.length) {
+          return { ok: true, threadId, source: "local-template" };
+        }
+        const result = await askSiteForgeAi({
+          userMessage: `Draft a polite but firm Australian residential construction compliance reminder to ${company?.name || "the subcontractor"}.
+
+Outstanding compliance items:
+${JSON.stringify(outstanding)}
+
+Keep it short. Explain that expired or missing mandatory documents may prevent site access. Reply with message body only.`,
+          projectContext: { orgMode: snapshot.org?.mode, company, outstanding },
+          provider: aiConfig.provider,
+          apiKey: aiConfig.apiKey,
+          model: aiConfig.model,
+          openaiProxyUrl: aiConfig.openaiProxyUrl,
+          allowInDemo: false,
+        });
+        if (result.source === "claude" || result.source === "openai") {
+          mutate((next) => {
+            const thread = next.messages.find((entry) => entry.id === threadId);
+            if (thread?.messages?.[0]) {
+              thread.messages[0].body = result.text;
+              thread.messages[0].source = result.source;
+              thread.updatedAt = nowStamp();
+            }
+          });
+          return { ok: true, threadId, source: result.source };
+        }
+        return { ok: true, threadId, source: "local-template" };
+      },
 	      async uploadPassportFiles(passportId, fileList) {
         const incoming = Array.from(fileList || []);
         for (const file of incoming) {
