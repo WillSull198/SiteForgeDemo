@@ -3107,6 +3107,80 @@ export function SiteForgeProvider({ children }) {
     [mutate],
   );
 
+  const improveReworkTaskDescription = useCallback(
+    async ({ taskId, qaId }) => {
+      const snapshot = stateRef.current;
+      const task = snapshot.tasks.find((entry) => entry.id === taskId);
+      const qa = snapshot.qa.find((entry) => entry.id === qaId);
+      if (!task || !qa || snapshot.org?.mode === "demo") return;
+      const integrationSettings = snapshot.device?.settings?.integrations || snapshot.settings?.integrations || {};
+      const aiConfig = getStoredAiConfig(integrationSettings);
+      if (!aiConfig.apiKey) return;
+      const projectContext = {
+        orgMode: snapshot.org?.mode,
+        site: snapshot.sites.find((entry) => entry.id === qa.siteId),
+        qa: {
+          id: qa.id,
+          title: qa.title,
+          type: qa.type,
+          trade: qa.trade,
+          notes: qa.notes,
+          photos: (qa.photos || []).map((photo) => ({
+            id: photo.id || photo,
+            filename: photo.filename || photo.name || "",
+            caption: photo.caption || "",
+          })),
+        },
+        task: { id: task.id, title: task.title, trade: task.trade },
+      };
+      const result = await askSiteForgeAi({
+        userMessage: `Draft a practical rework scope for this failed Australian residential construction QA inspection. Reply ONLY as JSON: {"description":"clear rework scope, inspection hold point, and evidence required before close-out"}\n\nContext:\n${JSON.stringify(projectContext)}`,
+        projectContext,
+        provider: aiConfig.provider,
+        apiKey: aiConfig.apiKey,
+        model: aiConfig.model,
+        openaiProxyUrl: aiConfig.openaiProxyUrl,
+      });
+      if (result.source !== "claude" && result.source !== "openai") return;
+      try {
+        const match = result.text.match(/\{[\s\S]*\}/);
+        const parsed = JSON.parse(match ? match[0] : result.text);
+        if (!parsed.description) return;
+        mutate((next, helpers) => {
+          const target = next.tasks.find((entry) => entry.id === taskId);
+          if (!target || target.status === "done" || target.status === "complete") return;
+          const before = { description: target.description, aiSource: target.aiSource };
+          target.description = parsed.description;
+          target.aiSource = result.source;
+          target.aiGeneratedAt = nowStamp();
+          helpers.addAudit({
+            action: "task.ai-rework-scope",
+            entityType: "task",
+            entityId: target.id,
+            before,
+            after: { description: target.description, aiSource: target.aiSource },
+            siteId: target.siteId,
+          });
+        });
+      } catch (error) {
+        mutate((next, helpers) => {
+          const target = next.tasks.find((entry) => entry.id === taskId);
+          if (!target) return;
+          target.aiSource = "ai-parse-error";
+          helpers.addAudit({
+            action: "task.ai-rework-scope-failed",
+            entityType: "task",
+            entityId: target.id,
+            before: null,
+            after: { error: error?.message || "AI response could not be parsed" },
+            siteId: target.siteId,
+          });
+        });
+      }
+    },
+    [mutate],
+  );
+
   const refreshAiInsightCache = useCallback(
     async ({ siteId = null } = {}) => {
       const snapshot = stateRef.current;
@@ -5840,6 +5914,7 @@ export function SiteForgeProvider({ children }) {
         });
       },
       updateQaStatus(qaId, status) {
+        let aiUpgrade = null;
         mutate((next, helpers) => {
           const entry = next.qa.find((item) => item.id === qaId);
           if (!entry) return;
@@ -5908,6 +5983,7 @@ export function SiteForgeProvider({ children }) {
 	                recipients: getRecipientsForRoles(next, ["Supervisor", "Project Manager"]),
 	                route: { kind: "internal", siteId: entry.siteId, page: "tasks", entityId: task.id },
 	              });
+	              aiUpgrade = { taskId: task.id, qaId: entry.id };
 	            }
 	            helpers.emit({
 	              eventType: "qa.failed",
@@ -5921,6 +5997,7 @@ export function SiteForgeProvider({ children }) {
             });
           }
         });
+        if (aiUpgrade) improveReworkTaskDescription(aiUpgrade);
       },
       addDiaryEntry(payload) {
         mutate((next, helpers) => {
@@ -6233,6 +6310,7 @@ export function SiteForgeProvider({ children }) {
         if (aiUpgrade) improveApprovalDraft(aiUpgrade);
       },
       createReworkTaskFromQa(qaId) {
+        let aiUpgrade = null;
         mutate((next, helpers) => {
           const qa = next.qa.find((item) => item.id === qaId);
           if (!qa) return;
@@ -6258,6 +6336,7 @@ export function SiteForgeProvider({ children }) {
 	          next.tasks.unshift(task);
 	          qa.reworkTaskId = task.id;
 	          upsertLinkedRecord(qa, buildLink("task", task, qa.siteId));
+	          aiUpgrade = { taskId: task.id, qaId: qa.id };
           helpers.addAudit({
             action: "task.create",
             entityType: "task",
@@ -6267,6 +6346,7 @@ export function SiteForgeProvider({ children }) {
             siteId: task.siteId,
           });
         });
+        if (aiUpgrade) improveReworkTaskDescription(aiUpgrade);
       },
       createRfi(payload) {
         mutate((next, helpers) => {
@@ -9393,7 +9473,7 @@ Keep it short. Explain that expired or missing mandatory documents may prevent s
         return exportAuditCsv(state.auditTrail);
       },
     }),
-    [improveApprovalDraft, mutate, navigate, persistExecutedPdf, refreshAiInsightCache, setState, state],
+    [improveApprovalDraft, improveReworkTaskDescription, mutate, navigate, persistExecutedPdf, refreshAiInsightCache, setState, state],
   );
 
   const derived = useMemo(() => {

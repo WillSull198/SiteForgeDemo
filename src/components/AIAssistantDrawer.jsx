@@ -2,7 +2,7 @@
    AI chat drawer that can call the configured AI provider and falls back to
    SiteForge's local drafting intelligence during demos. */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { detectSaveTargets, extractSaveFieldsFallback, extractSaveFieldsSmart } from "../services/aiDraftService";
 import { askSiteForgeAi, getStoredAiConfig } from "../services/aiService";
 import { mustHandUpForApproval, routeKindForRole } from "../services/permissions";
@@ -168,19 +168,24 @@ function buildSuggestions(state, derived, actions) {
   return suggestions;
 }
 
-export default function AIAssistantDrawer({ open, onClose }) {
+export default function AIAssistantDrawer({ open, onClose, attachedDocument = null }) {
   const { state, derived, actions } = useSiteForge();
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState([]);
   const [loading, setLoading] = useState(false);
   const [saveDraft, setSaveDraft] = useState(null);
   const [saveError, setSaveError] = useState("");
+  const [attachmentDismissed, setAttachmentDismissed] = useState(false);
   const suggestions = useMemo(() => buildSuggestions(state, derived, actions), [actions, derived, state]);
   const integrationSettings = state.device?.settings?.integrations || state.settings?.integrations || {};
   const aiConfig = getStoredAiConfig(integrationSettings);
   const providerLabel = aiConfig.provider === "openai" ? "ChatGPT" : "Claude";
   const testStatus = integrationSettings.aiLastTestProvider === aiConfig.provider ? integrationSettings.aiLastTestStatus || "untested" : "untested";
   const showSuggestions = !["Worker", "Subcontractor"].includes(state.session.role);
+  useEffect(() => {
+    setAttachmentDismissed(false);
+  }, [attachedDocument?.id]);
+  const activeAttachment = attachedDocument && !attachmentDismissed ? attachedDocument : null;
   const sourceLabel = (source) => {
     if (source === "openai") return "ChatGPT";
     if (source === "claude") return "Claude";
@@ -201,8 +206,9 @@ export default function AIAssistantDrawer({ open, onClose }) {
       pendingVariations: state.variations.filter((entry) => entry.siteId === siteId && !["signed", "archived"].includes(entry.status)).slice(0, 5),
       diary: state.diary.filter((entry) => entry.siteId === siteId).slice(0, 5),
       activeApprovals: state.approvals.filter((entry) => entry.siteId === siteId && !["signed", "archived", "declined"].includes(entry.status)).slice(0, 5),
+      attachedDocument: activeAttachment,
     };
-  }, [state]);
+  }, [activeAttachment, state]);
 
   const openSaveDraft = async (entry, target) => {
     const fallback = extractSaveFieldsFallback(target, entry.userMessage || "", entry.text || "");
@@ -284,6 +290,22 @@ export default function AIAssistantDrawer({ open, onClose }) {
                 </Button>
               </div>
             ))}
+          </div>
+        ) : null}
+        {activeAttachment ? (
+          <div className="notice-banner" style={{ marginBottom: 10 }}>
+            <div className="fb" style={{ gap: 8 }}>
+              <div>
+                <div className="xs ct3">Attached document context</div>
+                <div className="sm b">{activeAttachment.title}</div>
+                <div className="xs ct3">
+                  {(activeAttachment.category || "Document")} · Rev {activeAttachment.rev || "current"} · {(activeAttachment.extractedText || "").length || activeAttachment.pages?.length || 0} text signal
+                </div>
+              </div>
+              <Button small onClick={() => setAttachmentDismissed(true)}>
+                Dismiss
+              </Button>
+            </div>
           </div>
         ) : null}
         <div className="ai-chat-panel">

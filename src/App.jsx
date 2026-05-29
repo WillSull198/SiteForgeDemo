@@ -131,7 +131,7 @@ class ViewBoundary extends Component {
 }
 
 function Shell() {
-  const { state, actions, derived } = useSiteForge();
+  const { state, actions, derived, persistence } = useSiteForge();
   const route = state.session.route;
   const role = state.session.role || "Director";
   const user = derived.currentUser;
@@ -173,6 +173,29 @@ function Shell() {
     financialPulseExists: Boolean(state.financialPulse),
     onboardingComplete: Boolean(state.onboarding?.complete),
   };
+  const attachedAiDocument = useMemo(() => {
+    if (route.page !== "docs" || !route.entityId) return null;
+    const document = state.documents.find((entry) => entry.id === route.entityId);
+    if (!document) return null;
+    const file = document.fileId ? state.files.records.find((entry) => entry.id === document.fileId) : null;
+    const pages = (file?.textPages || [])
+      .filter((page) => page?.text?.trim())
+      .slice(0, 12)
+      .map((page, index) => ({
+        pageNumber: page.pageNumber ?? index + 1,
+        text: page.text.trim().slice(0, 1000),
+      }));
+    return {
+      id: document.id,
+      title: document.title,
+      category: document.category,
+      rev: document.rev,
+      drawingNumber: document.drawingNumber,
+      manualSearchDescription: document.manualSearchDescription || "",
+      extractedText: (file?.extractedText || document.manualSearchDescription || "").slice(0, 12000),
+      pages,
+    };
+  }, [route.entityId, route.page, state.documents, state.files.records]);
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -554,6 +577,11 @@ function Shell() {
 		              <Button small onClick={() => actions.switchToMode("real")}>Switch to my real account</Button>
             </div>
           ) : null}
+          {persistence?.persistenceDegraded || state.persistenceDegraded ? (
+            <div className="notice-banner" style={{ margin: "12px 24px 0" }}>
+              <b>Storage warning.</b> SiteForge is unable to save changes reliably in this browser. Use Chrome, enable IndexedDB storage, or export your work before closing.
+            </div>
+          ) : null}
           {updateReady ? (
             <div className="notice-banner" style={{ margin: "12px 24px 0" }}>
               <b>SiteForge has updated.</b> Reload to use the latest version.
@@ -811,7 +839,7 @@ function Shell() {
           <button className="ai-fab" type="button" onClick={() => actions.toggleAIAssistant()}>
             {renderIcon(Icons.zap, 18)}
           </button>
-          <AIAssistantDrawer open={state.ui.aiAssistantOpen} onClose={() => actions.toggleAIAssistant()} />
+          <AIAssistantDrawer open={state.ui.aiAssistantOpen} onClose={() => actions.toggleAIAssistant()} attachedDocument={attachedAiDocument} />
         </>
       ) : null}
 

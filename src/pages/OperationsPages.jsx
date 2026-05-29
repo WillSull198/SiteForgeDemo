@@ -11,7 +11,7 @@ import PhotoUpload from "../components/PhotoUpload";
 import VoiceRecorder, { AudioNotePlayer } from "../components/VoiceRecorder";
 import PDFViewer from "../components/PDFViewer";
 import { exportCsv, exportElementToPdf } from "../services/pdfService";
-import { previewPdf } from "../services/documentIntelligence";
+import { getBlob, previewPdf, putBlob } from "../services/documentIntelligence";
 import { deletePersistedAppState, persistAppState } from "../services/dbService";
 import { getAll as getAllRecords, put as putRecord } from "../services/db";
 import { COMPLIANCE_DOC_TYPES, complianceLabel, complianceStatusFor, complianceTone, requiredDocsForTrade } from "../services/compliance";
@@ -152,7 +152,7 @@ async function dataUrlToBlob(dataUrl) {
 }
 
 function collectBlobReferenceIds(payload) {
-  const ids = { photos: new Set(), audio: new Set() };
+  const ids = { photos: new Set(), audio: new Set(), files: new Set() };
   const stack = [payload];
   const seen = new WeakSet();
   while (stack.length) {
@@ -170,6 +170,14 @@ function collectBlobReferenceIds(payload) {
         if (note && typeof note === "object" && note.id) ids.audio.add(note.id);
       });
     }
+    if (Array.isArray(value.records) && value === payload.files) {
+      value.records.forEach((file) => {
+        if (file?.id) ids.files.add(file.id);
+      });
+    }
+    ["fileId", "sourceFileId", "executedPdfBlobId"].forEach((key) => {
+      if (typeof value[key] === "string" && value[key]) ids.files.add(value[key]);
+    });
     Object.entries(value).forEach(([key, child]) => {
       if (["data", "dataUrl", "thumbnailDataUrl", "base64", "blobData"].includes(key)) return;
       if (child && typeof child === "object") stack.push(child);
@@ -184,15 +192,16 @@ async function buildBackupBundle(payload) {
     exportVersion: 2,
     exportedAt: new Date().toISOString(),
     state: payload,
-    blobs: { photos: {}, audio: {} },
+    blobs: { photos: {}, audio: {}, files: {} },
   };
-  if (!blobIds.photos.size && !blobIds.audio.size) return base;
+  if (!blobIds.photos.size && !blobIds.audio.size && !blobIds.files.size) return base;
   const [photos, audio] = await Promise.all([
     getAllRecords("photos").catch(() => []),
     getAllRecords("audio").catch(() => []),
   ]);
   const photoBundle = {};
   const audioBundle = {};
+  const fileBundle = {};
   photos.forEach((record) => {
     if (record?.id && blobIds.photos.has(record.id)) photoBundle[record.id] = record;
   });
@@ -207,16 +216,31 @@ async function buildBackupBundle(payload) {
         };
       }),
   );
+  await Promise.all(
+    [...blobIds.files].map(async (fileId) => {
+      const blob = await getBlob(fileId).catch(() => null);
+      if (!blob) return;
+      const meta = payload.files?.records?.find((record) => record.id === fileId);
+      fileBundle[fileId] = {
+        id: fileId,
+        name: meta?.name || meta?.filename || `${fileId}.bin`,
+        type: meta?.type || meta?.mimeType || blob.type || "application/octet-stream",
+        size: meta?.size || blob.size || 0,
+        dataUrl: await blobToDataUrl(blob),
+      };
+    }),
+  );
   return {
     ...base,
     state: payload,
-    blobs: { photos: photoBundle, audio: audioBundle },
+    blobs: { photos: photoBundle, audio: audioBundle, files: fileBundle },
   };
 }
 
 async function restoreBackupBlobs(blobs) {
   const photos = Object.values(blobs?.photos || {});
   const audio = Object.values(blobs?.audio || {});
+  const files = Object.values(blobs?.files || {});
   const audioRecords = await Promise.all(
     audio
       .filter((note) => note?.id)
@@ -226,9 +250,18 @@ async function restoreBackupBlobs(blobs) {
         dataUrl: undefined,
       })),
   );
+  const fileRecords = await Promise.all(
+    files
+      .filter((file) => file?.id && file.dataUrl)
+      .map(async (file) => ({
+        id: file.id,
+        blob: await dataUrlToBlob(file.dataUrl),
+      })),
+  );
   await Promise.all([
     ...photos.filter((photo) => photo?.id).map((photo) => putRecord("photos", photo)),
     ...audioRecords.filter((note) => note?.id && note.blob).map((note) => putRecord("audio", note)),
+    ...fileRecords.filter((file) => file?.id && file.blob).map((file) => putBlob(file.id, file.blob)),
   ]);
 }
 
@@ -2511,6 +2544,22 @@ function DocumentsPage() {
       };
     });
   };
+  const normaliseExcerptText = (value) =>
+    String(value || "")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+  const validatePlanExcerpt = ({ excerpt, confidence, page, file }) => {
+    const text = String(excerpt || "").trim();
+    if (!text || !page || !file?.textPages?.length) return { excerpt: text, confidence: confidence || "medium" };
+    const pageText = file.textPages.find((entry, index) => Number(entry.pageNumber ?? index + 1) === Number(page))?.text || "";
+    if (!pageText) return { excerpt: `${text} (AI summary - source page text unavailable)`, confidence: "low" };
+    const normalisedExcerpt = normaliseExcerptText(text);
+    const exact = normalisedExcerpt && normaliseExcerptText(pageText).includes(normalisedExcerpt);
+    return exact
+      ? { excerpt: text, confidence: confidence || "medium" }
+      : { excerpt: `${text} (AI summary - exact phrase not found)`, confidence: "low" };
+  };
   const keywordPlanSearch = (query) => {
     const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
     const searchable = documents
@@ -2622,13 +2671,15 @@ ${JSON.stringify(documentContext)}`,
           (parsed.results || []).map((entry, index) => {
             const document = documents.find((item) => item.id === entry.documentId || item.drawingNumber === entry.drawingNumber);
             const file = document?.fileId ? state.files.records.find((item) => item.id === document.fileId) : null;
+            const page = entry.page != null && !Number.isNaN(Number(entry.page)) ? Number(entry.page) : null;
+            const validated = validatePlanExcerpt({ excerpt: entry.excerpt || "", confidence: entry.confidence || "medium", page, file });
             return {
               id: document?.id || `${entry.drawingNumber || "ai"}-${index}`,
               title: document?.title || entry.drawingNumber || "AI plan match",
               drawingNumber: entry.drawingNumber,
-              page: entry.page != null && !Number.isNaN(Number(entry.page)) ? Number(entry.page) : null,
-              excerpt: entry.excerpt || "",
-              confidence: entry.confidence || "medium",
+              page,
+              excerpt: validated.excerpt,
+              confidence: validated.confidence,
               fileId: file?.id,
             };
           }),
@@ -2703,7 +2754,10 @@ ${JSON.stringify(documentContext)}`,
             title="Current Register"
             columns={columns}
             rows={documents}
-            onRowClick={(row) => setSelectedId(row.id)}
+            onRowClick={(row) => {
+              setSelectedId(row.id);
+              actions.navigate({ kind: "internal", siteId, page: "docs", entityId: row.id });
+            }}
             bulkActions={[
               { label: "Archive", tone: "bt-r", onClick: (ids) => ids.forEach((id) => actions.archiveEntity("document", id)) },
               { label: "Restore Archived", onClick: () => archived.forEach((document) => actions.restoreEntity("document", document.id)) },
@@ -3772,6 +3826,12 @@ function AdminPage() {
   return (
     <div className="oy fin">
       {settingsMessage ? <div className="notice-banner mb8">{settingsMessage}</div> : null}
+      <div className="fx mb8" style={{ gap: 8, alignItems: "center", justifyContent: "flex-end" }}>
+        <span className="xs ct3">Last saved</span>
+        <Badge tone={persistence?.lastPersistedAt ? "passed" : "medium"}>
+          {persistence?.lastPersistedAt ? new Date(persistence.lastPersistedAt).toLocaleTimeString("en-AU") : "pending"}
+        </Badge>
+      </div>
       {persistence?.persistenceDegraded || state.persistenceDegraded ? (
         <div className="notice-banner mb8">
           This browser cannot reliably store the current project volume. Use Chrome or enable IndexedDB storage before adding more photos, audio, or PDFs. Your latest work may not be saved.
