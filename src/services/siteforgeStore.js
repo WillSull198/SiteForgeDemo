@@ -1240,6 +1240,19 @@ function buildSearchResults(state, query) {
   if (!q) {
     return [];
   }
+  const queryTokens = q.split(/\s+/).filter(Boolean);
+  const documentFileFor = (item) => (item.fileId ? state.files?.records?.find((entry) => entry.id === item.fileId) : null);
+  const documentPageMatch = (item) => {
+    const file = documentFileFor(item);
+    const pages = file?.textPages || [];
+    const exact = pages.find((page) => String(page?.text || "").toLowerCase().includes(q));
+    if (exact) return exact.pageNumber || pages.indexOf(exact) + 1;
+    const tokenMatch = pages.find((page) => {
+      const text = String(page?.text || "").toLowerCase();
+      return queryTokens.length && queryTokens.every((token) => text.includes(token));
+    });
+    return tokenMatch ? tokenMatch.pageNumber || pages.indexOf(tokenMatch) + 1 : null;
+  };
 
   const collections = [
     {
@@ -1281,8 +1294,17 @@ function buildSearchResults(state, query) {
       type: "Documents",
       items: state.documents,
       label: (item) => item.title,
-      haystack: (item) => [item.title, item.category, item.rev, item.tags, item.impactAnalysis?.summary],
-      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "docs", entityId: item.id }),
+      haystack: (item) => {
+        const file = documentFileFor(item);
+        const fileText = file?.extractedText || "";
+        const pageText = (file?.textPages || []).map((page) => page.text || "").join(" ");
+        return [item.title, item.category, item.rev, item.tags, item.manualSearchDescription, item.impactAnalysis?.summary, fileText.slice(0, 50000), pageText.slice(0, 50000)];
+      },
+      route: (item) => ({ kind: "internal", siteId: item.siteId, page: "docs", entityId: item.id, pageNumber: documentPageMatch(item) }),
+      meta: (item) => {
+        const pageNumber = documentPageMatch(item);
+        return pageNumber ? { subtitle: `PDF text match · page ${pageNumber}` } : {};
+      },
     },
     {
       type: "Contracts",
@@ -1398,20 +1420,24 @@ function buildSearchResults(state, query) {
         .filter((entry) => entry.score >= 0)
         .sort((left, right) => right.score - left.score)
         .slice(0, 6)
-        .map(({ item }) => ({
-          id: item.id || item.docId || item.number || item.threadId,
-          title: collection.label(item),
-          route: collection.route(item),
-          subtitle:
-            item.status ||
-            item.role ||
-            item.category ||
-            item.type ||
-            item.region ||
-            item.period ||
-            item.threadType ||
-            "",
-        })),
+        .map(({ item }) => {
+          const meta = collection.meta ? collection.meta(item) : {};
+          return {
+            id: item.id || item.docId || item.number || item.threadId,
+            title: collection.label(item),
+            route: collection.route(item),
+            subtitle:
+              meta.subtitle ||
+              item.status ||
+              item.role ||
+              item.category ||
+              item.type ||
+              item.region ||
+              item.period ||
+              item.threadType ||
+              "",
+          };
+        }),
     }))
     .filter((group) => group.results.length);
 }
@@ -8781,6 +8807,43 @@ AU date format DD/MM/YYYY. Amounts in AUD. Use formal contract language.`,
             siteId: document.siteId,
           });
         });
+      },
+      async reExtractDocumentText(documentId) {
+        const snapshot = stateRef.current;
+        const document = snapshot.documents.find((entry) => entry.id === documentId);
+        const existingFile = document?.fileId ? snapshot.files.records.find((entry) => entry.id === document.fileId) : null;
+        if (!document || !existingFile) return { ok: false, error: "Document file not found." };
+        const blob = await getBlob(existingFile.id);
+        if (!blob) return { ok: false, error: "Stored file blob not found." };
+        const file = new File([blob], existingFile.name || `${document.title}.pdf`, { type: existingFile.type || blob.type || "application/pdf" });
+        const metadata = await uploadFile({
+          file,
+          uploadedBy: snapshot.session.userId,
+          siteId: document.siteId,
+          entityType: "document",
+          entityId: document.id,
+        });
+        setState((previous) => {
+          const next = cloneState(previous);
+          const helpers = createHelpers(previous, next);
+          const target = next.documents.find((entry) => entry.id === documentId);
+          if (!target) return normaliseState(next);
+          const before = { fileId: target.fileId, extractionStatus: existingFile.extractionStatus || "not-run" };
+          next.files.records.unshift(metadata);
+          target.fileId = metadata.id;
+          target.updatedAt = nowStamp();
+          target.tags = [...new Set([...(target.tags || []), metadata.extractionStatus, metadata.classification].filter(Boolean))];
+          helpers.addAudit({
+            action: "document.text-reextract",
+            entityType: "document",
+            entityId: target.id,
+            before,
+            after: { fileId: metadata.id, extractionStatus: metadata.extractionStatus },
+            siteId: target.siteId,
+          });
+          return normaliseState(next);
+        });
+        return { ok: true, fileId: metadata.id, extractionStatus: metadata.extractionStatus };
       },
       updateDocumentSearchDescription(documentId, description) {
         mutate((next, helpers) => {

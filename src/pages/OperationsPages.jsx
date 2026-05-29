@@ -2313,6 +2313,18 @@ function DocumentsPage() {
     setManualSearchDescription(selected?.manualSearchDescription || "");
   }, [selected?.id, selected?.manualSearchDescription]);
   const fileForDocument = (document) => (document?.fileId ? state.files.records.find((entry) => entry.id === document.fileId) : null);
+  useEffect(() => {
+    const route = state.session.route;
+    if (route?.page !== "docs" || !route.entityId) return;
+    const routedDocument = state.documents.find((document) => document.id === route.entityId);
+    if (!routedDocument) return;
+    setSelectedId(routedDocument.id);
+    const routedFile = fileForDocument(routedDocument);
+    if (route.pageNumber && routedFile) {
+      setPdfViewerPage(Number(route.pageNumber) || 1);
+      setPdfViewerFile(routedFile);
+    }
+  }, [state.session.route?.entityId, state.session.route?.page, state.session.route?.pageNumber, state.documents, state.files.records]);
   const queryTokens = (query) => query.toLowerCase().split(/\s+/).filter(Boolean);
   const scorePlanDocument = (document, file, query) => {
     const tokens = queryTokens(query);
@@ -2556,6 +2568,14 @@ ${JSON.stringify(documentContext)}`,
               { label: "Restore Archived", onClick: () => archived.forEach((document) => actions.restoreEntity("document", document.id)) },
             ]}
             rowActions={[
+              {
+                label: "Re-extract text",
+                when: (row) => {
+                  const file = fileForDocument(row);
+                  return !file?.extractedText || file?.extractionStatus !== "complete";
+                },
+                onClick: (row) => actions.reExtractDocumentText(row.id),
+              },
               { label: "Archive", tone: "bt-r", onClick: (row) => actions.archiveEntity("document", row.id) },
               { label: "Duplicate", onClick: (row) => actions.duplicateEntity("document", row.id) },
             ]}
