@@ -616,9 +616,36 @@ function TasksPage() {
   const siteId = state.session.siteId;
   const [open, setOpen] = useState(false);
   const [editId, setEditId] = useState(null);
-  const [form, setForm] = useState({ title: "", description: "", trade: "General", priority: "medium", dueDate: "" });
+  const [form, setForm] = useState({ title: "", description: "", trade: "General", priority: "medium", dueDate: "", companyId: "" });
+  const [pendingTask, setPendingTask] = useState(null);
   const tasks = state.tasks.filter((task) => task.siteId === siteId && !task.archived);
   const editTask = tasks.find((task) => task.id === editId) || null;
+  const companyOptions = state.companies || [];
+  const resetTaskForm = () => setForm({ title: "", description: "", trade: "General", priority: "medium", dueDate: "", companyId: "" });
+  const complianceIssuesForTask = (payload) => {
+    if (!payload.companyId) return [];
+    const passport = state.passports.records.find((entry) => entry.companyId === payload.companyId && (!entry.siteId || entry.siteId === siteId));
+    return requiredDocsForTrade(passport?.trade || payload.trade)
+      .map((requirement) => {
+        const latest = state.complianceDocuments.find(
+          (doc) => doc.companyId === payload.companyId && doc.docType === requirement.docType && (requirement.scope === "company" || doc.linkedJobIds?.includes(siteId) || doc.siteId === siteId),
+        );
+        const status = complianceStatusFor(latest);
+        return status === "valid" ? null : `${requirement.docType}: ${complianceLabel(status, latest)}`;
+      })
+      .filter(Boolean);
+  };
+  const submitTask = (payload, { override = false } = {}) => {
+    const complianceIssues = complianceIssuesForTask(payload);
+    if (complianceIssues.length && !override) {
+      setPendingTask({ payload, complianceIssues });
+      return;
+    }
+    actions.addTask({ ...payload, complianceOverride: override });
+    setOpen(false);
+    setPendingTask(null);
+    resetTaskForm();
+  };
 
   useEffect(() => {
     if (editTask) {
@@ -628,6 +655,7 @@ function TasksPage() {
         trade: editTask.trade,
         priority: editTask.priority || "medium",
         dueDate: editTask.dueDate || "",
+        companyId: editTask.companyId || "",
       });
     }
   }, [editTask]);
@@ -720,6 +748,20 @@ function TasksPage() {
           </div>
         </div>
         <div className="ff">
+          <label>Company / subcontractor</label>
+          <select value={form.companyId} onChange={(event) => setForm((current) => ({ ...current, companyId: event.target.value }))}>
+            <option value="">Unassigned / internal crew</option>
+            {companyOptions.map((company) => (
+              <option key={company.id} value={company.id}>
+                {company.name}
+              </option>
+            ))}
+          </select>
+          <div className="xs ct3" style={{ marginTop: 4 }}>
+            Assigning to a subcontractor checks mandatory compliance documents before the task is created.
+          </div>
+        </div>
+        <div className="ff">
           <label>Due Date</label>
           <input type="date" value={form.dueDate} onChange={(event) => setForm((current) => ({ ...current, dueDate: event.target.value }))} />
         </div>
@@ -728,12 +770,29 @@ function TasksPage() {
           <Button
             tone="bt-p"
             onClick={() => {
-              actions.addTask(form);
-              setOpen(false);
-              setForm({ title: "", description: "", trade: "General", priority: "medium", dueDate: "" });
+              submitTask(form);
             }}
           >
             Create Task
+          </Button>
+        </div>
+      </Modal>
+      <Modal open={Boolean(pendingTask)} close={() => setPendingTask(null)} title="Compliance warning">
+        <div className="banner critical mb8">
+          This company has mandatory compliance items that are not current. Review before assigning site work.
+        </div>
+        <div className="list-stack">
+          {(pendingTask?.complianceIssues || []).map((issue) => (
+            <div className="linked-row" key={issue}>
+              <span>{issue}</span>
+              <Badge tone="critical">attention</Badge>
+            </div>
+          ))}
+        </div>
+        <div className="fa">
+          <Button onClick={() => setPendingTask(null)}>Cancel assignment</Button>
+          <Button tone="bt-r" onClick={() => submitTask(pendingTask.payload, { override: true })}>
+            Proceed with override
           </Button>
         </div>
       </Modal>
