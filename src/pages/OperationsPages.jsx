@@ -3,7 +3,7 @@
    plan search, annotations, and settings persistence. */
 
 import { useEffect, useMemo, useState } from "react";
-import { flagBudgetAnomaly, suggestRFI, suggestRfiSmart } from "../services/aiDraftService";
+import { extractSaveFieldsFallback, extractSaveFieldsSmart, flagBudgetAnomaly, suggestRFI, suggestRfiSmart } from "../services/aiDraftService";
 import { AI_PROVIDERS, AI_STORAGE_KEYS, DEFAULT_AI_MODELS, askSiteForgeAi, getStoredAiConfig, normaliseAiProvider, normaliseOpenAiProxyUrl, testAiConnection as runProviderConnectionTest, verifyOpenAiProxy } from "../services/aiService";
 import DataTable from "../components/DataTable";
 import FileDropZone from "../components/FileDropZone";
@@ -1814,8 +1814,73 @@ function DiaryPage() {
   const [rawNote, setRawNote] = useState("");
   const [form, setForm] = useState({ date: "", weather: "", crew: "", summary: "", safety: "", delays: "", rainEvent: false, photos: [], voiceNotes: [] });
   const [variationForm, setVariationForm] = useState({ title: "", description: "", value: "", days: "", reason: "", trade: "General", priority: "medium", templateId: "", photos: [] });
+  const [transcriptRecord, setTranscriptRecord] = useState(null);
+  const [transcriptStatus, setTranscriptStatus] = useState("");
   const entries = state.diary.filter((entry) => entry.siteId === siteId);
   const variationTemplates = state.contractTemplates.filter((template) => template.status !== "archived" && ["Variation", "Selection Upgrade", "Scope Clarification"].includes(template.type));
+  const integrationSettings = state.device?.settings?.integrations || state.settings?.integrations || {};
+  const transcriptTargets = ["problem", "rfi", "variation", "procurement"];
+  const latestTranscript = (form.voiceNotes || []).map((note) => note.transcript).filter(Boolean).join("\n");
+
+  const autofillDiaryFromTranscript = async () => {
+    if (!latestTranscript.trim()) return;
+    setTranscriptStatus("Autofilling from voice note...");
+    const extracted = await extractSaveFieldsSmart({
+      target: "diary",
+      userMessage: "Parse this voice note into site diary fields.",
+      aiResponse: latestTranscript,
+      projectContext: { orgMode: state.org?.mode, site: state.sites.find((site) => site.id === siteId) },
+      integrationSettings,
+    });
+    setForm((current) => ({
+      ...current,
+      weather: current.weather || extracted.weather || "",
+      crew: current.crew || extracted.crew || "",
+      summary: current.summary || extracted.description || extracted.title || latestTranscript,
+      safety: current.safety || extracted.safety || "",
+      delays: current.delays || extracted.delays || "Nil",
+      rainEvent: current.rainEvent || Boolean(extracted.rainEvent),
+    }));
+    setTranscriptStatus(`Filled from voice note - ${aiSourceLabel(extracted.source)}. Review before saving.`);
+  };
+
+  const openTranscriptRecord = async (entry, note, target) => {
+    const userMessage = `Create a ${target} from this diary voice transcript.`;
+    const linkedRecords = entry ? [{ type: "diary", id: entry.id, label: `Diary ${entry.date}`, siteId: entry.siteId }] : [];
+    const fallback = { ...extractSaveFieldsFallback(target, userMessage, note.transcript || ""), linkedRecords };
+    setTranscriptRecord({ target, entry, note, fields: fallback, loading: true });
+    const extracted = await extractSaveFieldsSmart({
+      target,
+      userMessage,
+      aiResponse: note.transcript || "",
+      projectContext: { orgMode: state.org?.mode, site: state.sites.find((site) => site.id === (entry?.siteId || siteId)), diary: entry },
+      integrationSettings,
+    });
+    setTranscriptRecord((current) =>
+      current?.note?.id === note.id && current.target === target ? { ...current, fields: { ...extracted, linkedRecords }, loading: false } : current,
+    );
+  };
+
+  const updateTranscriptField = (key, value) => {
+    setTranscriptRecord((current) => (current ? { ...current, fields: { ...(current.fields || {}), [key]: value } } : current));
+  };
+
+  const confirmTranscriptRecord = () => {
+    if (!transcriptRecord) return;
+    actions.saveAiChatRecord({
+      target: transcriptRecord.target,
+      fields: transcriptRecord.fields,
+      aiOrigin: {
+        chatId: `voice-${transcriptRecord.note.id}`,
+        userMessage: "Voice transcript conversion",
+        generatedAt: transcriptRecord.note.createdAt,
+        source: transcriptRecord.fields?.source || "voice-transcript",
+        diaryId: transcriptRecord.entry?.id,
+        voiceNoteId: transcriptRecord.note.id,
+      },
+    });
+    setTranscriptRecord(null);
+  };
 
   return (
     <div className="oy fin">
@@ -1839,7 +1904,21 @@ function DiaryPage() {
           {entry.voiceNotes?.length ? (
             <div style={{ marginTop: 10 }}>
               {entry.voiceNotes.map((note) => (
-                <AudioNotePlayer key={note.id} note={note} />
+                <div className="act" key={note.id}>
+                  <div style={{ flex: 1 }}>
+                    <AudioNotePlayer note={note} />
+                    {note.transcript ? (
+                      <div className="fx" style={{ gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                        <span className="xs ct3">Create from transcript:</span>
+                        {transcriptTargets.map((target) => (
+                          <Button key={`${note.id}-${target}`} small onClick={() => openTranscriptRecord(entry, note, target)}>
+                            {target === "rfi" ? "RFI" : target === "procurement" ? "Procurement note" : target[0].toUpperCase() + target.slice(1)}
+                          </Button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
               ))}
             </div>
           ) : null}
@@ -1917,13 +1996,19 @@ function DiaryPage() {
 	        <div className="ff">
 	          <label>Voice note</label>
 	          <VoiceRecorder onVoiceNoteAdded={(note) => setForm((current) => ({ ...current, voiceNotes: [...(current.voiceNotes || []), note] }))} />
-	          {form.voiceNotes?.length ? (
-	            <div className="list-stack" style={{ marginTop: 8 }}>
-	              {form.voiceNotes.map((note) => (
-	                <AudioNotePlayer key={note.id} note={note} />
-	              ))}
-	            </div>
-	          ) : null}
+		          {form.voiceNotes?.length ? (
+		            <div className="list-stack" style={{ marginTop: 8 }}>
+		              {form.voiceNotes.map((note) => (
+		                <AudioNotePlayer key={note.id} note={note} />
+		              ))}
+                  {latestTranscript ? (
+                    <Button small tone="bt-p" icon={Icons.zap} onClick={autofillDiaryFromTranscript}>
+                      Autofill diary from transcript
+                    </Button>
+                  ) : null}
+                  {transcriptStatus ? <div className="xs ct3">{transcriptStatus}</div> : null}
+		            </div>
+		          ) : null}
 	        </div>
 	        <div className="fa">
           <Button onClick={() => setOpen(false)}>Cancel</Button>
@@ -1937,8 +2022,76 @@ function DiaryPage() {
 	            }}
           >
             Save Entry
-          </Button>
-        </div>
+	          </Button>
+	        </div>
+	      </Modal>
+      <Modal open={Boolean(transcriptRecord)} close={() => setTranscriptRecord(null)} title={`Create ${transcriptRecord?.target || "record"} from transcript`} wide>
+        {transcriptRecord ? (
+          <div>
+            <div className="fx mb8" style={{ gap: 8, alignItems: "center" }}>
+              <Badge tone={transcriptRecord.fields?.source === "openai" || transcriptRecord.fields?.source === "claude" ? "passed" : "medium"}>
+                {transcriptRecord.loading ? "Extracting fields..." : aiSourceLabel(transcriptRecord.fields?.source)}
+              </Badge>
+              <span className="xs ct3">Source: diary voice note. Review before saving.</span>
+            </div>
+            <div className="ff">
+              <label>Title</label>
+              <input value={transcriptRecord.fields?.title || ""} onChange={(event) => updateTranscriptField("title", event.target.value)} />
+            </div>
+            <div className="ff">
+              <label>Description</label>
+              <textarea value={transcriptRecord.fields?.description || ""} onChange={(event) => updateTranscriptField("description", event.target.value)} />
+            </div>
+            <div className="g2">
+              <div className="ff">
+                <label>Cost impact</label>
+                <input value={transcriptRecord.fields?.costImpact || ""} onChange={(event) => updateTranscriptField("costImpact", event.target.value)} />
+              </div>
+              <div className="ff">
+                <label>Time impact (days)</label>
+                <input value={transcriptRecord.fields?.timeImpact || ""} onChange={(event) => updateTranscriptField("timeImpact", event.target.value)} />
+              </div>
+            </div>
+            <div className="g2">
+              <div className="ff">
+                <label>Trade</label>
+                <input value={transcriptRecord.fields?.trade || ""} onChange={(event) => updateTranscriptField("trade", event.target.value)} />
+              </div>
+              <div className="ff">
+                <label>Priority</label>
+                <select value={transcriptRecord.fields?.priority || "medium"} onChange={(event) => updateTranscriptField("priority", event.target.value)}>
+                  {["low", "medium", "high", "critical"].map((priority) => (
+                    <option key={priority}>{priority}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {transcriptRecord.target === "rfi" ? (
+              <div className="ff">
+                <label>To</label>
+                <input value={transcriptRecord.fields?.to || ""} onChange={(event) => updateTranscriptField("to", event.target.value)} />
+              </div>
+            ) : null}
+            {transcriptRecord.target === "procurement" ? (
+              <div className="g2">
+                <div className="ff">
+                  <label>Quantity</label>
+                  <input value={transcriptRecord.fields?.quantity || ""} onChange={(event) => updateTranscriptField("quantity", event.target.value)} />
+                </div>
+                <div className="ff">
+                  <label>Supplier</label>
+                  <input value={transcriptRecord.fields?.supplier || ""} onChange={(event) => updateTranscriptField("supplier", event.target.value)} />
+                </div>
+              </div>
+            ) : null}
+            <div className="fa">
+              <Button onClick={() => setTranscriptRecord(null)}>Cancel</Button>
+              <Button tone="bt-p" onClick={confirmTranscriptRecord} disabled={transcriptRecord.loading}>
+                Save record
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </Modal>
       <Modal open={Boolean(variationEntry)} close={() => setVariationEntry(null)} title="Convert Diary Entry to Variation" wide>
         <div className="ff">
