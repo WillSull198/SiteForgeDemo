@@ -9,6 +9,128 @@ const formatCurrency = (value = 0) =>
 
 const sentence = (value) => value.replace(/\s+/g, " ").trim();
 
+const titleFromText = (text = "", fallback = "AI drafted record") => {
+  const firstLine = String(text)
+    .split(/\n+/)
+    .map((line) => line.replace(/^#+\s*/, "").trim())
+    .find(Boolean);
+  const firstSentence = String(text).split(/[.!?]\s/).find(Boolean);
+  return sentence((firstLine || firstSentence || fallback).replace(/^title:\s*/i, "")).slice(0, 96) || fallback;
+};
+
+const numberFromMatch = (match) => {
+  if (!match) return 0;
+  const raw = String(match[1] || match[0] || "").replace(/[$,\s]/g, "");
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return 0;
+  return /k\b/i.test(match[0]) ? value * 1000 : value;
+};
+
+export function detectSaveTargets(userMessage = "", aiResponse = "") {
+  const text = `${userMessage} ${aiResponse}`.toLowerCase();
+  const targets = [];
+  if (/variation|change|extra (work|cost)|scope change/.test(text)) targets.push("variation");
+  if (/rfi|request for info|request for information|clarif/.test(text)) targets.push("rfi");
+  if (/diary|today on site|day note|weather|crew/.test(text)) targets.push("diary");
+  if (/problem|issue|defect|fail|non[-\s]?conformance/.test(text)) targets.push("problem");
+  if (/procurement|delivery|supplier|order|material/.test(text)) targets.push("procurement");
+  if (/client message|notify|email draft|follow up|follow-up|reminder/.test(text)) targets.push("clientMessage");
+  return targets.length ? [...new Set(targets)] : ["diary"];
+}
+
+export function extractSaveFieldsFallback(target, userMessage = "", aiResponse = "") {
+  const text = sentence(`${userMessage}\n${aiResponse}`);
+  const costMatch = text.match(/(?:\$|aud\s*)\s*([\d,]+(?:\.\d+)?)(?:\s*k)?/i) || text.match(/([\d,]+(?:\.\d+)?)\s*(?:dollars|aud)/i);
+  const daysMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:calendar\s*)?(?:day|days|d)\b/i);
+  const priority = /critical|urgent|unsafe|stop work/i.test(text) ? "critical" : /high|major|significant/i.test(text) ? "high" : "medium";
+  const tradeMatch = text.match(/\b(carpentry|carpenter|plumbing|plumber|electrical|electrician|concrete|concreter|waterproofing|roofing|framing|excavation|tiling)\b/i);
+  const common = {
+    title: titleFromText(aiResponse || userMessage, target === "clientMessage" ? "Client follow-up draft" : "AI drafted record"),
+    description: aiResponse || userMessage,
+    costImpact: numberFromMatch(costMatch),
+    timeImpact: daysMatch ? Number(daysMatch[1]) : 0,
+    trade: tradeMatch ? tradeMatch[0].replace(/er$/i, "ing") : "General",
+    priority,
+  };
+
+  if (target === "diary") {
+    return {
+      ...common,
+      weather: /rain|wet weather|storm/i.test(text) ? "Rain / wet weather" : "",
+      crew: Number(text.match(/(\d+)\s*(?:person|people|crew|carpenter|worker|trade)/i)?.[1] || 0),
+      safety: /unsafe|incident|near miss|injury/i.test(text) ? common.description : "",
+      delays: /delay|held up|stopped|sent home|late/i.test(text) ? common.description : "Nil",
+      rainEvent: /rain|wet weather|storm/i.test(text),
+    };
+  }
+
+  if (target === "rfi") {
+    return { ...common, to: /engineer|structural/i.test(text) ? "Structural Engineer" : /architect|drawing|detail/i.test(text) ? "Architect" : "Consultant" };
+  }
+
+  if (target === "procurement") {
+    return { ...common, item: common.title, supplier: "", quantity: "1", cost: common.costImpact };
+  }
+
+  return common;
+}
+
+export async function extractSaveFieldsSmart({ target, userMessage = "", aiResponse = "", projectContext = {}, integrationSettings = {} }) {
+  const fallback = extractSaveFieldsFallback(target, userMessage, aiResponse);
+  const aiConfig = getStoredAiConfig(integrationSettings);
+  if (!aiConfig.apiKey) return { ...fallback, source: "local-template" };
+
+  try {
+    const result = await askSiteForgeAi({
+      userMessage: `Extract structured fields from this SiteForge assistant response so the user can review and save it as a ${target}.
+
+User asked:
+${userMessage}
+
+Assistant response:
+${aiResponse}
+
+Reply ONLY as JSON:
+{
+  "title": "short title",
+  "description": "clear record description",
+  "costImpact": 0,
+  "timeImpact": 0,
+  "trade": "General",
+  "priority": "low|medium|high|critical",
+  "weather": "",
+  "crew": 0,
+  "safety": "",
+  "delays": "",
+  "rainEvent": false,
+  "to": "Consultant",
+  "supplier": "",
+  "quantity": "1"
+}`,
+      projectContext,
+      provider: aiConfig.provider,
+      apiKey: aiConfig.apiKey,
+      model: aiConfig.model,
+      openaiProxyUrl: aiConfig.openaiProxyUrl,
+      allowInDemo: true,
+    });
+    if (result.source !== "claude" && result.source !== "openai") return { ...fallback, source: result.source || "local-template" };
+    const match = result.text.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(match ? match[0] : result.text);
+    return {
+      ...fallback,
+      ...parsed,
+      costImpact: Number(parsed.costImpact ?? fallback.costImpact ?? 0),
+      timeImpact: Number(parsed.timeImpact ?? fallback.timeImpact ?? 0),
+      crew: Number(parsed.crew ?? fallback.crew ?? 0),
+      rainEvent: Boolean(parsed.rainEvent ?? fallback.rainEvent),
+      source: result.source,
+    };
+  } catch (error) {
+    return { ...fallback, source: "ai-parse-error", error: error?.message || "Could not extract fields." };
+  }
+}
+
 const buildReason = (sourceEntity, type) => {
   if (!sourceEntity) {
     return "The builder is recording a formal change so cost, time, and responsibility stay clear for all parties.";

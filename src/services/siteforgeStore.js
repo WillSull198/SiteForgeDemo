@@ -165,6 +165,7 @@ const MODE_ENTITY_PATHS = [
   "presence.siteCompliance",
   "documents",
   "messages",
+  "messageDrafts",
   "invoices",
   "notifications.items",
   "notifications.eventLog",
@@ -430,6 +431,7 @@ function createBlankSlate() {
     presence: { anomalies: [], shifts: [], complianceState: {}, records: [], events: [], exports: [], siteCompliance: [] },
     documents: [],
     messages: [],
+    messageDrafts: [],
     invoices: [],
     notifications: { items: [], eventLog: [] },
     emailQueue: [],
@@ -749,6 +751,7 @@ function scopeOrgRecords(next) {
     "contractTemplates",
     "complianceDocuments",
     "notifications.items",
+    "messageDrafts",
     "auditTrail",
   ].forEach((path) => {
     const parts = path.split(".");
@@ -1096,6 +1099,7 @@ function normaliseState(state) {
         messages: Array.isArray(thread.messages) ? thread.messages.slice(-80) : [],
       }))
     : [];
+  next.messageDrafts = Array.isArray(next.messageDrafts) ? next.messageDrafts.slice(0, 120) : [];
 
   next.session.userId = userId;
   next.session.siteId = accessibleSiteIds.includes(next.session.siteId) ? next.session.siteId : fallbackSiteId;
@@ -4063,6 +4067,194 @@ export function SiteForgeProvider({ children }) {
             route: { kind: "internal", siteId: problem.siteId, page: "probs", entityId: problem.id },
           });
         });
+      },
+      saveAiChatRecord({ target, fields = {}, aiOrigin = {} }) {
+        let result = { ok: false, error: "No record saved." };
+        mutate((next, helpers) => {
+          const role = next.session.role;
+          const internal = ["Supervisor", "Project Manager", "Contract Admin", "Director"].includes(role);
+          const subcontractorAllowed = role === "Subcontractor" && ["rfi", "problem"].includes(target);
+          if (!internal && !subcontractorAllowed) {
+            result = { ok: false, error: "This role cannot save AI chat output as project records." };
+            return;
+          }
+
+          const siteId = fields.siteId || next.session.siteId || next.sites[0]?.id;
+          const title = String(fields.title || "AI drafted record").trim();
+          const description = String(fields.description || fields.summary || title).trim();
+          const priority = fields.priority || "medium";
+          const createdAt = nowStamp();
+          const origin = {
+            ...aiOrigin,
+            savedAt: createdAt,
+            source: aiOrigin.source || fields.source || "ai-chat",
+          };
+          const auditAfter = { target, title, aiChatId: origin.chatId || null };
+          let saved = null;
+          let route = null;
+
+          if (target === "variation") {
+            const variation = {
+              id: randomId("var"),
+              siteId,
+              number: nextScopedNumber(next, "variations", siteId, "VO"),
+              title,
+              sourceType: "ai-chat",
+              sourceId: origin.chatId || randomId("ai-chat"),
+              status: "submitted",
+              priority,
+              value: Number(fields.costImpact ?? fields.value ?? 0),
+              days: Number(fields.timeImpact ?? fields.days ?? 0),
+              description,
+              reason: fields.reason || "AI assistant draft reviewed and saved by the builder.",
+              templateId: fields.templateId || next.settings?.contractDefaults?.standardVariationTemplate || null,
+              trade: fields.trade || "General",
+              createdBy: helpers.actor.id,
+              clientApprovalId: null,
+              contractPackId: null,
+              linkedRecords: [],
+              aiOrigin: origin,
+              createdAt,
+            };
+            next.variations.unshift(variation);
+            saved = { type: "variation", id: variation.id, label: variation.number };
+            route = { kind: "internal", siteId, page: "vos", entityId: variation.id };
+          } else if (target === "rfi") {
+            const rfi = {
+              id: randomId("rfi"),
+              siteId,
+              number: nextScopedNumber(next, "rfis", siteId, "RFI"),
+              title,
+              trade: fields.trade || "General",
+              fromUserId: helpers.actor.id,
+              to: fields.to || "Consultant",
+              status: "open",
+              priority,
+              dueDate: fields.dueDate || addDays(formatDate(), 4),
+              costImpact: Number(fields.costImpact || 0),
+              timeImpact: Number(fields.timeImpact || 0),
+              scopeCompanyId: helpers.actor.companyId,
+              description,
+              sourceType: "ai-chat",
+              sourceId: origin.chatId || null,
+              linkedRecords: [],
+              responses: [],
+              aiOrigin: origin,
+              createdAt,
+            };
+            next.rfis.unshift(rfi);
+            saved = { type: "rfi", id: rfi.id, label: rfi.number };
+            route = { kind: "internal", siteId, page: "rfis", entityId: rfi.id };
+          } else if (target === "diary") {
+            const entry = {
+              id: randomId("dia"),
+              siteId,
+              date: fields.date || formatDate(),
+              weather: fields.weather || "Not specified",
+              crew: Number(fields.crew || 0),
+              summary: description,
+              safety: fields.safety || "",
+              delays: fields.delays || "Nil",
+              photos: [],
+              voiceNotes: [],
+              rainEvent: Boolean(fields.rainEvent),
+              linkedRecords: [],
+              aiOrigin: origin,
+              createdAt,
+              updatedAt: createdAt,
+            };
+            next.diary.unshift(entry);
+            saved = { type: "diary", id: entry.id, label: "Diary entry" };
+            route = { kind: "internal", siteId, page: "diary", entityId: entry.id };
+          } else if (target === "problem") {
+            const problem = {
+              id: randomId("prob"),
+              siteId,
+              title,
+              category: fields.category || "Field issue",
+              reportedBy: helpers.actor.id,
+              priority,
+              status: "open",
+              costImpact: Number(fields.costImpact || 0),
+              timeImpact: Number(fields.timeImpact || 0),
+              linkedApprovals: [],
+              linkedRecords: [],
+              photos: [],
+              aiOrigin: origin,
+              thread: [{ id: randomId("pr-msg"), by: actorName(helpers.actor), role: helpers.actor.role, at: createdAt, body: description }],
+            };
+            next.problems.unshift(problem);
+            saved = { type: "problem", id: problem.id, label: problem.title };
+            route = { kind: "internal", siteId, page: "probs", entityId: problem.id };
+          } else if (target === "procurement") {
+            const item = {
+              id: randomId("proc"),
+              siteId,
+              item: fields.item || title,
+              quantity: fields.quantity || "1",
+              requestedBy: helpers.actor.id,
+              status: "requested",
+              date: formatDate(),
+              eta: fields.eta || "",
+              supplier: fields.supplier || "",
+              poNumber: "",
+              cost: Number(fields.cost ?? fields.costImpact ?? 0),
+              linkedTaskIds: [],
+              schedulePhaseId: null,
+              linkedApprovalId: null,
+              linkedRecords: [],
+              notes: description,
+              aiOrigin: origin,
+            };
+            next.procurement.unshift(item);
+            saved = { type: "procurement", id: item.id, label: item.item };
+            route = { kind: "internal", siteId, page: "mats", entityId: item.id };
+          } else if (target === "clientMessage") {
+            const draft = {
+              id: randomId("msg-draft"),
+              siteId,
+              title,
+              body: description,
+              target: fields.to || "Client",
+              status: "draft",
+              aiOrigin: origin,
+              createdBy: helpers.actor.id,
+              createdAt,
+            };
+            next.messageDrafts.unshift(draft);
+            saved = { type: "clientMessage", id: draft.id, label: "Client message draft" };
+            route = { kind: "internal", siteId, page: "admin", entityId: draft.id };
+          }
+
+          if (!saved) {
+            result = { ok: false, error: `Unsupported save target: ${target}` };
+            return;
+          }
+
+          helpers.addAudit({
+            action: "ai-chat.save-record",
+            entityType: saved.type,
+            entityId: saved.id,
+            before: null,
+            after: auditAfter,
+            siteId,
+          });
+          helpers.emit({
+            eventType: "ai-chat.saved",
+            title: `Saved AI draft as ${saved.label}`,
+            body: title,
+            siteId,
+            entityType: saved.type,
+            entityId: saved.id,
+            recipients: [helpers.actor.id],
+            route,
+          });
+          result = { ok: true, ...saved, route };
+        });
+        if (result.route) {
+          setTimeout(() => navigate(result.route), 0);
+        }
+        return result;
       },
       replyProblem(problemId, message) {
         mutate((next, helpers) => {

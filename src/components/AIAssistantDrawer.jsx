@@ -3,11 +3,27 @@
    SiteForge's local drafting intelligence during demos. */
 
 import { useMemo, useState } from "react";
+import { detectSaveTargets, extractSaveFieldsFallback, extractSaveFieldsSmart } from "../services/aiDraftService";
 import { askSiteForgeAi, getStoredAiConfig } from "../services/aiService";
 import { mustHandUpForApproval, routeKindForRole } from "../services/permissions";
 import { useSiteForge } from "../services/siteforgeStore";
 import { Icons, renderIcon } from "./icons";
-import { Button, Badge } from "./ui";
+import { Button, Badge, Modal } from "./ui";
+
+const SAVE_TARGET_LABELS = {
+  variation: "Save as Variation",
+  rfi: "Save as RFI",
+  diary: "Save as Diary",
+  problem: "Save as Problem",
+  procurement: "Save as Procurement",
+  clientMessage: "Save as Client Message",
+};
+
+function canSaveAiTarget(role, target) {
+  if (role === "Client" || role === "Worker") return false;
+  if (role === "Subcontractor") return ["rfi", "problem"].includes(target);
+  return ["Supervisor", "Project Manager", "Contract Admin", "Director"].includes(role);
+}
 
 function buildSuggestions(state, derived, actions) {
   const siteId = state.session.siteId;
@@ -157,6 +173,8 @@ export default function AIAssistantDrawer({ open, onClose }) {
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [saveDraft, setSaveDraft] = useState(null);
+  const [saveError, setSaveError] = useState("");
   const suggestions = useMemo(() => buildSuggestions(state, derived, actions), [actions, derived, state]);
   const integrationSettings = state.device?.settings?.integrations || state.settings?.integrations || {};
   const aiConfig = getStoredAiConfig(integrationSettings);
@@ -185,6 +203,44 @@ export default function AIAssistantDrawer({ open, onClose }) {
       activeApprovals: state.approvals.filter((entry) => entry.siteId === siteId && !["signed", "archived", "declined"].includes(entry.status)).slice(0, 5),
     };
   }, [state]);
+
+  const openSaveDraft = async (entry, target) => {
+    const fallback = extractSaveFieldsFallback(target, entry.userMessage || "", entry.text || "");
+    setSaveError("");
+    setSaveDraft({ target, entry, fields: fallback, loading: true });
+    const extracted = await extractSaveFieldsSmart({
+      target,
+      userMessage: entry.userMessage || "",
+      aiResponse: entry.text || "",
+      projectContext: { ...projectContext, orgMode: state.org?.mode },
+      integrationSettings,
+    });
+    setSaveDraft((current) => (current?.entry?.id === entry.id && current.target === target ? { ...current, fields: extracted, loading: false } : current));
+  };
+
+  const updateSaveField = (key, value) => {
+    setSaveDraft((current) => (current ? { ...current, fields: { ...(current.fields || {}), [key]: value } } : current));
+  };
+
+  const confirmSaveDraft = () => {
+    if (!saveDraft) return;
+    const result = actions.saveAiChatRecord({
+      target: saveDraft.target,
+      fields: saveDraft.fields,
+      aiOrigin: {
+        chatId: saveDraft.entry.id,
+        userMessage: saveDraft.entry.userMessage || "",
+        generatedAt: saveDraft.entry.generatedAt,
+        source: saveDraft.entry.source,
+      },
+    });
+    if (result?.ok) {
+      setSaveDraft(null);
+      setSaveError("");
+    } else {
+      setSaveError(result?.error || "Could not save this AI response.");
+    }
+  };
 
   if (!open) return null;
 
@@ -237,6 +293,17 @@ export default function AIAssistantDrawer({ open, onClose }) {
               <div className={`ai-chat-msg ${entry.role}`} key={entry.id}>
                 <div className="xs ct3">{String(entry.role).toLowerCase() === "user" ? "You" : `SiteForge AI · ${sourceLabel(entry.source)}`}</div>
                 <div className="sm">{entry.text}</div>
+                {entry.role === "assistant" ? (
+                  <div className="fx" style={{ gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                    {detectSaveTargets(entry.userMessage || "", entry.text)
+                      .filter((target) => canSaveAiTarget(state.session.role, target))
+                      .map((target) => (
+                        <Button key={`${entry.id}-${target}`} small onClick={() => openSaveDraft(entry, target)}>
+                          {SAVE_TARGET_LABELS[target]}
+                        </Button>
+                      ))}
+                  </div>
+                ) : null}
               </div>
             ))}
             {!chat.length ? <div className="xs ct3">Try: “Draft a client variation summary for the footing water ingress.”</div> : null}
@@ -262,7 +329,10 @@ export default function AIAssistantDrawer({ open, onClose }) {
 	                  openaiProxyUrl: aiConfig.openaiProxyUrl,
 	                  allowInDemo: true,
 	                });
-                setChat((current) => [...current, { id: `a-${Date.now()}`, role: "assistant", text: result.text, source: result.source }]);
+                setChat((current) => [
+                  ...current,
+                  { id: `a-${Date.now()}`, role: "assistant", text: result.text, source: result.source, userMessage: outgoing.text, generatedAt: new Date().toISOString() },
+                ]);
                 setLoading(false);
               }}
             >
@@ -270,6 +340,101 @@ export default function AIAssistantDrawer({ open, onClose }) {
             </Button>
           </div>
         </div>
+        <Modal open={Boolean(saveDraft)} close={() => setSaveDraft(null)} title={saveDraft ? SAVE_TARGET_LABELS[saveDraft.target] : "Save AI response"} wide>
+          {saveDraft ? (
+            <div>
+              <div className="fx mb8" style={{ gap: 8, alignItems: "center" }}>
+                <Badge tone={saveDraft.fields?.source === "openai" || saveDraft.fields?.source === "claude" ? "passed" : "medium"}>
+                  {saveDraft.loading ? "Extracting fields..." : sourceLabel(saveDraft.fields?.source)}
+                </Badge>
+                <span className="xs ct3">Review before saving. SiteForge never saves the chat output without confirmation.</span>
+              </div>
+              <div className="ff">
+                <label>Title</label>
+                <input value={saveDraft.fields?.title || ""} onChange={(event) => updateSaveField("title", event.target.value)} />
+              </div>
+              <div className="ff">
+                <label>Description</label>
+                <textarea value={saveDraft.fields?.description || ""} onChange={(event) => updateSaveField("description", event.target.value)} />
+              </div>
+              <div className="g2">
+                <div className="ff">
+                  <label>Cost impact</label>
+                  <input value={saveDraft.fields?.costImpact || ""} onChange={(event) => updateSaveField("costImpact", event.target.value)} />
+                </div>
+                <div className="ff">
+                  <label>Time impact (days)</label>
+                  <input value={saveDraft.fields?.timeImpact || ""} onChange={(event) => updateSaveField("timeImpact", event.target.value)} />
+                </div>
+              </div>
+              <div className="g2">
+                <div className="ff">
+                  <label>Trade</label>
+                  <input value={saveDraft.fields?.trade || ""} onChange={(event) => updateSaveField("trade", event.target.value)} />
+                </div>
+                <div className="ff">
+                  <label>Priority</label>
+                  <select value={saveDraft.fields?.priority || "medium"} onChange={(event) => updateSaveField("priority", event.target.value)}>
+                    {["low", "medium", "high", "critical"].map((priority) => (
+                      <option key={priority}>{priority}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              {saveDraft.target === "rfi" ? (
+                <div className="ff">
+                  <label>To</label>
+                  <input value={saveDraft.fields?.to || ""} onChange={(event) => updateSaveField("to", event.target.value)} />
+                </div>
+              ) : null}
+              {saveDraft.target === "procurement" ? (
+                <div className="g2">
+                  <div className="ff">
+                    <label>Quantity</label>
+                    <input value={saveDraft.fields?.quantity || ""} onChange={(event) => updateSaveField("quantity", event.target.value)} />
+                  </div>
+                  <div className="ff">
+                    <label>Supplier</label>
+                    <input value={saveDraft.fields?.supplier || ""} onChange={(event) => updateSaveField("supplier", event.target.value)} />
+                  </div>
+                </div>
+              ) : null}
+              {saveDraft.target === "diary" ? (
+                <>
+                  <div className="g2">
+                    <div className="ff">
+                      <label>Weather</label>
+                      <input value={saveDraft.fields?.weather || ""} onChange={(event) => updateSaveField("weather", event.target.value)} />
+                    </div>
+                    <div className="ff">
+                      <label>Crew</label>
+                      <input value={saveDraft.fields?.crew || ""} onChange={(event) => updateSaveField("crew", event.target.value)} />
+                    </div>
+                  </div>
+                  <div className="ff">
+                    <label>Safety</label>
+                    <input value={saveDraft.fields?.safety || ""} onChange={(event) => updateSaveField("safety", event.target.value)} />
+                  </div>
+                  <div className="ff">
+                    <label>Delays</label>
+                    <input value={saveDraft.fields?.delays || ""} onChange={(event) => updateSaveField("delays", event.target.value)} />
+                  </div>
+                  <label className="chk">
+                    <input type="checkbox" checked={Boolean(saveDraft.fields?.rainEvent)} onChange={(event) => updateSaveField("rainEvent", event.target.checked)} />
+                    Rain event
+                  </label>
+                </>
+              ) : null}
+              {saveError ? <div className="banner critical">{saveError}</div> : null}
+              <div className="fa">
+                <Button onClick={() => setSaveDraft(null)}>Cancel</Button>
+                <Button tone="bt-p" onClick={confirmSaveDraft} disabled={saveDraft.loading}>
+                  Save record
+                </Button>
+              </div>
+            </div>
+          ) : null}
+        </Modal>
       </div>
     </div>
   );
